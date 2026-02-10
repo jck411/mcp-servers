@@ -1,0 +1,43 @@
+# mcp-server@.service — systemd template unit for MCP servers
+#
+# Usage:
+#   sudo cp mcp-server@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mcp-server@calculator
+#   sudo systemctl enable --now mcp-server@shell_control
+#   sudo systemctl enable --now mcp-server@playwright
+#
+# The %i instance name maps to the server module:
+#   mcp-server@calculator  → python -m servers.calculator
+#   mcp-server@shell_control → python -m servers.shell_control
+#
+# Port must be set per-instance via an override or environment file.
+# See /opt/mcp-servers/.env for port assignments.
+
+[Unit]
+Description=MCP Server — %i
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mcp-servers
+EnvironmentFile=/opt/mcp-servers/.env
+ExecStart=/opt/mcp-servers/.venv/bin/python -m servers.%i \
+    --transport streamable-http \
+    --host 0.0.0.0 \
+    --port ${MCP_PORT_%i}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-%i
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
