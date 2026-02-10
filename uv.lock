@@ -1420,6 +1420,12 @@ monarch = [
     { name = "gql" },
     { name = "monarchmoney" },
 ]
+notes = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
 pdf = [
     { name = "kreuzberg", extra = ["easyocr"] },
 ]
@@ -1443,7 +1449,8 @@ requires-dist = [
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'calendar'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gdrive'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gmail'" },
-    { name = "mcp-servers", extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
+    { name = "mcp-servers", extras = ["google"], marker = "extra == 'notes'" },
+    { name = "mcp-servers", extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
     { name = "monarchmoney", marker = "extra == 'monarch'", specifier = ">=0.1.12" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.57.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
@@ -1452,7 +1459,7 @@ requires-dist = [
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
-provides-extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "spotify", "monarch", "pdf", "all", "dev"]
+provides-extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf", "all", "dev"]
 
 [[package]]
 name = "mdurl"
