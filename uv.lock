@@ -1427,6 +1427,7 @@ notes = [
     { name = "google-auth-oauthlib" },
 ]
 pdf = [
+    { name = "httpx" },
     { name = "kreuzberg", extra = ["easyocr"] },
 ]
 playwright = [
@@ -1445,6 +1446,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", marker = "extra == 'google'", specifier = ">=1.0.0" },
     { name = "gql", marker = "extra == 'monarch'", specifier = "<3.5.0" },
     { name = "httpx", marker = "extra == 'gdrive'", specifier = ">=0.27.0" },
+    { name = "httpx", marker = "extra == 'pdf'", specifier = ">=0.27.0" },
     { name = "kreuzberg", extras = ["chunking", "entity-extraction", "gmft", "easyocr", "langdetect"], marker = "extra == 'pdf'", specifier = ">=3.20.2" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'calendar'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gdrive'" },

@@ -30,7 +30,7 @@ declare -A PORT_MAP=(
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes")
+DEFAULT_SERVERS=("calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

@@ -47,6 +47,7 @@ monarch = [
 ]
 pdf = [
     "kreuzberg[chunking,entity-extraction,gmft,easyocr,langdetect]>=3.20.2",
+    "httpx>=0.27.0",
 ]
 all = [
     "mcp-servers[shell,playwright,google,gdrive,gmail,calendar,notes,spotify,monarch,pdf]",
