@@ -32,6 +32,9 @@ gdrive = [
 gmail = [
     "mcp-servers[google]",
 ]
+calendar = [
+    "mcp-servers[google]",
+]
 spotify = [
     "spotipy>=2.25.1",
 ]
@@ -43,7 +46,7 @@ pdf = [
     "kreuzberg[chunking,entity-extraction,gmft,easyocr,langdetect]>=3.20.2",
 ]
 all = [
-    "mcp-servers[shell,playwright,google,gdrive,gmail,spotify,monarch,pdf]",
+    "mcp-servers[shell,playwright,google,gdrive,gmail,calendar,spotify,monarch,pdf]",
 ]
 dev = [
     "pytest>=8.4.2",

@@ -1386,6 +1386,12 @@ all = [
     { name = "playwright" },
     { name = "spotipy" },
 ]
+calendar = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1434,9 +1440,10 @@ requires-dist = [
     { name = "gql", marker = "extra == 'monarch'", specifier = "<3.5.0" },
     { name = "httpx", marker = "extra == 'gdrive'", specifier = ">=0.27.0" },
     { name = "kreuzberg", extras = ["chunking", "entity-extraction", "gmft", "easyocr", "langdetect"], marker = "extra == 'pdf'", specifier = ">=3.20.2" },
+    { name = "mcp-servers", extras = ["google"], marker = "extra == 'calendar'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gdrive'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gmail'" },
-    { name = "mcp-servers", extras = ["shell", "playwright", "google", "gdrive", "gmail", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
+    { name = "mcp-servers", extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
     { name = "monarchmoney", marker = "extra == 'monarch'", specifier = ">=0.1.12" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.57.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
@@ -1445,7 +1452,7 @@ requires-dist = [
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
-provides-extras = ["shell", "playwright", "google", "gdrive", "gmail", "spotify", "monarch", "pdf", "all", "dev"]
+provides-extras = ["shell", "playwright", "google", "gdrive", "gmail", "calendar", "spotify", "monarch", "pdf", "all", "dev"]
 
 [[package]]
 name = "mdurl"
