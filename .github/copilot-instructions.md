@@ -1,64 +1,120 @@
 # Copilot Instructions — mcp-servers
 
-Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd template units.
+Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
 ## Architecture
 
 - Each server is a single file in `servers/<name>.py` using FastMCP
-- Shared helpers live in `shared/` — auth modules, identifier normalizers, etc.
+- Shared helpers live in `shared/` (auth modules, normalizers, etc.)
 - Zero imports from Backend_FastAPI — every server must be fully standalone
-- Servers run via `python -m servers.<name> --transport streamable-http --host 0.0.0.0 --port <PORT>`
-- The FastMCP instance must be named `mcp = FastMCP("<name>")`
-- Every server exposes `run()` and `main()` entrypoints plus `DEFAULT_HTTP_PORT`
+- `mcp = FastMCP("<name>")` — every server exposes `run()`, `main()`, `DEFAULT_HTTP_PORT`
+- All tool names prefixed: `@mcp.tool("<name>_do_thing")`
 
-## Adding a New Server
+## Adding a New Server — Do All Steps, No Questions
 
-- Create `servers/<name>.py` following the pattern in existing servers
-- Prefix all tool names with the server name: `@mcp.tool("<name>_do_thing")`
-- Add a `[project.optional-dependencies]` entry in `pyproject.toml` if the server needs extra packages
-- Add the server to the `all` extra group
-- Add port to `PORT_MAP` in `deploy/setup-systemd.sh`
+When the user asks to add/port a server, execute every step below without asking for confirmation. Read the source file, adapt it to be standalone, and deploy end-to-end.
+
+### 1. Create the server file
+
+- Create `servers/<name>.py` following the pattern in `servers/spotify.py` or `servers/calculator.py`
+- Replace all Backend_FastAPI imports with standalone equivalents from `shared/`
+- If `shared/` is missing a needed helper, implement it there first
+- Remove any tools that depend on Backend_FastAPI services that can't be made standalone (e.g., AttachmentService)
+- Keep `DEFAULT_HTTP_PORT` matching the port in PORT_MAP below
+
+### 2. Update pyproject.toml
+
+- Add `[project.optional-dependencies]` entry for the server if it needs extra packages
+- Add the new extra to the `all` group
+
+### 3. Update deploy scripts
+
+- Add port to `PORT_MAP` in `deploy/setup-systemd.sh` (pick next available)
 - Add server name to `DEFAULT_SERVERS` in both `deploy/setup-systemd.sh` and `deploy/deploy.sh`
-- Add `.env.spotify`-style port reference to `.env.example` comments
+
+### 4. Install and verify locally
+
+- `uv sync --extra <name>` in the local venv
+- `python -c "from servers.<name> import mcp, DEFAULT_HTTP_PORT, run, main"` — must succeed
+- Verify no `from backend` or `import backend` in the source
+
+### 5. Commit and push
+
+- `git add -A && git commit -m "<descriptive message>" && git push origin master`
+
+### 6. Deploy to LXC
+
+Run these commands in sequence (no questions, no pauses):
+```
+ssh root@192.168.1.110 "cd /opt/mcp-servers && git pull --ff-only && uv sync --extra <name>"
+```
+
+If the server needs credential files (e.g., Google OAuth):
+```
+scp <local_cred_files> root@192.168.1.110:/opt/mcp-servers/credentials/
+scp <local_token_files> root@192.168.1.110:/opt/mcp-servers/data/tokens/
+ssh root@192.168.1.110 "chown -R mcp:mcp /opt/mcp-servers/credentials/ /opt/mcp-servers/data/"
+```
+
+Start the systemd service:
+```
+ssh root@192.168.1.110 "bash /opt/mcp-servers/deploy/setup-systemd.sh <name>"
+```
+
+### 7. Trigger backend discovery
+
+The Backend_FastAPI auto-discovers servers on ports 9001–9015 when refreshed:
+```
+curl -sk -X POST https://127.0.0.1:8000/api/mcp/servers/refresh -H "Content-Type: application/json" -H "Accept: application/json"
+```
+Verify the server appears with `connected: true` and correct tool count in the response.
+
+### 8. Confirm done
+
+Report: server name, port, tool count, connected status. One-liner, no summary doc.
 
 ## Port Assignments
 
-- Ports are assigned in `deploy/setup-systemd.sh` PORT_MAP (9001–9012+)
-- Per-instance env files `.env.<name>` contain `MCP_PORT=<port>`
-- Never reuse an existing port; pick the next available
+Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 
-## Deployment
+| Server | Port |
+|--------|------|
+| shell_control | 9001 |
+| housekeeping | 9002 |
+| calculator | 9003 |
+| calendar | 9004 |
+| gmail | 9005 |
+| gdrive | 9006 |
+| pdf | 9007 |
+| monarch | 9008 |
+| notes | 9009 |
+| spotify | 9010 |
+| playwright | 9011 |
+| kiosk_clock_tools | 9012 |
 
-- Target: Proxmox LXC CT 110 at 192.168.1.110, repo at `/opt/mcp-servers`
-- SSH key auth configured for both `root` and `mcp` users
-- Service user is `mcp`; all runtime files must be owned by `mcp:mcp`
-- Package manager is `uv` — never use pip directly
-- Use `uv sync --extra <name>` for selective installs; `--extra all` pulls heavy deps (torch)
-- Systemd template: `mcp-server@.service` — enable with `systemctl enable --now mcp-server@<name>`
-- Credentials go in `credentials/`, tokens in `data/tokens/` — both are gitignored
-- After code push, deploy via SSH: `git pull`, `uv sync`, copy credentials, restart service
+Next available: 9013
 
-## Credentials & Secrets
+## Credential Sources
 
-- NEVER commit credentials, tokens, or `.env` files — `.gitignore` covers `credentials/*.json`, `data/`, `.env`, `.env.*`
-- `.env.example` is the only tracked env file
-- Auth helpers in `shared/` resolve paths relative to repo root via `Path(__file__).resolve().parent.parent`
-- Credential files are SCP'd to the container separately from git
+When porting a server that needs credentials from Backend_FastAPI:
+- Google OAuth client secret: `/home/human/REPOS/Backend_FastAPI/credentials/client_secret_pihome123.json`
+- Google OAuth token: `/home/human/REPOS/Backend_FastAPI/data/tokens/jck411_at_gmail_com.json`
+- Spotify creds: already in this repo's `credentials/` and `data/tokens/`
+- Copy to this repo locally AND scp to LXC — both are gitignored
 
 ## Code Style
 
-- Python ≥3.11; use `from __future__ import annotations`
-- Ruff for linting: line-length 100, rules E/F/W/I/UP/B/SIM
-- Use `async def` for all MCP tool functions
-- Type hints on all function signatures
-- Use imperative docstrings: "Search tracks" not "This function searches tracks"
+- Python ≥3.11; `from __future__ import annotations`
+- Ruff: line-length 100, rules E/F/W/I/UP/B/SIM
+- `async def` for all MCP tool functions
+- Type hints on all signatures
+- Imperative docstrings: "Search tracks" not "This function searches tracks"
 
-## Scripts
+## Deployment Target
 
-- Use `#!/usr/bin/env bash` and `set -euo pipefail` for all shell scripts
-- Deploy scripts live in `deploy/`
-
-## Testing
-
-- Tests in `tests/` using pytest with `asyncio_mode = "auto"`
-- Install dev deps: `uv sync --extra dev`
+- LXC CT 110 at 192.168.1.110, repo at `/opt/mcp-servers`
+- SSH key auth for `root` and `mcp` users
+- Service user: `mcp` — all runtime files owned by `mcp:mcp`
+- Package manager: `uv` — never pip
+- Systemd template: `mcp-server@.service`
+- NEVER commit credentials, tokens, or `.env` files
