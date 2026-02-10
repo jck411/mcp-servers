@@ -2,6 +2,15 @@
 
 Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
+## Local Development Workflow
+
+- Edit servers directly in this repo — it is the source of truth for all MCP server code
+- Run locally to test: `python -m servers.<name> --transport streamable-http --host 127.0.0.1 --port <port>`
+- Ctrl+C and rerun after edits (~1-second feedback loop)
+- Auto-reload with watchfiles: `watchfiles "python -m servers.<name> --transport streamable-http --host 127.0.0.1 --port <port>" servers/ shared/`
+- Smoke-test tools via curl: `curl -s http://127.0.0.1:<port>/mcp -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+- Only deploy to LXC once local testing passes — never iterate on the LXC directly
+
 ## Architecture
 
 - Each server is a single file in `servers/<name>.py` using FastMCP
