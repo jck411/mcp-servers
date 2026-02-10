@@ -1380,6 +1380,7 @@ all = [
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
     { name = "gql" },
+    { name = "httpx" },
     { name = "kreuzberg", extra = ["easyocr"] },
     { name = "monarchmoney" },
     { name = "playwright" },
@@ -1389,6 +1390,13 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+]
+gdrive = [
+    { name = "google-api-python-client" },
+    { name = "google-auth" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+    { name = "httpx" },
 ]
 google = [
     { name = "google-api-python-client" },
@@ -1418,8 +1426,10 @@ requires-dist = [
     { name = "google-auth-httplib2", marker = "extra == 'google'", specifier = ">=0.1.0" },
     { name = "google-auth-oauthlib", marker = "extra == 'google'", specifier = ">=1.0.0" },
     { name = "gql", marker = "extra == 'monarch'", specifier = "<3.5.0" },
+    { name = "httpx", marker = "extra == 'gdrive'", specifier = ">=0.27.0" },
     { name = "kreuzberg", extras = ["chunking", "entity-extraction", "gmft", "easyocr", "langdetect"], marker = "extra == 'pdf'", specifier = ">=3.20.2" },
-    { name = "mcp-servers", extras = ["shell", "playwright", "google", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
+    { name = "mcp-servers", extras = ["google"], marker = "extra == 'gdrive'" },
+    { name = "mcp-servers", extras = ["shell", "playwright", "google", "gdrive", "spotify", "monarch", "pdf"], marker = "extra == 'all'" },
     { name = "monarchmoney", marker = "extra == 'monarch'", specifier = ">=0.1.12" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.57.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
@@ -1428,7 +1438,7 @@ requires-dist = [
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
     { name = "uvicorn", specifier = ">=0.30.0" },
 ]
-provides-extras = ["shell", "playwright", "google", "spotify", "monarch", "pdf", "all", "dev"]
+provides-extras = ["shell", "playwright", "google", "gdrive", "spotify", "monarch", "pdf", "all", "dev"]
 
 [[package]]
 name = "mdurl"

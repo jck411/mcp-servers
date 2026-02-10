@@ -25,6 +25,10 @@ google = [
     "google-auth-oauthlib>=1.0.0",
     "google-auth-httplib2>=0.1.0",
 ]
+gdrive = [
+    "mcp-servers[google]",
+    "httpx>=0.27.0",
+]
 spotify = [
     "spotipy>=2.25.1",
 ]
@@ -36,7 +40,7 @@ pdf = [
     "kreuzberg[chunking,entity-extraction,gmft,easyocr,langdetect]>=3.20.2",
 ]
 all = [
-    "mcp-servers[shell,playwright,google,spotify,monarch,pdf]",
+    "mcp-servers[shell,playwright,google,gdrive,spotify,monarch,pdf]",
 ]
 dev = [
     "pytest>=8.4.2",
