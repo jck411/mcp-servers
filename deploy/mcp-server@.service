@@ -1,6 +1,6 @@
 # mcp-server@.service — systemd template unit for MCP servers
 #
-# Usage:
+# Installation:
 #   sudo cp mcp-server@.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now mcp-server@calculator
@@ -8,11 +8,15 @@
 #   sudo systemctl enable --now mcp-server@playwright
 #
 # The %i instance name maps to the server module:
-#   mcp-server@calculator  → python -m servers.calculator
+#   mcp-server@calculator    → python -m servers.calculator  (port from override)
 #   mcp-server@shell_control → python -m servers.shell_control
 #
-# Port must be set per-instance via an override or environment file.
-# See /opt/mcp-servers/.env for port assignments.
+# Ports are set via per-instance overrides. After creating the unit:
+#   sudo systemctl edit mcp-server@calculator
+#   [Service]
+#   Environment=MCP_PORT=9003
+#
+# Or use the setup script: deploy/setup-systemd.sh
 
 [Unit]
 Description=MCP Server — %i
@@ -21,12 +25,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=mcp
+Group=mcp
 WorkingDirectory=/opt/mcp-servers
 EnvironmentFile=/opt/mcp-servers/.env
+EnvironmentFile=-/opt/mcp-servers/.env.%i
 ExecStart=/opt/mcp-servers/.venv/bin/python -m servers.%i \
     --transport streamable-http \
     --host 0.0.0.0 \
-    --port ${MCP_PORT_%i}
+    --port ${MCP_PORT}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -36,7 +43,7 @@ SyslogIdentifier=mcp-%i
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data
 PrivateTmp=true
 
 [Install]

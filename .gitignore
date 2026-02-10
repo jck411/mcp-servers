@@ -7,9 +7,12 @@ dist/
 build/
 .eggs/
 .env
+.env.*
+!.env.example
 credentials/*.json
 credentials/**/*.json
 logs/
+data/
 *.bak
 *.tmp
 .ruff_cache/

@@ -9,7 +9,6 @@ TODO: Extract from Backend_FastAPI when migrating Google-dependent servers.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 # Default credentials directory (relative to repo root)

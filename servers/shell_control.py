@@ -67,7 +67,11 @@ _NOCONFIRM_PATTERNS: list[tuple[str, str, str]] = [
     # Fedora/RHEL: dnf, yum
     (r"^(sudo\s+)?(dnf|yum)\s+(install|remove|erase|upgrade|update)", "-y", "end"),
     # Debian/Ubuntu: apt, apt-get
-    (r"^(sudo\s+)?(apt|apt-get)\s+(install|remove|purge|upgrade|dist-upgrade)", "-y", "end"),
+    (
+        r"^(sudo\s+)?(apt|apt-get)\s+(install|remove|purge|upgrade|dist-upgrade)",
+        "-y",
+        "end",
+    ),
     # Flatpak
     (r"^(sudo\s+)?flatpak\s+(install|uninstall|update)", "-y", "end"),
     # Snap
@@ -79,16 +83,37 @@ _NOCONFIRM_PATTERNS: list[tuple[str, str, str]] = [
 
 # Commands that are inherently interactive and should be rejected/warned
 _INTERACTIVE_COMMANDS: list[tuple[str, str]] = [
-    (r"^\s*vim\s", "vim requires interactive input; use 'sed' or 'cat <<EOF' for file edits"),
-    (r"^\s*nano\s", "nano requires interactive input; use 'sed' or 'cat <<EOF' for file edits"),
-    (r"^\s*vi\s", "vi requires interactive input; use 'sed' or 'cat <<EOF' for file edits"),
-    (r"^\s*less\s", "less requires interactive input; use 'cat' or 'head/tail' instead"),
-    (r"^\s*more\s", "more requires interactive input; use 'cat' or 'head/tail' instead"),
+    (
+        r"^\s*vim\s",
+        "vim requires interactive input; use 'sed' or 'cat <<EOF' for file edits",
+    ),
+    (
+        r"^\s*nano\s",
+        "nano requires interactive input; use 'sed' or 'cat <<EOF' for file edits",
+    ),
+    (
+        r"^\s*vi\s",
+        "vi requires interactive input; use 'sed' or 'cat <<EOF' for file edits",
+    ),
+    (
+        r"^\s*less\s",
+        "less requires interactive input; use 'cat' or 'head/tail' instead",
+    ),
+    (
+        r"^\s*more\s",
+        "more requires interactive input; use 'cat' or 'head/tail' instead",
+    ),
     (r"^\s*top$", "top requires interactive input; use 'top -bn1' for non-interactive"),
     (r"^\s*htop$", "htop requires interactive input; use 'top -bn1' for system stats"),
-    (r"^\s*(sudo\s+)?visudo", "visudo requires interactive input; use 'echo ... | sudo tee' for sudoers"),
+    (
+        r"^\s*(sudo\s+)?visudo",
+        "visudo requires interactive input; use 'echo ... | sudo tee' for sudoers",
+    ),
     (r"^\s*passwd(\s|$)", "passwd requires interactive input"),
-    (r"^\s*ssh\s+(?!.*-o\s*BatchMode)", "ssh may prompt for password; use ssh-agent or BatchMode=yes"),
+    (
+        r"^\s*ssh\s+(?!.*-o\s*BatchMode)",
+        "ssh may prompt for password; use ssh-agent or BatchMode=yes",
+    ),
     (r"\|\s*less(\s|$)", "piping to less requires interaction; remove '| less'"),
     (r"\|\s*more(\s|$)", "piping to more requires interaction; remove '| more'"),
 ]
@@ -122,7 +147,9 @@ def _make_command_noninteractive(command: str) -> tuple[str, list[str]]:
                     match = re.search(pattern, modified, re.IGNORECASE)
                     if match:
                         insert_pos = match.end()
-                        modified = f"{modified[:insert_pos]} {flag}{modified[insert_pos:]}"
+                        modified = (
+                            f"{modified[:insert_pos]} {flag}{modified[insert_pos:]}"
+                        )
                 warnings.append(f"ℹ️ Auto-added '{flag}' for headless operation")
             break  # Only apply one pattern
 
@@ -1126,7 +1153,10 @@ def _has_gui_session() -> bool:
     uid = os.getuid()
     runtime_dir = Path(f"/run/user/{uid}")
     if runtime_dir.exists():
-        if any((runtime_dir / name).exists() for name in ("wayland-0", "wayland-1", "wayland-2")):
+        if any(
+            (runtime_dir / name).exists()
+            for name in ("wayland-0", "wayland-1", "wayland-2")
+        ):
             return True
 
     return Path("/tmp/.X11-unix").exists()
@@ -1587,7 +1617,9 @@ async def shell_session(
 
     try:
         sess = await _get_or_create_session(session_id)
-        output, exit_code, cwd = await _run_in_session(sess, modified_command, timeout_seconds)
+        output, exit_code, cwd = await _run_in_session(
+            sess, modified_command, timeout_seconds
+        )
         duration_ms = (time.perf_counter() - start) * 1000
 
         result: dict = {
@@ -1630,7 +1662,9 @@ async def shell_session(
                 "error": str(e),
                 "session_id": sess.session_id if sess else session_id,
                 "duration_ms": duration_ms,
-                "command_executed": modified_command if command_was_modified else command,
+                "command_executed": modified_command
+                if command_was_modified
+                else command,
                 "hints": timeout_hints,
             }
         )
@@ -1647,7 +1681,9 @@ async def shell_session(
                 "error": str(e),
                 "session_id": sess.session_id if sess else session_id,
                 "duration_ms": duration_ms,
-                "automation_notes": automation_warnings if automation_warnings else None,
+                "automation_notes": automation_warnings
+                if automation_warnings
+                else None,
             }
         )
 
@@ -1933,7 +1969,9 @@ async def _refresh_system_inventory() -> dict[str, object]:
         except (FileNotFoundError, ValueError, RuntimeError):
             current_profile = {}
         merged_profile = _deep_merge(current_profile, lean_update)
-        merged_profile["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        merged_profile["updated_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        )
         _save_profile(merged_profile)
 
     return inventory_update
@@ -1989,7 +2027,9 @@ async def _run_maintenance_script(script_key: str, timeout_seconds: int = 300) -
         output = stdout_bytes.decode("utf-8", errors="replace")
 
         # Smart truncate for LLM consumption
-        truncated_output, was_truncated = _smart_truncate(output, success=(exit_code == 0))
+        truncated_output, was_truncated = _smart_truncate(
+            output, success=(exit_code == 0)
+        )
 
         return {
             "status": "ok" if exit_code == 0 else "error",
@@ -2067,50 +2107,64 @@ async def file_edit(
 
     valid_ops = ("read", "write", "patch", "append")
     if operation not in valid_ops:
-        return json.dumps({
-            "status": "error",
-            "error": f"Invalid operation: {operation}. Must be one of: {valid_ops}",
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"Invalid operation: {operation}. Must be one of: {valid_ops}",
+            }
+        )
 
     # === READ ===
     if operation == "read":
         if not file_path.exists():
-            return json.dumps({
-                "status": "error",
-                "error": f"File not found: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"File not found: {file_path}",
+                }
+            )
         if not file_path.is_file():
-            return json.dumps({
-                "status": "error",
-                "error": f"Path is not a file: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Path is not a file: {file_path}",
+                }
+            )
         try:
             content_read = file_path.read_text(encoding="utf-8")
-            return json.dumps({
-                "status": "ok",
-                "operation": "read",
-                "path": str(file_path),
-                "size_bytes": len(content_read.encode("utf-8")),
-                "content": content_read,
-            })
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "operation": "read",
+                    "path": str(file_path),
+                    "size_bytes": len(content_read.encode("utf-8")),
+                    "content": content_read,
+                }
+            )
         except UnicodeDecodeError:
-            return json.dumps({
-                "status": "error",
-                "error": "File is not valid UTF-8 text",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "File is not valid UTF-8 text",
+                }
+            )
         except PermissionError:
-            return json.dumps({
-                "status": "error",
-                "error": f"Permission denied: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Permission denied: {file_path}",
+                }
+            )
 
     # === WRITE ===
     if operation == "write":
         if content is None:
-            return json.dumps({
-                "status": "error",
-                "error": "content is required for write operation",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "content is required for write operation",
+                }
+            )
 
         # Create parent dirs if needed
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2121,68 +2175,85 @@ async def file_edit(
             try:
                 bak_path.write_bytes(file_path.read_bytes())
             except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "error": f"Failed to create backup: {e}",
-                })
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Failed to create backup: {e}",
+                    }
+                )
 
         # Atomic write via temp file
         tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         try:
             tmp_path.write_text(content, encoding="utf-8")
             tmp_path.replace(file_path)
-            return json.dumps({
-                "status": "ok",
-                "operation": "write",
-                "path": str(file_path),
-                "size_bytes": len(content.encode("utf-8")),
-                "backup_created": backup and file_path.with_suffix(
-                    file_path.suffix + ".bak"
-                ).exists(),
-            })
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "operation": "write",
+                    "path": str(file_path),
+                    "size_bytes": len(content.encode("utf-8")),
+                    "backup_created": backup
+                    and file_path.with_suffix(file_path.suffix + ".bak").exists(),
+                }
+            )
         except PermissionError:
-            return json.dumps({
-                "status": "error",
-                "error": f"Permission denied: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Permission denied: {file_path}",
+                }
+            )
         except Exception as e:
-            return json.dumps({
-                "status": "error",
-                "error": f"Write failed: {e}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Write failed: {e}",
+                }
+            )
 
     # === PATCH ===
     if operation == "patch":
         if find is None or replace is None:
-            return json.dumps({
-                "status": "error",
-                "error": "find and replace are required for patch operation",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "find and replace are required for patch operation",
+                }
+            )
         if not file_path.exists():
-            return json.dumps({
-                "status": "error",
-                "error": f"File not found: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"File not found: {file_path}",
+                }
+            )
 
         try:
             original = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            return json.dumps({
-                "status": "error",
-                "error": "File is not valid UTF-8 text",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "File is not valid UTF-8 text",
+                }
+            )
         except PermissionError:
-            return json.dumps({
-                "status": "error",
-                "error": f"Permission denied: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Permission denied: {file_path}",
+                }
+            )
 
         occurrences = original.count(find)
         if occurrences == 0:
-            return json.dumps({
-                "status": "error",
-                "error": f"Pattern not found in file: {find[:100]}...",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Pattern not found in file: {find[:100]}...",
+                }
+            )
 
         patched = original.replace(find, replace)
 
@@ -2192,36 +2263,44 @@ async def file_edit(
             try:
                 bak_path.write_text(original, encoding="utf-8")
             except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "error": f"Failed to create backup: {e}",
-                })
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Failed to create backup: {e}",
+                    }
+                )
 
         # Atomic write
         tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         try:
             tmp_path.write_text(patched, encoding="utf-8")
             tmp_path.replace(file_path)
-            return json.dumps({
-                "status": "ok",
-                "operation": "patch",
-                "path": str(file_path),
-                "occurrences_replaced": occurrences,
-                "backup_created": backup,
-            })
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "operation": "patch",
+                    "path": str(file_path),
+                    "occurrences_replaced": occurrences,
+                    "backup_created": backup,
+                }
+            )
         except Exception as e:
-            return json.dumps({
-                "status": "error",
-                "error": f"Write failed: {e}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Write failed: {e}",
+                }
+            )
 
     # === APPEND ===
     if operation == "append":
         if content is None:
-            return json.dumps({
-                "status": "error",
-                "error": "content is required for append operation",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "content is required for append operation",
+                }
+            )
 
         # Create parent dirs if needed
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2233,10 +2312,12 @@ async def file_edit(
                 bak_path = file_path.with_suffix(file_path.suffix + ".bak")
                 bak_path.write_text(original, encoding="utf-8")
             except Exception as e:
-                return json.dumps({
-                    "status": "error",
-                    "error": f"Failed to create backup: {e}",
-                })
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Failed to create backup: {e}",
+                    }
+                )
         else:
             original = ""
 
@@ -2245,10 +2326,12 @@ async def file_edit(
             try:
                 original = file_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                return json.dumps({
-                    "status": "error",
-                    "error": "File is not valid UTF-8 text",
-                })
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": "File is not valid UTF-8 text",
+                    }
+                )
 
         new_content = original + content
 
@@ -2257,24 +2340,30 @@ async def file_edit(
         try:
             tmp_path.write_text(new_content, encoding="utf-8")
             tmp_path.replace(file_path)
-            return json.dumps({
-                "status": "ok",
-                "operation": "append",
-                "path": str(file_path),
-                "appended_bytes": len(content.encode("utf-8")),
-                "total_size_bytes": len(new_content.encode("utf-8")),
-                "backup_created": backup,
-            })
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "operation": "append",
+                    "path": str(file_path),
+                    "appended_bytes": len(content.encode("utf-8")),
+                    "total_size_bytes": len(new_content.encode("utf-8")),
+                    "backup_created": backup,
+                }
+            )
         except PermissionError:
-            return json.dumps({
-                "status": "error",
-                "error": f"Permission denied: {file_path}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Permission denied: {file_path}",
+                }
+            )
         except Exception as e:
-            return json.dumps({
-                "status": "error",
-                "error": f"Append failed: {e}",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"Append failed: {e}",
+                }
+            )
 
     # Should never reach here
     return json.dumps({"status": "error", "error": "Unknown operation"})
@@ -2380,6 +2469,7 @@ def run(
 
 def main() -> None:  # pragma: no cover - CLI helper
     import argparse
+
     parser = argparse.ArgumentParser(description="Shell Control MCP Server")
     parser.add_argument(
         "--transport",

@@ -67,25 +67,49 @@ ruff check servers/ shared/
 
 ## Deployment (Proxmox)
 
-See [deploy/](deploy/) for systemd unit templates and deploy script.
+Target: LXC CT 110 at `192.168.1.110` (Debian 13). Full guide: [deploy/PROXMOX_DEPLOY.md](deploy/PROXMOX_DEPLOY.md)
 
 ```bash
-# On Proxmox host:
+# On Proxmox LXC (192.168.1.110):
 git clone https://github.com/jck411/mcp-servers.git /opt/mcp-servers
 cd /opt/mcp-servers
 uv sync --extra all
 
-# Install systemd units
-sudo cp deploy/mcp-server@.service /etc/systemd/system/
-sudo systemctl daemon-reload
-
-# Enable and start servers
-sudo systemctl enable --now mcp-server@calculator
-sudo systemctl enable --now mcp-server@shell_control
-sudo systemctl enable --now mcp-server@playwright
+# Copy shared env and install systemd units
+cp .env.example .env
+sudo ./deploy/setup-systemd.sh
 
 # Check status
-sudo systemctl status mcp-server@calculator
+./deploy/deploy.sh --status
+
+# Deploy updates (pull + sync + restart)
+./deploy/deploy.sh
+```
+
+### Port Assignments
+
+Ports are set via per-instance env files (`.env.calculator`, `.env.shell_control`, etc.), created automatically by `setup-systemd.sh`:
+
+| Server | Port | File |
+|--------|------|------|
+| shell_control | 9001 | `.env.shell_control` |
+| calculator | 9003 | `.env.calculator` |
+| playwright | 9011 | `.env.playwright` |
+
+### Managing Services
+
+```bash
+# Status
+systemctl list-units 'mcp-server@*' --no-pager
+
+# Logs
+journalctl -u mcp-server@calculator -f
+
+# Restart one server
+sudo systemctl restart mcp-server@calculator
+
+# Deploy specific server
+./deploy/deploy.sh calculator
 ```
 
 ## Connecting from Backend
