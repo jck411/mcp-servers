@@ -23,20 +23,22 @@ Each server:
 
 ## Port Assignments
 
-| Server | Port | Status |
-|--------|------|--------|
-| shell-control | 9001 | ✅ Ready |
-| housekeeping | 9002 | 🔜 Later |
-| calculator | 9003 | ✅ Ready |
-| calendar | 9004 | 🔜 Later |
-| gmail | 9005 | 🔜 Later |
-| gdrive | 9006 | 🔜 Later |
-| pdf | 9007 | 🔜 Later |
-| monarch | 9008 | 🔜 Later |
-| notes | 9009 | 🔜 Later |
-| spotify | 9010 | 🔜 Later |
-| playwright | 9011 | ✅ Ready |
-| kiosk-clock-tools | 9012 | 🔜 Later |
+| Server | Port |
+|--------|------|
+| shell-control | 9001 |
+| housekeeping | 9002 |
+| calculator | 9003 |
+| calendar | 9004 |
+| gmail | 9005 |
+| gdrive | 9006 |
+| pdf | 9007 |
+| monarch | 9008 |
+| notes | 9009 |
+| spotify | 9010 |
+| playwright | 9011 |
+| kiosk-clock-tools | 9012 |
+
+All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
 ## Quick Start
 
@@ -85,16 +87,6 @@ sudo ./deploy/setup-systemd.sh
 # Deploy updates (pull + sync + restart)
 ./deploy/deploy.sh
 ```
-
-### Port Assignments
-
-Ports are set via per-instance env files (`.env.calculator`, `.env.shell_control`, etc.), created automatically by `setup-systemd.sh`:
-
-| Server | Port | File |
-|--------|------|------|
-| shell_control | 9001 | `.env.shell_control` |
-| calculator | 9003 | `.env.calculator` |
-| playwright | 9011 | `.env.playwright` |
 
 ### Managing Services
 
