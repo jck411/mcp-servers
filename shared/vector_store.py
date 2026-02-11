@@ -88,7 +88,7 @@ class VectorStore:
         session_id: str | None = None,
         time_range_hours: int | None = None,
         limit: int = 10,
-        min_score: float = 0.4,
+        min_score: float = 0.15,
     ) -> list[ScoredPoint]:
         """Semantic search with metadata filtering."""
         must_conditions: list[FieldCondition] = [

@@ -237,7 +237,7 @@ async def _recall_impl(
     session_id: str | None = None,
     time_range_hours: int | None = None,
     limit: int = 10,
-    min_similarity: float = 0.4,
+    min_similarity: float = 0.15,
 ) -> dict[str, Any]:
     """Search memories for a specific user profile."""
     embeddings, vectors, repo = _require_memory()
@@ -400,7 +400,7 @@ def _register_profile_tools(profile: str) -> None:
         session_id: str | None = None,
         time_range_hours: int | None = None,
         limit: int = 10,
-        min_similarity: float = 0.4,
+        min_similarity: float = 0.15,
         _profile: str = profile,
     ) -> dict[str, Any]:
         return await _recall_impl(
