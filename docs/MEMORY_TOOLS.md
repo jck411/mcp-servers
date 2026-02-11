@@ -2,6 +2,36 @@
 
 The housekeeping MCP server includes semantic long-term memory tools that persist information across conversations. These tools use vector embeddings for similarity search, so you can recall memories using natural language.
 
+## Profile-Based Isolation
+
+Memory tools are created **per-profile**, allowing complete isolation between users:
+
+```
+MEMORY_PROFILES=["jack","sarah"]
+```
+
+This creates separate tool sets:
+- `remember_jack`, `recall_jack`, `forget_jack`, `reflect_jack`, `memory_stats_jack`
+- `remember_sarah`, `recall_sarah`, `forget_sarah`, `reflect_sarah`, `memory_stats_sarah`
+
+Each profile's memories are stored with a unique `user_id` — Jack can never see Sarah's memories and vice versa.
+
+### Backend Integration
+
+Configure your backend to enable only the relevant profile's tools per conversation:
+
+```json
+{
+  "profile": "jack",
+  "disabled_tools": [
+    "remember_sarah", "recall_sarah", "forget_sarah", 
+    "reflect_sarah", "memory_stats_sarah"
+  ]
+}
+```
+
+Or inversely, disable Jack's tools for Sarah's conversations.
+
 ## How It Works
 
 Memory tools are **passive** — the LLM must explicitly call them. They don't automatically capture or retrieve anything. You configure the LLM's behavior via system prompt.
@@ -108,25 +138,27 @@ Returns total count, categories breakdown, oldest/newest timestamps.
 
 ## System Prompt Addition
 
-Add this to your LLM's system prompt to enable memory behavior:
+Add this to your LLM's system prompt to enable memory behavior. Replace `{profile}` with the actual profile name (e.g., `jack`):
 
 ```
 You have access to long-term memory that persists across conversations:
 
-- Use `recall` BEFORE answering questions about past interactions, user 
+- Use `recall_{profile}` BEFORE answering questions about past interactions, user 
   preferences, or anything the user might have told you previously.
-- Use `remember` to store important facts, user preferences, corrections, 
+- Use `remember_{profile}` to store important facts, user preferences, corrections, 
   or instructions the user gives you. Be selective — don't store trivial 
   conversation details.
-- Use `reflect` at the end of meaningful conversations to save a summary.
-- Use `forget` when the user explicitly asks you to forget something.
+- Use `reflect_{profile}` at the end of meaningful conversations to save a summary.
+- Use `forget_{profile}` when the user explicitly asks you to forget something.
 
 Memory categories: fact, preference, summary, instruction, episode.
 Memories marked as pinned persist permanently.
 
 When recalling, use natural language queries that match what you're looking for.
-Example: recall("user's timezone preference") rather than recall("timezone").
+Example: recall_{profile}("user's timezone preference") rather than recall_{profile}("timezone").
 ```
+
+For a single-profile setup (default), the tools are named `remember_default`, `recall_default`, etc.
 
 ---
 
@@ -155,6 +187,26 @@ Environment variables (set in `/opt/mcp-servers/.env` on LXC):
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant server URL |
 | `QDRANT_COLLECTION` | `memories` | Collection name |
 | `MEMORY_DB_PATH` | `data/memory.db` | SQLite metadata path |
+| `MEMORY_PROFILES` | `["default"]` | JSON array of profile names |
+
+### Adding a New Profile
+
+1. Update `.env` on the LXC:
+   ```bash
+   MEMORY_PROFILES=["jack","sarah","guest"]
+   ```
+
+2. Restart housekeeping:
+   ```bash
+   systemctl restart mcp-server@housekeeping
+   ```
+
+3. Refresh backend discovery:
+   ```bash
+   curl -X POST https://localhost:8000/api/mcp/servers/refresh
+   ```
+
+4. Configure `disabled_tools` per conversation profile in your backend.
 
 ---
 
@@ -166,22 +218,34 @@ If Qdrant is unreachable or `OPENROUTER_API_KEY` is missing, the memory subsyste
 
 ## Example Conversation
 
-**Day 1:**
+**Day 1 (Jack's conversation):**
 ```
 User: I'm allergic to peanuts
-LLM: [calls remember(content="User has peanut allergy", category="fact", importance=0.9)]
+LLM: [calls remember_jack(content="User has peanut allergy", category="fact", importance=0.9)]
      I've noted that. I'll keep it in mind for any food-related suggestions.
 ```
 
-**Day 30:**
+**Day 30 (Jack's conversation):**
 ```
 User: Can you suggest a Thai restaurant?
-LLM: [calls recall(query="user food allergies dietary restrictions")]
+LLM: [calls recall_jack(query="user food allergies dietary restrictions")]
      → Returns: "User has peanut allergy" (similarity: 0.82)
      
      Sure! When looking at Thai restaurants, I'll watch out for dishes with 
      peanuts since you mentioned your allergy. Here are some options...
 ```
+
+**Sarah's conversation (same day):**
+```
+User: What allergies do I have?
+LLM: [calls recall_sarah(query="user allergies")]
+     → Returns: No matching memories found.
+     
+     I don't have any allergy information stored for you. Would you like 
+     to tell me about any allergies you have?
+```
+
+Note: Jack's allergy information is completely isolated from Sarah's memory space.
 
 ---
 
