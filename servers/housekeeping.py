@@ -168,21 +168,14 @@ async def current_time(format: Literal["iso", "unix"] = "iso") -> dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Memory tools
+# Memory tools — profile-based factory
 # ---------------------------------------------------------------------------
 
+# Implementation functions that accept user_id
 
-@mcp.tool(
-    "remember",
-    description=(
-        "Store a fact, preference, instruction, or conversation summary in "
-        "long-term memory for later retrieval. Use this when the user states "
-        "something worth remembering across conversations, corrects you, or "
-        "expresses a preference. Memories persist until explicitly forgotten "
-        "or they expire."
-    ),
-)
-async def remember(
+
+async def _remember_impl(
+    user_id: str,
     content: str,
     category: str = "fact",
     tags: list[str] | None = None,
@@ -191,17 +184,7 @@ async def remember(
     pinned: bool = False,
     ttl_hours: int | None = None,
 ) -> dict[str, Any]:
-    """Store a memory with vector embedding for semantic retrieval.
-
-    Args:
-        content: The fact, preference, or summary to remember.
-        category: One of: fact, preference, summary, instruction, episode.
-        tags: Optional tags for filtering (e.g., ["weather", "home"]).
-        importance: 0.0 to 1.0 — higher means harder to forget.
-        session_id: Tie to a session, or omit for cross-session memory.
-        pinned: If True, survives cleanup and session clears.
-        ttl_hours: Auto-expire after this many hours. Omit for permanent.
-    """
+    """Store a memory for a specific user profile."""
     embeddings, vectors, repo = _require_memory()
 
     memory_id = str(uuid4())
@@ -211,7 +194,7 @@ async def remember(
     expires_at = (now + timedelta(hours=ttl_hours)).isoformat() if ttl_hours else None
 
     payload = {
-        "user_id": "default",
+        "user_id": user_id,
         "content": content,
         "category": category,
         "tags": tags or [],
@@ -225,7 +208,7 @@ async def remember(
     await vectors.upsert(memory_id, embedding, payload)
     await repo.insert(
         memory_id=memory_id,
-        user_id="default",
+        user_id=user_id,
         category=category,
         content_preview=content[:200],
         importance=importance,
@@ -237,6 +220,7 @@ async def remember(
     return {
         "success": True,
         "memory_id": memory_id,
+        "profile": user_id,
         "content_preview": content[:100] + ("\u2026" if len(content) > 100 else ""),
         "category": category,
         "pinned": pinned,
@@ -245,16 +229,8 @@ async def remember(
     }
 
 
-@mcp.tool(
-    "recall",
-    description=(
-        "Search long-term memory using natural language. Returns the most "
-        "semantically relevant stored memories ranked by similarity. Use this "
-        "before answering questions about past interactions, user preferences, "
-        "or anything the user might have told you previously."
-    ),
-)
-async def recall(
+async def _recall_impl(
+    user_id: str,
     query: str,
     category: str | None = None,
     tags: list[str] | None = None,
@@ -263,23 +239,14 @@ async def recall(
     limit: int = 10,
     min_similarity: float = 0.4,
 ) -> dict[str, Any]:
-    """Semantic search over stored memories.
-
-    Args:
-        query: Natural language description of what to recall.
-        category: Filter to a specific category.
-        tags: Filter to memories with these tags.
-        session_id: Limit to a specific session, or omit for all.
-        time_range_hours: Only return memories from the last N hours.
-        limit: Maximum results to return.
-        min_similarity: Minimum cosine similarity threshold (0.0-1.0).
-    """
+    """Search memories for a specific user profile."""
     embeddings, vectors, repo = _require_memory()
 
     query_embedding = await embeddings.embed(query)
 
     results = await vectors.search(
         query_embedding,
+        user_id=user_id,
         category=category,
         tags=tags,
         session_id=session_id,
@@ -292,6 +259,7 @@ async def recall(
         return {
             "success": True,
             "count": 0,
+            "profile": user_id,
             "memories": [],
             "message": "No matching memories found.",
         }
@@ -319,35 +287,21 @@ async def recall(
     return {
         "success": True,
         "count": len(memories),
+        "profile": user_id,
         "query": query,
         "memories": memories,
     }
 
 
-@mcp.tool(
-    "forget",
-    description=(
-        "Delete memories by ID, session, category, or age. Use when the user "
-        "asks you to forget something, or to clean up outdated information. "
-        "Pinned memories are protected unless include_pinned is True."
-    ),
-)
-async def forget(
+async def _forget_impl(
+    user_id: str,
     memory_id: str | None = None,
     session_id: str | None = None,
     category: str | None = None,
     older_than_hours: int | None = None,
     include_pinned: bool = False,
 ) -> dict[str, Any]:
-    """Remove memories by ID, session, category, or age.
-
-    Args:
-        memory_id: Delete a specific memory by its ID.
-        session_id: Delete all memories for a session.
-        category: Delete all memories in a category.
-        older_than_hours: Delete memories older than N hours.
-        include_pinned: Must be True to delete pinned memories.
-    """
+    """Delete memories for a specific user profile."""
     _, vectors, repo = _require_memory()
 
     if not any([memory_id, session_id, category, older_than_hours]):
@@ -374,60 +328,166 @@ async def forget(
 
     return {
         "success": True,
+        "profile": user_id,
         "deleted_count": len(deleted_ids),
         "message": f"Deleted {len(deleted_ids)} memory/memories.",
     }
 
 
-@mcp.tool(
-    "reflect",
-    description=(
-        "Store a high-level summary of a conversation session. Call this at "
-        "the end of a meaningful conversation to capture key takeaways as a "
-        "single, high-importance memory. This creates an 'episode' memory "
-        "that persists across sessions."
-    ),
-)
-async def reflect(
-    session_id: str,
-    summary: str,
-) -> dict[str, Any]:
-    """Store an episode summary for a conversation.
-
-    Args:
-        session_id: The session being summarized.
-        summary: Distillation of the conversation's key points.
-    """
-    result = await remember(
-        content=summary,
-        category="episode",
-        importance=0.8,
-        session_id=session_id,
-        pinned=True,
-    )
-    return {
-        "success": True,
-        "memory_id": result["memory_id"],
-        "message": "Session summary stored as episode memory (pinned).",
-    }
-
-
-@mcp.tool(
-    "memory_stats",
-    description="Show statistics about stored memories: total count, categories, oldest/newest.",
-)
-async def memory_stats() -> dict[str, Any]:
-    """Return memory store statistics."""
+async def _memory_stats_impl(user_id: str) -> dict[str, Any]:
+    """Return memory statistics for a specific user profile."""
     _, vectors, repo = _require_memory()
 
-    db_stats = await repo.stats()
-    vector_count = await vectors.count()
+    db_stats = await repo.stats(user_id=user_id)
+    vector_count = await vectors.count(user_id=user_id)
 
     return {
         "success": True,
+        "profile": user_id,
         "vector_count": vector_count,
         **db_stats,
     }
+
+
+def _register_profile_tools(profile: str) -> None:
+    """Register memory tools for a specific profile.
+
+    Creates: remember_{profile}, recall_{profile}, forget_{profile},
+             reflect_{profile}, memory_stats_{profile}
+    """
+    # Use closures to capture the profile for each tool
+
+    @mcp.tool(
+        f"remember_{profile}",
+        description=(
+            f"Store a fact, preference, instruction, or summary in {profile}'s "
+            "long-term memory for later retrieval. Use when the user states "
+            "something worth remembering, corrects you, or expresses a preference."
+        ),
+    )
+    async def remember(
+        content: str,
+        category: str = "fact",
+        tags: list[str] | None = None,
+        importance: float = 0.5,
+        session_id: str | None = None,
+        pinned: bool = False,
+        ttl_hours: int | None = None,
+        _profile: str = profile,
+    ) -> dict[str, Any]:
+        return await _remember_impl(
+            user_id=_profile,
+            content=content,
+            category=category,
+            tags=tags,
+            importance=importance,
+            session_id=session_id,
+            pinned=pinned,
+            ttl_hours=ttl_hours,
+        )
+
+    @mcp.tool(
+        f"recall_{profile}",
+        description=(
+            f"Search {profile}'s long-term memory using natural language. Returns "
+            "the most semantically relevant stored memories ranked by similarity."
+        ),
+    )
+    async def recall(
+        query: str,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        session_id: str | None = None,
+        time_range_hours: int | None = None,
+        limit: int = 10,
+        min_similarity: float = 0.4,
+        _profile: str = profile,
+    ) -> dict[str, Any]:
+        return await _recall_impl(
+            user_id=_profile,
+            query=query,
+            category=category,
+            tags=tags,
+            session_id=session_id,
+            time_range_hours=time_range_hours,
+            limit=limit,
+            min_similarity=min_similarity,
+        )
+
+    @mcp.tool(
+        f"forget_{profile}",
+        description=(
+            f"Delete memories from {profile}'s memory by ID, session, category, "
+            "or age. Pinned memories are protected unless include_pinned is True."
+        ),
+    )
+    async def forget(
+        memory_id: str | None = None,
+        session_id: str | None = None,
+        category: str | None = None,
+        older_than_hours: int | None = None,
+        include_pinned: bool = False,
+        _profile: str = profile,
+    ) -> dict[str, Any]:
+        return await _forget_impl(
+            user_id=_profile,
+            memory_id=memory_id,
+            session_id=session_id,
+            category=category,
+            older_than_hours=older_than_hours,
+            include_pinned=include_pinned,
+        )
+
+    @mcp.tool(
+        f"reflect_{profile}",
+        description=(
+            f"Store a high-level summary of a conversation in {profile}'s memory. "
+            "Creates a pinned 'episode' memory that persists across sessions."
+        ),
+    )
+    async def reflect(
+        session_id: str,
+        summary: str,
+        _profile: str = profile,
+    ) -> dict[str, Any]:
+        result = await _remember_impl(
+            user_id=_profile,
+            content=summary,
+            category="episode",
+            importance=0.8,
+            session_id=session_id,
+            pinned=True,
+        )
+        return {
+            "success": True,
+            "profile": _profile,
+            "memory_id": result["memory_id"],
+            "message": "Session summary stored as episode memory (pinned).",
+        }
+
+    @mcp.tool(
+        f"memory_stats_{profile}",
+        description=f"Show statistics about {profile}'s stored memories.",
+    )
+    async def memory_stats(_profile: str = profile) -> dict[str, Any]:
+        return await _memory_stats_impl(user_id=_profile)
+
+
+def _register_all_profile_tools() -> None:
+    """Register memory tools for all configured profiles."""
+    try:
+        settings = MemorySettings()  # type: ignore[call-arg]
+        profiles = settings.memory_profiles
+    except Exception:
+        profiles = ["default"]
+
+    for profile in profiles:
+        _register_profile_tools(profile)
+        print(f"[HOUSEKEEPING] Registered memory tools for profile: {profile}", file=sys.stderr)
+
+
+# Register tools at module load time (before server starts)
+_register_all_profile_tools()
 
 
 # ---------------------------------------------------------------------------
@@ -497,9 +557,4 @@ __all__ = [
     "main",
     "test_echo",
     "current_time",
-    "remember",
-    "recall",
-    "forget",
-    "reflect",
-    "memory_stats",
 ]

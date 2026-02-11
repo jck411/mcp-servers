@@ -49,3 +49,10 @@ class MemorySettings(BaseSettings):
     cleanup_interval_minutes: int = Field(default=15)
     decay_interval_hours: int = Field(default=24)
     min_importance_threshold: float = Field(default=0.1)
+
+    # Memory profiles — each profile gets its own set of tools with isolated storage
+    # E.g., ["jack", "sarah"] creates remember_jack, recall_jack, remember_sarah, etc.
+    memory_profiles: list[str] = Field(
+        default_factory=lambda: ["default"],
+        validation_alias="MEMORY_PROFILES",
+    )
