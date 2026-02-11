@@ -13,11 +13,9 @@ Run:
 
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -105,45 +103,6 @@ def _require_memory() -> tuple[EmbeddingClient, VectorStore, MemoryRepository]:
             "Check OPENROUTER_API_KEY and Qdrant connectivity."
         )
     return _embeddings, _vectors, _repo
-
-
-def _log_conversation(
-    profile: str,
-    operation: str,
-    content: str,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    """Append a timestamped entry to the profile's daily conversation log.
-
-    Logs are stored at: data/conversation_logs/{profile}/YYYY-MM-DD.log
-    This is a backup mechanism — not read by the LLM, just for disaster recovery.
-    """
-    if _mem_settings is None:
-        return
-
-    try:
-        logs_dir: Path = _mem_settings.conversation_logs_dir / profile
-        logs_dir.mkdir(parents=True, exist_ok=True)
-
-        now = datetime.now(UTC)
-        log_file = logs_dir / f"{now.strftime('%Y-%m-%d')}.log"
-
-        entry = {
-            "timestamp": now.isoformat(),
-            "operation": operation,
-            "content": content,
-            "metadata": metadata or {},
-        }
-
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as exc:
-        # Log failures should never break memory operations
-        print(
-            f"[HOUSEKEEPING] Conversation log write failed: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
 
 
 @dataclass
@@ -258,22 +217,6 @@ async def _remember_impl(
         expires_at=expires_at,
     )
 
-    # Backup log for disaster recovery
-    _log_conversation(
-        profile=user_id,
-        operation="remember",
-        content=content,
-        metadata={
-            "memory_id": memory_id,
-            "category": category,
-            "tags": tags or [],
-            "importance": importance,
-            "pinned": pinned,
-            "session_id": session_id,
-            "expires_at": expires_at,
-        },
-    )
-
     return {
         "success": True,
         "memory_id": memory_id,
@@ -382,24 +325,6 @@ async def _forget_impl(
         if ids:
             await vectors.delete(ids)
         deleted_ids.extend(ids)
-
-    # Log deletions for audit trail
-    if deleted_ids:
-        _log_conversation(
-            profile=user_id,
-            operation="forget",
-            content=f"Deleted {len(deleted_ids)} memory/memories",
-            metadata={
-                "deleted_ids": deleted_ids,
-                "filter": {
-                    "memory_id": memory_id,
-                    "session_id": session_id,
-                    "category": category,
-                    "older_than_hours": older_than_hours,
-                    "include_pinned": include_pinned,
-                },
-            },
-        )
 
     return {
         "success": True,
