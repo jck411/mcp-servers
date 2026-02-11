@@ -15,7 +15,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # Per-server extras — install only what you need on the target host
-housekeeping = []             # housekeeping has no extra deps
+housekeeping = [
+    "httpx>=0.27.0",
+    "qdrant-client>=1.9",
+    "aiosqlite>=0.20.0",
+    "pydantic-settings>=2.0",
+]
 shell = []                    # shell_control has no extra deps
 playwright = [
     "playwright>=1.57.0",
