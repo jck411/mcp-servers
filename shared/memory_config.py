@@ -51,8 +51,7 @@ class MemorySettings(BaseSettings):
     min_importance_threshold: float = Field(default=0.1)
 
     # Memory profiles — each profile gets its own set of tools with isolated storage
-    # E.g., ["jack", "sarah"] creates remember_jack, recall_jack, remember_sarah, etc.
+    # Creates remember_jack, recall_jack, remember_family, etc.
     memory_profiles: list[str] = Field(
-        default_factory=lambda: ["default"],
-        validation_alias="MEMORY_PROFILES",
+        default_factory=lambda: ["jack", "family"],
     )
