@@ -11,6 +11,7 @@ build/
 !.env.example
 credentials/*.json
 credentials/**/*.json
+credentials/*.pem
 logs/
 data/
 *.bak

@@ -55,8 +55,13 @@ pdf = [
     "kreuzberg[chunking,entity-extraction,gmft,easyocr,langdetect]>=3.20.2",
     "httpx>=0.27.0",
 ]
+tv = [
+    "bscpylgtv>=0.4.9",
+    "androidtvremote2>=0.3.0",
+    "wakeonlan>=3.0.0",
+]
 all = [
-    "mcp-servers[housekeeping,shell,playwright,google,gdrive,gmail,calendar,notes,spotify,monarch,pdf]",
+    "mcp-servers[housekeeping,shell,playwright,google,gdrive,gmail,calendar,notes,spotify,monarch,pdf,tv]",
 ]
 dev = [
     "pytest>=8.4.2",
