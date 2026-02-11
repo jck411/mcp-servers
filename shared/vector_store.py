@@ -8,6 +8,7 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
+    DatetimeRange,
     Distance,
     FieldCondition,
     Filter,
@@ -94,10 +95,10 @@ class VectorStore:
             FieldCondition(key="user_id", match=MatchValue(value=user_id)),
         ]
 
-        # Exclude expired memories
-        now_iso = datetime.now(UTC).isoformat()
+        # Exclude expired memories (use DatetimeRange for datetime fields)
+        now = datetime.now(UTC)
         must_not_conditions: list[FieldCondition] = [
-            FieldCondition(key="expires_at", range=Range(lt=now_iso)),
+            FieldCondition(key="expires_at", range=DatetimeRange(lt=now)),
         ]
 
         if category:
@@ -116,7 +117,7 @@ class VectorStore:
         if time_range_hours:
             cutoff = datetime.now(UTC) - timedelta(hours=time_range_hours)
             must_conditions.append(
-                FieldCondition(key="created_at", range=Range(gte=cutoff.isoformat()))
+                FieldCondition(key="created_at", range=DatetimeRange(gte=cutoff))
             )
 
         results = await self._client.query_points(
