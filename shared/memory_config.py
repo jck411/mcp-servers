@@ -55,3 +55,9 @@ class MemorySettings(BaseSettings):
     memory_profiles: list[str] = Field(
         default_factory=lambda: ["jack", "family"],
     )
+
+    # Conversation backup logs — separate folder per profile, dated files
+    conversation_logs_dir: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "data" / "conversation_logs",
+        validation_alias="CONVERSATION_LOGS_DIR",
+    )
