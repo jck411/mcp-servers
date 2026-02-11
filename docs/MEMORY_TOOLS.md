@@ -4,17 +4,19 @@ The housekeeping MCP server includes semantic long-term memory tools that persis
 
 ## Profile-Based Isolation
 
-Memory tools are created **per-profile**, allowing complete isolation between users:
+Memory tools are created **per-profile**, allowing complete isolation between users. The profiles are hardcoded in `shared/memory_config.py`:
 
-```
-MEMORY_PROFILES=["jack","sarah"]
+```python
+memory_profiles: list[str] = Field(
+    default_factory=lambda: ["jack", "family"],
+)
 ```
 
 This creates separate tool sets:
 - `remember_jack`, `recall_jack`, `forget_jack`, `reflect_jack`, `memory_stats_jack`
-- `remember_sarah`, `recall_sarah`, `forget_sarah`, `reflect_sarah`, `memory_stats_sarah`
+- `remember_family`, `recall_family`, `forget_family`, `reflect_family`, `memory_stats_family`
 
-Each profile's memories are stored with a unique `user_id` — Jack can never see Sarah's memories and vice versa.
+Each profile's memories are stored with a unique `user_id` — Jack's memories are completely isolated from Family memories.
 
 ### Backend Integration
 
@@ -24,13 +26,13 @@ Configure your backend to enable only the relevant profile's tools per conversat
 {
   "profile": "jack",
   "disabled_tools": [
-    "remember_sarah", "recall_sarah", "forget_sarah", 
-    "reflect_sarah", "memory_stats_sarah"
+    "remember_family", "recall_family", "forget_family", 
+    "reflect_family", "memory_stats_family"
   ]
 }
 ```
 
-Or inversely, disable Jack's tools for Sarah's conversations.
+Or inversely, disable Jack's tools for Family conversations.
 
 ## How It Works
 
@@ -138,7 +140,7 @@ Returns total count, categories breakdown, oldest/newest timestamps.
 
 ## System Prompt Addition
 
-Add this to your LLM's system prompt to enable memory behavior. Replace `{profile}` with the actual profile name (e.g., `jack`):
+Add this to your LLM's system prompt to enable memory behavior. Replace `{profile}` with the actual profile name (e.g., `jack` or `family`):
 
 ```
 You have access to long-term memory that persists across conversations:
@@ -157,8 +159,6 @@ Memories marked as pinned persist permanently.
 When recalling, use natural language queries that match what you're looking for.
 Example: recall_{profile}("user's timezone preference") rather than recall_{profile}("timezone").
 ```
-
-For a single-profile setup (default), the tools are named `remember_default`, `recall_default`, etc.
 
 ---
 
@@ -187,26 +187,21 @@ Environment variables (set in `/opt/mcp-servers/.env` on LXC):
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant server URL |
 | `QDRANT_COLLECTION` | `memories` | Collection name |
 | `MEMORY_DB_PATH` | `data/memory.db` | SQLite metadata path |
-| `MEMORY_PROFILES` | `["default"]` | JSON array of profile names |
 
 ### Adding a New Profile
 
-1. Update `.env` on the LXC:
-   ```bash
-   MEMORY_PROFILES=["jack","sarah","guest"]
-   ```
+To add a new profile, edit `shared/memory_config.py`:
 
-2. Restart housekeeping:
-   ```bash
-   systemctl restart mcp-server@housekeeping
-   ```
+```python
+memory_profiles: list[str] = Field(
+    default_factory=lambda: ["jack", "family", "guest"],
+)
+```
 
-3. Refresh backend discovery:
-   ```bash
-   curl -X POST https://localhost:8000/api/mcp/servers/refresh
-   ```
-
-4. Configure `disabled_tools` per conversation profile in your backend.
+Then redeploy:
+```bash
+./refresh.sh housekeeping
+```
 
 ---
 
@@ -235,17 +230,17 @@ LLM: [calls recall_jack(query="user food allergies dietary restrictions")]
      peanuts since you mentioned your allergy. Here are some options...
 ```
 
-**Sarah's conversation (same day):**
+**Family conversation (same day):**
 ```
-User: What allergies do I have?
-LLM: [calls recall_sarah(query="user allergies")]
+User: What allergies do we have?
+LLM: [calls recall_family(query="allergies")]
      → Returns: No matching memories found.
      
-     I don't have any allergy information stored for you. Would you like 
-     to tell me about any allergies you have?
+     I don't have any allergy information stored for the family. Would you 
+     like to add any?
 ```
 
-Note: Jack's allergy information is completely isolated from Sarah's memory space.
+Note: Jack's personal allergy information is isolated from the Family memory space.
 
 ---
 
