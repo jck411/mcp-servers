@@ -2,6 +2,17 @@
 
 Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
+## Related Repos
+
+| Repo | Location | Purpose |
+|------|----------|--------|
+| Backend_FastAPI | LXC 111 (192.168.1.111:8000) | Chat backend, auto-discovers these servers |
+| PROXMOX | Host (192.168.1.11) | Infrastructure, LXC definitions |
+
+- Backend auto-discovers servers on ports 9001–9015 via `/api/mcp/servers/refresh`
+- Housekeeping server uses Qdrant at 192.168.1.110:6333 for vector search
+- Memory backup logs written by Backend_FastAPI, not MCP servers
+
 ## Local Development Workflow
 
 - Edit servers directly in this repo — it is the source of truth for all MCP server code
