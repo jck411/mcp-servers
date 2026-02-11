@@ -12,7 +12,7 @@
 set -euo pipefail
 
 REPO_DIR="/opt/mcp-servers"
-SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf")
+SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch")
 
 # Ensure uv is on PATH
 export PATH="/root/.local/bin:/home/mcp/.local/bin:$PATH"
