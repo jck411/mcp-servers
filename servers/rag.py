@@ -545,7 +545,7 @@ async def extract_and_chunk(path: Path, settings: RAGSettings) -> list[str]:
 
     # Use chunks if available, otherwise split content manually
     if result.chunks:
-        return [str(c) for c in result.chunks]
+        return [c.content for c in result.chunks]
 
     # Fallback: split by paragraphs then combine to target size
     content = result.content
