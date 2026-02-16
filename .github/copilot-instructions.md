@@ -111,8 +111,10 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | spotify | 9010 |
 | playwright | 9011 |
 | kiosk_clock_tools | 9012 |
+| tv | 9013 |
+| rag | 9014 |
 
-Next available: 9013
+Next available: 9015
 
 ## Credential Sources
 

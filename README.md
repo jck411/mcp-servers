@@ -37,6 +37,8 @@ Each server:
 | spotify | 9010 |
 | playwright | 9011 |
 | kiosk-clock-tools | 9012 |
+| tv | 9013 |
+| rag | 9014 |
 
 All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
