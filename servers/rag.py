@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import re
 import sys
+import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -633,7 +634,8 @@ async def _index_document(
     # Prepare payloads
     chunks = []
     for i, text in enumerate(chunks_text):
-        chunk_id = f"{file_hash}_{i}"
+        # Create deterministic UUID from hash + index for Qdrant compatibility
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}"))
         chunks.append(
             {
                 "id": chunk_id,
