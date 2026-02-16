@@ -44,9 +44,9 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    Fusion,
+    FusionQuery,
     MatchValue,
-    NamedSparseVector,
-    NamedVector,
     PayloadSchemaType,
     PointStruct,
     Prefetch,
@@ -380,20 +380,19 @@ class RAGVectorStore:
                 collection_name=self._collection,
                 prefetch=[
                     Prefetch(
-                        query=NamedVector(name=self.DENSE_VECTOR_NAME, vector=query_embedding),
+                        query=query_embedding,
+                        using=self.DENSE_VECTOR_NAME,
                         filter=query_filter,
                         limit=prefetch_limit,
                     ),
                     Prefetch(
-                        query=NamedSparseVector(
-                            name=self.SPARSE_VECTOR_NAME,
-                            vector=SparseVector(indices=indices, values=values),
-                        ),
+                        query=SparseVector(indices=indices, values=values),
+                        using=self.SPARSE_VECTOR_NAME,
                         filter=query_filter,
                         limit=prefetch_limit,
                     ),
                 ],
-                query={"fusion": "rrf"},  # Reciprocal Rank Fusion
+                query=FusionQuery(fusion=Fusion.RRF),
                 limit=limit,
                 with_payload=True,
             )
@@ -401,7 +400,8 @@ class RAGVectorStore:
             # Fallback to dense-only search
             results = await self._client.query_points(
                 collection_name=self._collection,
-                query=NamedVector(name=self.DENSE_VECTOR_NAME, vector=query_embedding),
+                query=query_embedding,
+                using=self.DENSE_VECTOR_NAME,
                 query_filter=query_filter,
                 limit=limit,
                 score_threshold=min_score,
