@@ -153,7 +153,7 @@ def get_drive_service(user_email: str) -> Any:
             f"No valid credentials found for {user_email}. "
             "Click 'Connect Google Services' in Settings to authorize access."
         )
-    return build("drive", "v3", credentials=credentials)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
 def get_calendar_service(user_email: str) -> Any:
@@ -164,7 +164,7 @@ def get_calendar_service(user_email: str) -> Any:
             f"No valid credentials found for {user_email}. "
             "Click 'Connect Google Services' in Settings to authorize access."
         )
-    return build("calendar", "v3", credentials=credentials)
+    return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
 
 def get_gmail_service(user_email: str) -> Any:
@@ -175,7 +175,7 @@ def get_gmail_service(user_email: str) -> Any:
             f"No valid credentials found for {user_email}. "
             "Click 'Connect Google Services' in Settings to authorize access."
         )
-    return build("gmail", "v1", credentials=credentials)
+    return build("gmail", "v1", credentials=credentials, cache_discovery=False)
 
 
 def get_tasks_service(user_email: str) -> Any:
@@ -186,4 +186,4 @@ def get_tasks_service(user_email: str) -> Any:
             f"No valid credentials found for {user_email}. "
             "Click 'Connect Google Services' in Settings to authorize access."
         )
-    return build("tasks", "v1", credentials=credentials)
+    return build("tasks", "v1", credentials=credentials, cache_discovery=False)
