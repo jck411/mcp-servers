@@ -532,6 +532,124 @@ async def create_note(
             return f"Error creating note: {exc}"
 
 
+@mcp.tool("notes_create_note_flat")
+async def create_note_flat(
+    note_name: str,
+    content: str,
+    tags: Optional[List[str]] = None,
+    overwrite: bool = False,
+    vault_name: str = DEFAULT_VAULT_FOLDER_NAME,
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str:
+    """Create a new note in the vault root ONLY. No directories or folders can be created.
+
+    This tool ONLY creates notes directly in the vault root folder.
+    It does NOT accept paths — only a simple filename.
+    Any attempt to include folder separators (/ or \\) will be rejected.
+
+    Args:
+        note_name: Simple filename for the note (e.g., "my-note" or "my-note.md").
+                   Must NOT contain "/" or "\\" — no subdirectories allowed.
+        content: The content of the note (markdown)
+        tags: Optional list of tags to add in frontmatter
+        overwrite: Whether to overwrite if note already exists
+        vault_name: Name of the NOTES vault folder in Google Drive
+        user_email: User's email for authentication
+
+    Returns:
+        Status message
+    """
+    # ---- Block any directory / folder creation ----
+    if "/" in note_name or "\\" in note_name:
+        return (
+            "Error: note_name must be a simple filename without any path separators. "
+            "Directories and folders cannot be created with this tool. "
+            f"Received: '{note_name}'"
+        )
+
+    name = note_name.strip()
+    if not name:
+        return "Error: note_name cannot be empty."
+
+    if not name.lower().endswith(".md"):
+        name += ".md"
+
+    service, error = _get_drive_service_or_error(user_email)
+    if error:
+        return error
+    assert service is not None
+
+    vault_id, error = await _find_vault_folder(service, vault_name)
+    if error:
+        return error
+    assert vault_id is not None
+
+    # Check if note already exists in vault root
+    escaped_filename = _escape_query_term(name)
+    query = (
+        f"'{vault_id}' in parents and "
+        f"name = '{escaped_filename}' and trashed = false"
+    )
+    try:
+        results = await asyncio.to_thread(
+            service.files()
+            .list(q=query, pageSize=1, fields="files(id, name)", supportsAllDrives=True)
+            .execute
+        )
+    except Exception as exc:
+        return f"Error checking for existing note: {exc}"
+
+    existing_files = results.get("files", [])
+    existing_id = existing_files[0]["id"] if existing_files else None
+
+    if existing_id and not overwrite:
+        return f"Note '{name}' already exists in vault root. Set overwrite=True to replace."
+
+    # Build content with optional frontmatter
+    final_content = content
+    if tags:
+        frontmatter_tags = ", ".join(tags)
+        frontmatter = (
+            f"---\ntags: [{frontmatter_tags}]\n"
+            f"created: {datetime.now(timezone.utc).isoformat()}\n---\n\n"
+        )
+        final_content = frontmatter + content
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(final_content.encode("utf-8")),
+        mimetype="text/markdown",
+        resumable=False,
+    )
+
+    if existing_id and overwrite:
+        try:
+            await asyncio.to_thread(
+                service.files()
+                .update(fileId=existing_id, media_body=media, supportsAllDrives=True)
+                .execute
+            )
+            return f"Note '{name}' updated successfully in vault root."
+        except Exception as exc:
+            return f"Error updating note: {exc}"
+    else:
+        metadata = {
+            "name": name,
+            "parents": [vault_id],
+            "mimeType": "text/markdown",
+        }
+        try:
+            await asyncio.to_thread(
+                service.files()
+                .create(
+                    body=metadata, media_body=media, fields="id", supportsAllDrives=True
+                )
+                .execute
+            )
+            return f"Note '{name}' created successfully in vault root."
+        except Exception as exc:
+            return f"Error creating note: {exc}"
+
+
 @mcp.tool("notes_edit_note")
 async def edit_note(
     note_path: str,
@@ -1506,6 +1624,7 @@ __all__ = [
     "DEFAULT_HTTP_PORT",
     "read_note",
     "create_note",
+    "create_note_flat",
     "edit_note",
     "delete_note",
     "delete_directory",
