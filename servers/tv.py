@@ -68,7 +68,7 @@ ROOM_ALIASES = {
     "bed": "bedroom",
 }
 
-# Streaming app package names
+# Streaming app package names (fallback for apps without deep links)
 APP_PACKAGES = {
     "netflix": "com.netflix.ninja",
     "plex": "com.plexapp.android",
@@ -83,6 +83,19 @@ APP_PACKAGES = {
     "pbs": "org.pbskids.video",
     "espn": "com.espn.score_center",
     "ytmusic": "com.google.android.youtube.tvmusic",
+}
+
+# Deep link URIs for apps that support them (preferred over package names)
+APP_DEEP_LINKS = {
+    "netflix": "https://www.netflix.com/title",
+    "plex": "plex://",
+    "youtube": "https://www.youtube.com",
+    "disney": "https://www.disneyplus.com",
+    "prime": "https://app.primevideo.com",
+    "apple": "https://tv.apple.com",
+    "spotify": "spotify://",
+    "hbo": "https://play.hbomax.com",
+    "ytmusic": "https://music.youtube.com",
 }
 
 
@@ -658,6 +671,10 @@ async def streamer_text(text: str, room: str = "living") -> str:
 async def streamer_app(app_name: str, room: str = "living") -> str:
     """Launch a streaming app on the Google TV Streamer by name.
 
+    Uses deep link URIs when available for faster, more reliable launching.
+    For playing specific content, use tv_streamer_deep_link or the Spotify
+    MCP server's spotify_play_track with the TV's Spotify Connect device_id.
+
     Supported apps: netflix, plex, youtube, disney, hulu, prime, apple,
     peacock, spotify, hbo, pbs, espn, ytmusic
 
@@ -669,8 +686,9 @@ async def streamer_app(app_name: str, room: str = "living") -> str:
         Confirmation message.
     """
     app_name_lower = app_name.lower()
-    package = APP_PACKAGES.get(app_name_lower)
-    if not package:
+    # Prefer deep link URI, fall back to package name
+    launch_target = APP_DEEP_LINKS.get(app_name_lower) or APP_PACKAGES.get(app_name_lower)
+    if not launch_target:
         return (
             f"Unknown app: {app_name}. "
             f"Available: {', '.join(sorted(APP_PACKAGES.keys()))}"
@@ -678,22 +696,34 @@ async def streamer_app(app_name: str, room: str = "living") -> str:
 
     try:
         remote = await _get_remote_client(room)
-        remote.send_launch_app_command(package)
+        remote.send_launch_app_command(launch_target)
         remote.disconnect()
         device = _get_streamer_device(room)
-        return f"{device['name']} → launched {app_name} ({package})"
+        return f"{device['name']} → launched {app_name} ({launch_target})"
     except ValueError as e:
         return str(e)
     except Exception as e:
         return f"Error launching app: {e}"
 
 
-@mcp.tool("tv_streamer_launch")
-async def streamer_launch(package_or_url: str, room: str = "living") -> str:
-    """Launch an app by package name or open a deep link URL on the Google TV Streamer.
+@mcp.tool("tv_streamer_deep_link")
+async def streamer_deep_link(uri: str, room: str = "living") -> str:
+    """Open a deep link URI on the Google TV Streamer.
+
+    Send any URI that an installed app can handle. Examples:
+      - spotify:track:6rqhFgbbKwnb9MLmUQDhG6  (play a Spotify track)
+      - spotify:album:4oktVvRuO1In9B7Hz0xm0a  (play an album)
+      - spotify:playlist:37i9dQZF1DXcBWIGoYBM5M  (play a playlist)
+      - https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6
+      - plex://  (open Plex)
+      - https://www.netflix.com/title/80100172  (open specific Netflix title)
+      - https://www.youtube.com/watch?v=dQw4w9WgXcQ  (play YouTube video)
+
+    For Spotify: get track/album/playlist URIs from the spotify_search_tracks
+    or spotify_get_user_playlists tools, then pass the URI here.
 
     Args:
-        package_or_url: Android package name or URL/URI to open
+        uri: Deep link URI (spotify:, plex://, https://, etc.)
         room: Room name (living, bedroom, lr, br)
 
     Returns:
@@ -701,14 +731,14 @@ async def streamer_launch(package_or_url: str, room: str = "living") -> str:
     """
     try:
         remote = await _get_remote_client(room)
-        remote.send_launch_app_command(package_or_url)
+        remote.send_launch_app_command(uri)
         remote.disconnect()
         device = _get_streamer_device(room)
-        return f"{device['name']} → launched {package_or_url}"
+        return f"{device['name']} → opened {uri}"
     except ValueError as e:
         return str(e)
     except Exception as e:
-        return f"Error launching: {e}"
+        return f"Error opening deep link: {e}"
 
 
 @mcp.tool("tv_streamer_status")
@@ -942,7 +972,7 @@ __all__ = [
     "streamer_keys",
     "streamer_text",
     "streamer_app",
-    "streamer_launch",
+    "streamer_deep_link",
     "streamer_status",
     # Convenience tools
     "all_power_on",
