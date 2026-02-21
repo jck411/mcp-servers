@@ -1,19 +1,47 @@
 #!/usr/bin/env bash
-# deploy.sh — Pull latest, install deps, restart MCP server services
+# deploy.sh — Commit, push, pull latest, install deps, restart MCP server services
 #
-# Usage:
+# Usage (from home LAN or on server):
 #   ./deploy/deploy.sh              # Deploy all enabled servers
 #   ./deploy/deploy.sh calculator   # Deploy specific server(s)
 #   ./deploy/deploy.sh --status     # Show status of all servers
 #
-# Run on the Proxmox LXC (192.168.1.110) or wherever servers are deployed.
-# Can be run as root or mcp user (uses sudo for systemctl if needed).
+# From home LAN: commits local changes, pushes, SSHes into LXC 110 to deploy.
+# On the server: pulls latest, installs deps, restarts services.
 
 set -euo pipefail
 
+SERVER_HOST="root@192.168.1.110"
 REPO_DIR="/opt/mcp-servers"
 SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag")
 
+# --- Detect if we're running locally (not on the server) ---
+if [[ ! -d "$REPO_DIR" ]]; then
+    # Running locally — commit, push, then SSH to server
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    LOCAL_ROOT="$(dirname "$SCRIPT_DIR")"
+
+    echo "=== Local deploy: commit & push, then remote deploy ==="
+
+    cd "$LOCAL_ROOT"
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "=== Committing local changes ==="
+        git add -A
+        git commit -m "${1:-deploy: update mcp-servers}"
+    else
+        echo "No local changes to commit."
+    fi
+
+    echo "=== Pushing to origin ==="
+    git push
+
+    # Forward args to the remote script
+    echo "=== SSHing into ${SERVER_HOST} to deploy ==="
+    ssh "$SERVER_HOST" "${REPO_DIR}/deploy/deploy.sh $*"
+    exit $?
+fi
+
+# --- Running on the server ---
 # Ensure uv is on PATH
 export PATH="/root/.local/bin:/home/mcp/.local/bin:$PATH"
 
