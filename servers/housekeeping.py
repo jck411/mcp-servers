@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from fastmcp import FastMCP
@@ -25,13 +25,6 @@ from shared.embeddings import EmbeddingClient
 from shared.memory_config import MemorySettings
 from shared.memory_maintenance import start_maintenance
 from shared.memory_repository import MemoryRepository
-from shared.time_context import (
-    EASTERN_TIMEZONE,
-    EASTERN_TIMEZONE_NAME,
-    build_context_lines,
-    create_time_snapshot,
-    format_timezone_offset,
-)
 from shared.vector_store import VectorStore
 
 # Default port for HTTP transport
@@ -118,53 +111,7 @@ async def test_echo(message: str, uppercase: bool = False) -> dict[str, Any]:
     return asdict(EchoResult(message=payload, uppercase=uppercase))
 
 
-@mcp.tool(
-    "current_time",
-    description=(
-        "Retrieve the current moment with precise Unix timestamps plus UTC and Eastern Time "
-        "(ET/EDT) ISO formats. Use this whenever the conversation needs an up-to-date clock "
-        "reference or time zone comparison."
-    ),
-)
-async def current_time(format: Literal["iso", "unix"] = "iso") -> dict[str, Any]:
-    """Return the current time with UTC and Eastern Time representations."""
-    print(
-        f"[HOUSEKEEPING-DEBUG] current_time called with format={format}",
-        file=sys.stderr,
-        flush=True,
-    )
 
-    snapshot = create_time_snapshot(EASTERN_TIMEZONE_NAME, fallback=EASTERN_TIMEZONE)
-    eastern = snapshot.eastern
-
-    if format == "iso":
-        rendered = snapshot.iso_utc
-    elif format == "unix":
-        rendered = str(snapshot.unix_seconds)
-    else:  # pragma: no cover - guarded by Literal
-        raise ValueError(f"Unsupported format: {format}")
-
-    offset = format_timezone_offset(eastern.utcoffset())
-    context_lines = list(build_context_lines(snapshot))
-    context_summary = "\n".join(context_lines)
-
-    result = {
-        "format": format,
-        "value": rendered,
-        "utc_iso": snapshot.iso_utc,
-        "utc_unix": str(snapshot.unix_seconds),
-        "utc_unix_precise": snapshot.unix_precise,
-        "eastern_iso": eastern.isoformat(),
-        "eastern_abbreviation": eastern.tzname(),
-        "eastern_display": eastern.strftime("%a %b %d %Y %I:%M:%S %p %Z"),
-        "eastern_offset": offset,
-        "timezone": EASTERN_TIMEZONE_NAME,
-        "context_lines": context_lines,
-        "context_summary": context_summary,
-    }
-
-    print("[HOUSEKEEPING-DEBUG] current_time returning result", file=sys.stderr, flush=True)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -556,5 +503,4 @@ __all__ = [
     "run",
     "main",
     "test_echo",
-    "current_time",
 ]
