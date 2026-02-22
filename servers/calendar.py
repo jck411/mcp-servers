@@ -28,6 +28,7 @@ from shared.google_auth import (
     get_calendar_service,
     get_tasks_service,
 )
+from shared.time_context import EASTERN_TIMEZONE_NAME
 from shared.tasks import (
     ScheduledTask,
     Task,
@@ -376,6 +377,10 @@ async def calendar_get_events(
 
     Return all events and scheduled tasks (tasks with due dates) in JSON format.
     Infer the most reasonable time window from context.
+
+    All returned event times are in America/New_York (Eastern Time).
+    Provide time_min/time_max as ISO dates (YYYY-MM-DD) or datetimes.
+    Naive datetimes are interpreted as Eastern Time.
     """
     try:
         service = get_calendar_service(user_email)
@@ -408,6 +413,7 @@ async def calendar_get_events(
             "maxResults": 250,
             "orderBy": "startTime",
             "singleEvents": True,
+            "timeZone": EASTERN_TIMEZONE_NAME,
         }
 
         if time_min_rfc:
@@ -628,8 +634,9 @@ async def create_event(
 ) -> str:
     """Create a new calendar event.
 
-    If start_time and end_time contain only dates (YYYY-MM-DD), an all-day event
-    is created. Otherwise they are treated as specific times in RFC3339/ISO format.
+    All-day events: use date-only strings (YYYY-MM-DD) for start_time and end_time.
+    Timed events: use ISO datetime (YYYY-MM-DDTHH:MM:SS) in Eastern Time
+    (America/New_York). The server handles timezone conversion automatically.
     """
     try:
         service = get_calendar_service(user_email)
@@ -651,8 +658,14 @@ async def create_event(
         else:
             start_formatted = parse_iso_time_string(start_time)
             end_formatted = parse_iso_time_string(end_time)
-            event["start"] = {"dateTime": start_formatted}
-            event["end"] = {"dateTime": end_formatted}
+            event["start"] = {
+                "dateTime": start_formatted,
+                "timeZone": EASTERN_TIMEZONE_NAME,
+            }
+            event["end"] = {
+                "dateTime": end_formatted,
+                "timeZone": EASTERN_TIMEZONE_NAME,
+            }
 
         if attendees:
             event["attendees"] = [{"email": email} for email in attendees]
@@ -702,7 +715,11 @@ async def update_event(
     location: Optional[str] = None,
     attendees: Optional[List[str]] = None,
 ) -> str:
-    """Update an existing calendar event."""
+    """Update an existing calendar event.
+
+    Provide times in Eastern Time (America/New_York) as ISO datetimes
+    (YYYY-MM-DDTHH:MM:SS) or dates (YYYY-MM-DD) for all-day events.
+    """
     try:
         service = get_calendar_service(user_email)
 
@@ -730,8 +747,14 @@ async def update_event(
             else:
                 start_formatted = parse_iso_time_string(start_time)
                 end_formatted = parse_iso_time_string(end_time)
-                event["start"] = {"dateTime": start_formatted}
-                event["end"] = {"dateTime": end_formatted}
+                event["start"] = {
+                    "dateTime": start_formatted,
+                    "timeZone": EASTERN_TIMEZONE_NAME,
+                }
+                event["end"] = {
+                    "dateTime": end_formatted,
+                    "timeZone": EASTERN_TIMEZONE_NAME,
+                }
 
         if attendees is not None:
             event["attendees"] = [{"email": email} for email in attendees]
@@ -1194,8 +1217,11 @@ async def create_task(
 ) -> str:
     """Create a new Google Task.
 
-    Set the due parameter to schedule the task. When scheduling EXISTING tasks,
-    use calendar_update_task instead to avoid duplicates.
+    Set due to schedule the task.  Accepted formats:
+    - Keywords: "today", "tomorrow", "next_week", "next_month", "next_year"
+    - Date: YYYY-MM-DD (in Eastern Time / America/New_York)
+    Note: Google Tasks only stores the date portion; time-of-day is discarded.
+    When scheduling EXISTING tasks, use calendar_update_task to avoid duplicates.
     """
     try:
         task_service = TaskService(user_email, service_factory=get_tasks_service)
@@ -1240,8 +1266,10 @@ async def update_task(
 ) -> str:
     """Update an existing task.
 
-    Use this to schedule an existing task by adding/updating due. Status should
-    be 'needsAction' or 'completed'.
+    Use this to schedule an existing task by adding/updating due.
+    due accepts: keywords ("today", "tomorrow"), or YYYY-MM-DD in Eastern Time.
+    Google Tasks only stores the date portion; time-of-day is discarded.
+    Status should be 'needsAction' or 'completed'.
     """
     try:
         task_service = TaskService(user_email, service_factory=get_tasks_service)

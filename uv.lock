@@ -707,6 +707,18 @@ wheels = [
 ]
 
 [[package]]
+name = "freezegun"
+version = "1.5.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/95/dd/23e2f4e357f8fd3bdff613c1fe4466d21bfb00a6177f238079b17f7b1c84/freezegun-1.5.5.tar.gz", hash = "sha256:ac7742a6cc6c25a2c35e9292dfd554b897b517d2dec26891a2e8debf205cb94a", size = 35914, upload-time = "2025-08-09T10:39:08.338Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/2e/b41d8a1a917d6581fc27a35d05561037b048e47df50f27f8ac9c7e27a710/freezegun-1.5.5-py3-none-any.whl", hash = "sha256:cd557f4a75cf074e84bc374249b9dd491eaeacd61376b9eb3c423282211619d2", size = 19266, upload-time = "2025-08-09T10:39:06.636Z" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1521,6 +1533,7 @@ all = [
     { name = "monarchmoney" },
     { name = "playwright" },
     { name = "pydantic-settings" },
+    { name = "python-dateutil" },
     { name = "qdrant-client" },
     { name = "spotipy" },
     { name = "wakeonlan" },
@@ -1530,8 +1543,10 @@ calendar = [
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
+    { name = "python-dateutil" },
 ]
 dev = [
+    { name = "freezegun" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1542,18 +1557,21 @@ gdrive = [
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
     { name = "httpx" },
+    { name = "python-dateutil" },
 ]
 gmail = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
+    { name = "python-dateutil" },
 ]
 google = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
+    { name = "python-dateutil" },
 ]
 housekeeping = [
     { name = "aiosqlite" },
@@ -1570,6 +1588,7 @@ notes = [
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
+    { name = "python-dateutil" },
 ]
 pdf = [
     { name = "httpx" },
@@ -1601,6 +1620,7 @@ requires-dist = [
     { name = "androidtvremote2", marker = "extra == 'tv'", specifier = ">=0.3.0" },
     { name = "bscpylgtv", marker = "extra == 'tv'", specifier = ">=0.4.9" },
     { name = "fastmcp", specifier = ">=2.14.1" },
+    { name = "freezegun", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "google-api-python-client", marker = "extra == 'google'", specifier = ">=2.0.0" },
     { name = "google-auth", marker = "extra == 'google'", specifier = ">=2.0.0" },
     { name = "google-auth-httplib2", marker = "extra == 'google'", specifier = ">=0.1.0" },
@@ -1622,6 +1642,7 @@ requires-dist = [
     { name = "pydantic-settings", marker = "extra == 'rag'", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25.2" },
+    { name = "python-dateutil", marker = "extra == 'google'", specifier = ">=2.8.0" },
     { name = "qdrant-client", marker = "extra == 'housekeeping'", specifier = ">=1.9" },
     { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
