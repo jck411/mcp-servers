@@ -56,16 +56,51 @@ uv sync --extra playwright
 python -m servers.playwright --transport streamable-http --host 0.0.0.0 --port 9011
 ```
 
-## Development
+## Local Development
+
+Development happens locally — edit, run, and test servers on your machine, then deploy to Proxmox when done.
+
+### 1. Start an MCP server
 
 ```bash
-# Install with dev deps
+cd /path/to/mcp-servers
+
+# Launch one or more servers
+./dev.sh spotify
+./dev.sh spotify calculator    # multiple at once
+./dev.sh --list                # show all servers + ports
+```
+
+Or manually:
+
+```bash
+uv sync --extra spotify
+python -m servers.spotify --transport streamable-http --host 127.0.0.1 --port 9010
+```
+
+### 2. Connect from the backend
+
+Start the Backend_FastAPI locally (`./startdev.sh`), open the frontend, and go to **Settings → Server status**. Enter the server URL and click **Connect**:
+
+```
+http://127.0.0.1:9010/mcp
+```
+
+The backend discovers tools via MCP protocol and makes them available to the LLM immediately.
+
+### 3. Iterate
+
+Edit server code → restart (or let watchfiles reload) → tools update on next refresh. No deploy needed during development.
+
+### 4. Deploy to Proxmox
+
+Only after local testing passes — see [Deployment](#deployment-proxmox) below.
+
+### Tests & Linting
+
+```bash
 uv sync --extra dev --extra all
-
-# Run tests
 pytest tests/ -v
-
-# Lint
 ruff check servers/ shared/
 ```
 
