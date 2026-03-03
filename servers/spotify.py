@@ -576,13 +576,13 @@ async def seek_position(
 @retry_on_rate_limit(max_retries=3)
 async def get_user_playlists(
     user_email: str = DEFAULT_USER_EMAIL,
-    limit: int = 50,
 ) -> str | dict[str, Any]:
-    """Get a list of the user's Spotify playlists.
+    """Get all of the user's Spotify playlists.
+
+    Paginates through the full list so every playlist is returned.
 
     Args:
         user_email: User's email for authentication
-        limit: Maximum number of playlists to return (default: 50, max: 50)
 
     Returns:
         Either a formatted error message string or a JSON-serializable dict
@@ -599,18 +599,21 @@ async def get_user_playlists(
         return f"Error creating Spotify client: {exc}"
 
     try:
+        all_playlists: list[dict[str, Any]] = []
         results = await asyncio.to_thread(
             sp.current_user_playlists,
-            limit=min(limit, 50),
+            limit=50,
         )
+        while results and isinstance(results, dict):
+            all_playlists.extend(results.get("items", []))
+            if results.get("next"):
+                results = await asyncio.to_thread(sp.next, results)
+            else:
+                break
     except Exception as exc:  # noqa: BLE001
         return f"Error fetching playlists: {exc}"
 
-    if not results or not isinstance(results, dict):
-        return "Invalid response from Spotify API"
-
-    playlists = results.get("items", [])
-    if not playlists:
+    if not all_playlists:
         return "No playlists found"
 
     playlists_list: list[dict[str, Any]] = [
@@ -623,7 +626,7 @@ async def get_user_playlists(
             "uri": playlist.get("uri", ""),
             "url": playlist.get("external_urls", {}).get("spotify", ""),
         }
-        for playlist in playlists
+        for playlist in all_playlists
     ]
 
     return {
@@ -637,14 +640,15 @@ async def get_user_playlists(
 async def get_playlist_tracks(
     playlist_id: str,
     user_email: str = DEFAULT_USER_EMAIL,
-    limit: int = 50,
 ) -> str | dict[str, Any]:
-    """Get tracks from a Spotify playlist.
+    """Get all tracks from a Spotify playlist.
+
+    Paginates through the full playlist so every track is returned,
+    regardless of playlist size.
 
     Args:
         playlist_id: Spotify playlist ID or URI
         user_email: User's email for authentication
-        limit: Maximum number of tracks to return (default: 50, max: 100)
 
     Returns:
         Either a formatted error message string or a JSON-serializable dict
@@ -674,23 +678,26 @@ async def get_playlist_tracks(
         playlist_name = playlist_info.get("name", "Unknown Playlist")
         total_tracks = playlist_info.get("tracks", {}).get("total", 0)
 
+        all_items: list[dict[str, Any]] = []
         results = await asyncio.to_thread(
-            sp.playlist_tracks,
+            sp.playlist_items,
             playlist_id,
-            limit=min(limit, 100),
+            limit=100,
         )
+        while results and isinstance(results, dict):
+            all_items.extend(results.get("items", []))
+            if results.get("next"):
+                results = await asyncio.to_thread(sp.next, results)
+            else:
+                break
     except Exception as exc:  # noqa: BLE001
         return f"Error fetching playlist tracks: {exc}"
 
-    if not results or not isinstance(results, dict):
-        return "Invalid response from Spotify API"
-
-    items = results.get("items", [])
-    if not items:
+    if not all_items:
         return f"No tracks found in playlist '{playlist_name}'"
 
     tracks_list: list[dict[str, Any]] = []
-    for item in items:
+    for item in all_items:
         track = item.get("track")
         if not track:
             continue
@@ -839,15 +846,7 @@ async def delete_playlist(
         return f"Error checking playlist ownership: {exc}"
 
     try:
-        user_info = await asyncio.to_thread(sp.current_user)
-        if not isinstance(user_info, dict):
-            return "Error: Could not get user info"
-
-        user_id = user_info.get("id")
-        if not user_id:
-            return "Error: Could not get user ID"
-
-        await asyncio.to_thread(sp.user_playlist_unfollow, user_id, playlist_id)
+        await asyncio.to_thread(sp.current_user_unfollow_playlist, playlist_id)
     except Exception as exc:  # noqa: BLE001
         return f"Error deleting playlist: {exc}"
 
@@ -1211,13 +1210,13 @@ async def get_recently_played(
 @retry_on_rate_limit(max_retries=3)
 async def get_saved_tracks(
     user_email: str = DEFAULT_USER_EMAIL,
-    limit: int = 50,
 ) -> str | dict[str, Any]:
-    """Get the user's saved (liked) tracks.
+    """Get all of the user's saved (liked) tracks.
+
+    Paginates through the full library so every saved track is returned.
 
     Args:
         user_email: User's email for authentication
-        limit: Maximum number of tracks to return (default: 50, max: 50)
 
     Returns:
         Either a formatted error message string or a JSON-serializable dict
@@ -1234,22 +1233,25 @@ async def get_saved_tracks(
         return f"Error creating Spotify client: {exc}"
 
     try:
+        all_items: list[dict[str, Any]] = []
         results = await asyncio.to_thread(
             sp.current_user_saved_tracks,
-            limit=min(limit, 50),
+            limit=50,
         )
+        while results and isinstance(results, dict):
+            all_items.extend(results.get("items", []))
+            if results.get("next"):
+                results = await asyncio.to_thread(sp.next, results)
+            else:
+                break
     except Exception as exc:  # noqa: BLE001
         return f"Error fetching saved tracks: {exc}"
 
-    if not results or not isinstance(results, dict):
-        return "Invalid response from Spotify API"
-
-    items = results.get("items", [])
-    if not items:
+    if not all_items:
         return "No saved tracks found"
 
     tracks_list: list[dict[str, Any]] = []
-    for item in items:
+    for item in all_items:
         track = item.get("track")
         if not track:
             continue
