@@ -1206,17 +1206,72 @@ async def get_recently_played(
     }
 
 
+@mcp.tool("spotify_check_saved_tracks")
+@retry_on_rate_limit(max_retries=3)
+async def check_saved_tracks(
+    track_uris: list[str],
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str | dict[str, Any]:
+    """Check if one or more tracks are in the user's saved (liked) library.
+
+    This is the fast way to check — a single API call, no pagination.
+    Use this instead of fetching the entire saved-tracks library.
+
+    Args:
+        track_uris: List of Spotify track URIs, URLs, or IDs to check (max 50)
+        user_email: User's email for authentication
+
+    Returns:
+        A dict mapping each track URI to True (saved) or False (not saved).
+    """
+    try:
+        sp = get_spotify_client(user_email)
+    except ValueError as exc:
+        return (
+            f"Authentication error: {exc}. "
+            "Click 'Connect Spotify' in Settings to authorize this account."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error creating Spotify client: {exc}"
+
+    if not track_uris:
+        return "Error: No track URIs provided"
+
+    normalized = [normalize_track_uri(uri) for uri in track_uris[:50]]
+    track_ids = [uri.split(":")[-1] for uri in normalized]
+
+    try:
+        results = await asyncio.to_thread(
+            sp.current_user_saved_tracks_contains, track_ids
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error checking saved tracks: {exc}"
+
+    if not isinstance(results, list):
+        return "Invalid response from Spotify API"
+
+    return {
+        "results": {
+            uri: saved for uri, saved in zip(normalized, results)
+        },
+    }
+
+
 @mcp.tool("spotify_get_saved_tracks")
 @retry_on_rate_limit(max_retries=3)
 async def get_saved_tracks(
     user_email: str = DEFAULT_USER_EMAIL,
+    limit: int = 50,
 ) -> str | dict[str, Any]:
-    """Get all of the user's saved (liked) tracks.
+    """Get the user's saved (liked) tracks.
 
-    Paginates through the full library so every saved track is returned.
+    Returns up to `limit` tracks by default. Set limit=0 to fetch the
+    entire library (may be very large — prefer spotify_check_saved_tracks
+    to test if specific tracks are saved).
 
     Args:
         user_email: User's email for authentication
+        limit: Number of tracks to return (default 50, 0 = all)
 
     Returns:
         Either a formatted error message string or a JSON-serializable dict
@@ -1232,14 +1287,20 @@ async def get_saved_tracks(
     except Exception as exc:  # noqa: BLE001
         return f"Error creating Spotify client: {exc}"
 
+    fetch_all = limit == 0
+    page_size = 50 if fetch_all else min(limit, 50)
+
     try:
         all_items: list[dict[str, Any]] = []
         results = await asyncio.to_thread(
             sp.current_user_saved_tracks,
-            limit=50,
+            limit=page_size,
         )
         while results and isinstance(results, dict):
             all_items.extend(results.get("items", []))
+            if not fetch_all and len(all_items) >= limit:
+                all_items = all_items[:limit]
+                break
             if results.get("next"):
                 results = await asyncio.to_thread(sp.next, results)
             else:
@@ -1356,5 +1417,6 @@ __all__ = [
     "get_devices",
     "transfer_playback",
     "get_recently_played",
+    "check_saved_tracks",
     "get_saved_tracks",
 ]
