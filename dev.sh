@@ -1,9 +1,10 @@
 #!/bin/bash
-# Launch one or more MCP servers locally for development.
+# Launch MCP servers locally for development.
 #
 # Usage:
-#   ./dev.sh spotify              # single server
-#   ./dev.sh spotify calculator   # multiple servers
+#   ./dev.sh                      # interactive menu to pick servers
+#   ./dev.sh spotify              # single server (skip menu)
+#   ./dev.sh spotify calculator   # multiple servers (skip menu)
 #   ./dev.sh --list               # show available servers + ports
 #
 # Servers run on 127.0.0.1 at their assigned port.
@@ -35,19 +36,59 @@ declare -A PORTS=(
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
+YELLOW='\033[0;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Sorted server names (reused everywhere)
+SORTED_NAMES=($(echo "${!PORTS[@]}" | tr ' ' '\n' | sort))
+
 list_servers() {
     echo -e "${BOLD}Available servers:${NC}"
-    for name in $(echo "${!PORTS[@]}" | tr ' ' '\n' | sort); do
+    for name in "${SORTED_NAMES[@]}"; do
         echo -e "  ${CYAN}${name}${NC}  →  port ${PORTS[$name]}  →  http://127.0.0.1:${PORTS[$name]}/mcp"
     done
 }
 
-if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo "Usage: ./dev.sh <server> [server ...]"
-    echo "       ./dev.sh --list"
+pick_servers() {
+    echo -e "${BOLD}Select servers to launch:${NC}"
+    echo ""
+    local i=1
+    for name in "${SORTED_NAMES[@]}"; do
+        printf "  ${CYAN}%2d${NC})  %-20s  port %s\n" "$i" "$name" "${PORTS[$name]}"
+        ((i++))
+    done
+    echo ""
+    printf "  ${YELLOW} a${NC})  All servers\n"
+    echo ""
+    echo -e "Enter numbers separated by spaces (e.g. ${CYAN}1 3 5${NC}), or ${YELLOW}a${NC} for all:"
+    read -rp "> " selection
+
+    if [[ -z "$selection" || "$selection" == "a" || "$selection" == "A" ]]; then
+        SERVERS=("${SORTED_NAMES[@]}")
+        return
+    fi
+
+    SERVERS=()
+    for token in $selection; do
+        if [[ "$token" =~ ^[0-9]+$ ]] && (( token >= 1 && token <= ${#SORTED_NAMES[@]} )); then
+            SERVERS+=("${SORTED_NAMES[$((token - 1))]}")
+        else
+            echo -e "${RED}Invalid selection: ${token}${NC}"
+            exit 1
+        fi
+    done
+
+    if [[ ${#SERVERS[@]} -eq 0 ]]; then
+        echo -e "${RED}No servers selected.${NC}"
+        exit 1
+    fi
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    echo "Usage: ./dev.sh                     # interactive menu"
+    echo "       ./dev.sh spotify calculator   # launch specific servers"
+    echo "       ./dev.sh --list               # show available servers + ports"
     echo ""
     list_servers
     exit 0
@@ -64,6 +105,35 @@ if [[ ! -d .venv ]]; then
     uv sync
 fi
 
+# Determine which servers to launch
+if [[ $# -eq 0 ]]; then
+    pick_servers
+else
+    SERVERS=()
+    for name in "$@"; do
+        if [[ -z "${PORTS[$name]}" ]]; then
+            echo -e "${RED}Unknown server: ${name}${NC}"
+            echo "Run ./dev.sh --list to see available servers."
+            exit 1
+        fi
+        SERVERS+=("$name")
+    done
+fi
+
+# Kill anything already listening on the ports we need
+for name in "${SERVERS[@]}"; do
+    port="${PORTS[$name]}"
+    if [[ -z "$port" ]]; then
+        continue
+    fi
+    existing=$(lsof -ti :"$port" 2>/dev/null || true)
+    if [[ -n "$existing" ]]; then
+        echo -e "${RED}Killing existing process on port ${port}...${NC}"
+        echo "$existing" | xargs kill -9 2>/dev/null || true
+    fi
+done
+sleep 0.5
+
 PIDS=()
 
 cleanup() {
@@ -77,13 +147,8 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-for name in "$@"; do
+for name in "${SERVERS[@]}"; do
     port="${PORTS[$name]}"
-    if [[ -z "$port" ]]; then
-        echo -e "${RED}Unknown server: ${name}${NC}"
-        echo "Run ./dev.sh --list to see available servers."
-        exit 1
-    fi
 
     echo -e "${GREEN}Starting ${name} on http://127.0.0.1:${port}/mcp${NC}"
     .venv/bin/python -m "servers.${name}" \
@@ -94,5 +159,5 @@ for name in "$@"; do
 done
 
 echo ""
-echo -e "${BOLD}All servers running. Ctrl+C to stop.${NC}"
+echo -e "${BOLD}${#PIDS[@]} servers running. Ctrl+C to stop.${NC}"
 wait
