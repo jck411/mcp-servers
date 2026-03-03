@@ -150,11 +150,10 @@ trap cleanup SIGINT SIGTERM
 for name in "${SERVERS[@]}"; do
     port="${PORTS[$name]}"
 
-    echo -e "${GREEN}Starting ${name} on http://127.0.0.1:${port}/mcp${NC}"
-    .venv/bin/python -m "servers.${name}" \
-        --transport streamable-http \
-        --host 127.0.0.1 \
-        --port "$port" &
+    echo -e "${GREEN}Starting ${name} on http://127.0.0.1:${port}/mcp  ${YELLOW}(auto-reload)${NC}"
+    .venv/bin/watchfiles \
+        ".venv/bin/python -m servers.${name} --transport streamable-http --host 127.0.0.1 --port ${port}" \
+        servers/ shared/ &
     PIDS+=($!)
 done
 
