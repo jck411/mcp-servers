@@ -1257,17 +1257,297 @@ async def check_saved_tracks(
     }
 
 
-@mcp.tool("spotify_get_saved_tracks")
+@mcp.tool("spotify_find_saved_by_artist")
 @retry_on_rate_limit(max_retries=3)
-async def get_saved_tracks(
+async def find_saved_by_artist(
+    artist_name: str,
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str | dict[str, Any]:
+    """Find all tracks by an artist that are saved in the user's library.
+
+    USE THIS when the user asks things like:
+    - "what tracks by <artist> do I have saved?"
+    - "do I have any <artist> in my favorites?"
+    - "which <artist> songs are in my library?"
+
+    Comprehensive: resolves the artist, fetches ALL their albums (including
+    compilations and 'appears on'), gets every track, then batch-checks which
+    are saved. This catches deep cuts and compilation appearances that a
+    simple search would miss.
+
+    Args:
+        artist_name: The name of the artist to look up.
+        user_email: User's email for authentication
+
+    Returns:
+        Dict with all saved tracks by that artist.
+    """
+    try:
+        sp = get_spotify_client(user_email)
+    except ValueError as exc:
+        return (
+            f"Authentication error: {exc}. "
+            "Click 'Connect Spotify' in Settings to authorize this account."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error creating Spotify client: {exc}"
+
+    # Step 1: resolve artist name → Spotify artist ID
+    try:
+        search_result = await asyncio.to_thread(
+            sp.search, q=f"artist:{artist_name}", type="artist", limit=5
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error searching for artist: {exc}"
+
+    artists_items = (
+        search_result.get("artists", {}).get("items", []) if search_result else []
+    )
+    if not artists_items:
+        return f"No artist found matching '{artist_name}'"
+
+    # Pick best match (first result from Spotify's relevance ranking)
+    artist = artists_items[0]
+    artist_id = artist["id"]
+    artist_display = artist.get("name", artist_name)
+
+    # Step 2: get ALL albums (albums, singles, compilations, appears_on)
+    all_albums: list[dict[str, Any]] = []
+    try:
+        results = await asyncio.to_thread(
+            sp.artist_albums,
+            artist_id,
+            include_groups="album,single,compilation,appears_on",
+            limit=50,
+        )
+        while results and isinstance(results, dict):
+            all_albums.extend(results.get("items", []))
+            if results.get("next"):
+                results = await asyncio.to_thread(sp.next, results)
+            else:
+                break
+    except Exception as exc:  # noqa: BLE001
+        return f"Error fetching artist albums: {exc}"
+
+    if not all_albums:
+        return f"No albums found for artist '{artist_display}'"
+
+    # Step 3: get all track IDs from those albums
+    all_tracks: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for album in all_albums:
+        album_id = album.get("id")
+        if not album_id:
+            continue
+        try:
+            album_tracks = await asyncio.to_thread(
+                sp.album_tracks, album_id, limit=50
+            )
+            while album_tracks and isinstance(album_tracks, dict):
+                for track in album_tracks.get("items", []):
+                    tid = track.get("id")
+                    if not tid or tid in seen_ids:
+                        continue
+                    # Only include tracks where the target artist is credited
+                    track_artist_ids = {
+                        a.get("id") for a in track.get("artists", [])
+                    }
+                    if artist_id in track_artist_ids:
+                        seen_ids.add(tid)
+                        track["_album_name"] = album.get("name", "Unknown")
+                        all_tracks.append(track)
+                if album_tracks.get("next"):
+                    album_tracks = await asyncio.to_thread(sp.next, album_tracks)
+                else:
+                    break
+        except Exception:  # noqa: BLE001
+            continue  # skip albums that error out
+
+    if not all_tracks:
+        return f"No tracks found for artist '{artist_display}'"
+
+    # Step 4: batch-check saved status (50 at a time)
+    track_ids = [t["id"] for t in all_tracks]
+    saved_flags: list[bool] = []
+    for i in range(0, len(track_ids), 50):
+        batch = track_ids[i : i + 50]
+        try:
+            flags = await asyncio.to_thread(
+                sp.current_user_saved_tracks_contains, batch
+            )
+            saved_flags.extend(flags)
+        except Exception:  # noqa: BLE001
+            saved_flags.extend([False] * len(batch))
+
+    saved_ids: set[str] = set()
+    saved_tracks: list[dict[str, Any]] = []
+    for track, is_saved in zip(all_tracks, saved_flags):
+        if is_saved:
+            saved_ids.add(track["id"])
+            saved_tracks.append({
+                "name": track.get("name", "Unknown"),
+                "artist": ", ".join(
+                    a.get("name", "Unknown") for a in track.get("artists", [])
+                ),
+                "album": track.get("_album_name", "Unknown"),
+                "duration": (
+                    f"{track.get('duration_ms', 0) // 60000}:"
+                    f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
+                ),
+                "uri": track.get("uri", ""),
+            })
+
+    # Step 5: scan liked songs for tracks by this artist that the album-based
+    # search missed.  artist_albums(appears_on) is NOT exhaustive — Spotify
+    # omits many compilations, remixes, and features.  Scanning liked songs
+    # (~50 per request) is the only reliable way to catch everything.
+    liked_extra = 0
+    try:
+        results = await asyncio.to_thread(sp.current_user_saved_tracks, limit=50)
+        while results and isinstance(results, dict):
+            for item in results.get("items", []):
+                track = item.get("track")
+                if not track or not track.get("id"):
+                    continue
+                tid = track["id"]
+                if tid in saved_ids:
+                    continue  # already found via album path
+                track_artist_ids = {
+                    a.get("id") for a in track.get("artists", [])
+                }
+                if artist_id in track_artist_ids:
+                    saved_ids.add(tid)
+                    saved_tracks.append({
+                        "name": track.get("name", "Unknown"),
+                        "artist": ", ".join(
+                            a.get("name", "Unknown")
+                            for a in track.get("artists", [])
+                        ),
+                        "album": track.get("album", {}).get("name", "Unknown"),
+                        "duration": (
+                            f"{track.get('duration_ms', 0) // 60000}:"
+                            f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
+                        ),
+                        "uri": track.get("uri", ""),
+                    })
+                    liked_extra += 1
+            if results.get("next"):
+                results = await asyncio.to_thread(sp.next, results)
+            else:
+                break
+    except Exception:  # noqa: BLE001
+        pass  # liked-songs scan is best-effort
+
+    return {
+        "artist": artist_display,
+        "total_albums_checked": len(all_albums),
+        "extra_from_liked_scan": liked_extra,
+        "saved_count": len(saved_tracks),
+        "saved_tracks": saved_tracks,
+    }
+
+
+@mcp.tool("spotify_get_artist_info")
+@retry_on_rate_limit(max_retries=3)
+async def get_artist_info(
+    artist_name: str,
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str | dict[str, Any]:
+    """Get detailed information about an artist including top tracks and albums.
+
+    Args:
+        artist_name: The name of the artist to look up.
+        user_email: User's email for authentication
+
+    Returns:
+        Dict with artist details, top tracks, and album list.
+    """
+    try:
+        sp = get_spotify_client(user_email)
+    except ValueError as exc:
+        return (
+            f"Authentication error: {exc}. "
+            "Click 'Connect Spotify' in Settings to authorize this account."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error creating Spotify client: {exc}"
+
+    try:
+        search_result = await asyncio.to_thread(
+            sp.search, q=f"artist:{artist_name}", type="artist", limit=5
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Error searching for artist: {exc}"
+
+    artists_items = (
+        search_result.get("artists", {}).get("items", []) if search_result else []
+    )
+    if not artists_items:
+        return f"No artist found matching '{artist_name}'"
+
+    artist = artists_items[0]
+    artist_id = artist["id"]
+
+    # Get top tracks
+    try:
+        top_result = await asyncio.to_thread(sp.artist_top_tracks, artist_id)
+        top_tracks = [
+            {
+                "name": t.get("name", "Unknown"),
+                "album": t.get("album", {}).get("name", "Unknown"),
+                "uri": t.get("uri", ""),
+            }
+            for t in top_result.get("tracks", [])[:10]
+        ]
+    except Exception:  # noqa: BLE001
+        top_tracks = []
+
+    # Get albums
+    try:
+        albums_result = await asyncio.to_thread(
+            sp.artist_albums, artist_id, include_groups="album,single", limit=50
+        )
+        albums = [
+            {
+                "name": a.get("name", "Unknown"),
+                "type": a.get("album_type", "unknown"),
+                "release_date": a.get("release_date", ""),
+                "total_tracks": a.get("total_tracks", 0),
+                "uri": a.get("uri", ""),
+            }
+            for a in albums_result.get("items", [])
+        ]
+    except Exception:  # noqa: BLE001
+        albums = []
+
+    return {
+        "name": artist.get("name", "Unknown"),
+        "genres": artist.get("genres", []),
+        "popularity": artist.get("popularity", 0),
+        "followers": artist.get("followers", {}).get("total", 0),
+        "uri": artist.get("uri", ""),
+        "url": artist.get("external_urls", {}).get("spotify", ""),
+        "top_tracks": top_tracks,
+        "albums": albums,
+    }
+
+
+@mcp.tool("spotify_export_saved_library")
+@retry_on_rate_limit(max_retries=3)
+async def export_saved_library(
     user_email: str = DEFAULT_USER_EMAIL,
     limit: int = 50,
 ) -> str | dict[str, Any]:
-    """Get the user's saved (liked) tracks.
+    """EXPENSIVE bulk export of the user's entire saved/liked track library.
 
-    Returns up to `limit` tracks by default. Set limit=0 to fetch the
-    entire library (may be very large — prefer spotify_check_saved_tracks
-    to test if specific tracks are saved).
+    WARNING: This dumps raw library data and can produce enormous output
+    (thousands of tracks, 100K+ tokens). Only use for full library export
+    or backup — NEVER for answering questions like "what <artist> do I have
+    saved?" or "is this song in my favorites?".
+
+    For those queries, use instead:
+    - spotify_find_saved_by_artist — "what <artist> tracks are in my library?"
+    - spotify_check_saved_tracks — "is this specific track saved?"
 
     Args:
         user_email: User's email for authentication
@@ -1418,5 +1698,7 @@ __all__ = [
     "transfer_playback",
     "get_recently_played",
     "check_saved_tracks",
-    "get_saved_tracks",
+    "find_saved_by_artist",
+    "get_artist_info",
+    "export_saved_library",
 ]
