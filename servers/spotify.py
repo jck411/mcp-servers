@@ -946,10 +946,12 @@ async def delete_playlist(
     playlist_id: str,
     user_email: str = DEFAULT_USER_EMAIL,
 ) -> str:
-    """Delete (unfollow) a Spotify playlist.
+    """Delete or unfollow a Spotify playlist.
 
-    If you own the playlist, it will be permanently deleted for all users.
-    If you don't own it, it's only removed from your library.
+    If you own the playlist, it will be permanently deleted.
+    If you don't own it, it will be removed from your library (unfollowed).
+
+    Use this for any of: "delete playlist", "remove playlist", "unfollow playlist".
 
     Args:
         playlist_id: Spotify playlist ID or URI
@@ -980,20 +982,18 @@ async def delete_playlist(
         current_user_id = (
             user_info.get("id", "") if isinstance(user_info, dict) else ""
         )
-        if owner_id and current_user_id and owner_id != current_user_id:
-            return (
-                f"Cannot delete playlist '{playlist_name}' - "
-                f"you don't own it (owner: {owner_id})"
-            )
+        is_own = owner_id and current_user_id and owner_id == current_user_id
     except _API_ERRORS as exc:
-        return f"Error checking playlist ownership: {exc}"
+        return f"Error checking playlist info: {exc}"
 
     try:
         await _call(sp.current_user_unfollow_playlist, playlist_id)
     except _API_ERRORS as exc:
-        return f"Error deleting playlist: {exc}"
+        return f"Error removing playlist: {exc}"
 
-    return f"Successfully deleted playlist: {playlist_name}"
+    if is_own:
+        return f"Successfully deleted your playlist: {playlist_name}"
+    return f"Successfully unfollowed playlist: {playlist_name} (by {owner_id})"
 
 
 @mcp.tool("spotify_add_tracks_to_playlist")
@@ -1034,6 +1034,43 @@ async def add_tracks_to_playlist(
         return f"Error adding tracks to playlist: {exc}"
 
     return f"Successfully added {len(normalized_uris)} track(s) to playlist"
+
+
+@mcp.tool("spotify_remove_tracks_from_playlist")
+@retry_on_rate_limit(max_retries=3)
+async def remove_tracks_from_playlist(
+    playlist_id: str,
+    track_uris: list[str],
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str:
+    """Remove tracks from a Spotify playlist.
+
+    Args:
+        playlist_id: Spotify playlist ID or URI
+        track_uris: List of track URIs, URLs, or IDs to remove
+        user_email: User's email for authentication
+
+    Returns:
+        Confirmation message with number of tracks removed, or an error.
+    """
+    sp, err = _get_client(user_email)
+    if err:
+        return err
+
+    playlist_id = normalize_playlist_id(playlist_id)
+
+    if not track_uris:
+        return "Error: No track URIs provided"
+
+    normalized_uris = [normalize_track_uri(uri) for uri in track_uris]
+    tracks = [{"uri": uri} for uri in normalized_uris]
+
+    try:
+        await _call(sp.playlist_remove_all_occurrences_of_items, playlist_id, tracks)
+    except _API_ERRORS as exc:
+        return f"Error removing tracks from playlist: {exc}"
+
+    return f"Successfully removed {len(normalized_uris)} track(s) from playlist"
 
 
 @mcp.tool("spotify_add_to_queue")
@@ -1743,6 +1780,7 @@ __all__ = [
     "create_playlist",
     "delete_playlist",
     "add_tracks_to_playlist",
+    "remove_tracks_from_playlist",
     "add_to_queue",
     "get_queue",
     "get_devices",
