@@ -10,8 +10,12 @@ Run:
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+import random
+import re
+from collections.abc import Callable
+from typing import Any
 
+import spotipy.exceptions
 from fastmcp import FastMCP
 
 from shared.spotify_auth import (
@@ -25,10 +29,57 @@ from shared.spotify_identifiers import (
     normalize_track_uri,
 )
 
-# Default port for HTTP transport
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 DEFAULT_HTTP_PORT = 9010
+SPOTIFY_API_TIMEOUT = 25  # seconds per Spotify API call
+BATCH_SIZE = 50  # Spotify API max items per request
 
 mcp = FastMCP("spotify")
+
+_AUTH_HINT = "Click 'Connect Spotify' in Settings to authorize this account."
+
+# Exceptions considered transient / API-related (caught by tools)
+_API_ERRORS = (spotipy.exceptions.SpotifyException, TimeoutError, ConnectionError)
+
+# Pattern to detect liked-songs intent
+_LIKED_RE = re.compile(
+    r"\b(liked?\s+songs?|saved?\s+(songs?|tracks?|music)"
+    r"|my\s+(likes?|favorites?|favourites?|saved|library)"
+    r"|favorite\s+songs?|songs?\s+i.ve?\s+liked|shuffle\s+my\s+likes)\b",
+    re.IGNORECASE,
+)
+
+_RESUME_WORDS = frozenset(
+    {"resume", "unpause", "continue", "continue playing", "continue playback"}
+)
+
+
+async def _call(
+    func: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """Execute a blocking Spotify API function with timeout protection."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(func, *args, **kwargs),
+        timeout=SPOTIFY_API_TIMEOUT,
+    )
+
+
+def _format_duration(ms: int) -> str:
+    """Format milliseconds to 'm:ss'."""
+    return f"{ms // 60000}:{(ms % 60000) // 1000:02d}"
+
+
+def _get_client(user_email: str = DEFAULT_USER_EMAIL) -> tuple[Any, str | None]:
+    """Return (spotify_client, None) or (None, error_message)."""
+    try:
+        return get_spotify_client(user_email), None
+    except ValueError as exc:
+        return None, f"Authentication error: {exc}. {_AUTH_HINT}"
+    except (OSError, spotipy.exceptions.SpotifyException) as exc:
+        return None, f"Error creating Spotify client: {exc}"
 
 
 def _format_track_info(track: dict[str, Any]) -> str:
@@ -40,15 +91,13 @@ def _format_track_info(track: dict[str, Any]) -> str:
     album = track.get("album", {}).get("name", "Unknown")
     url = track.get("external_urls", {}).get("spotify", "")
     uri = track.get("uri", "")
-    duration_ms = track.get("duration_ms", 0)
-    duration_min = duration_ms // 60000
-    duration_sec = (duration_ms % 60000) // 1000
+    duration = _format_duration(track.get("duration_ms", 0))
 
     return (
         f"Track: {name}\n"
         f"Artist: {artists}\n"
         f"Album: {album}\n"
-        f"Duration: {duration_min}:{duration_sec:02d}\n"
+        f"Duration: {duration}\n"
         f"URI: {uri}\n"
         f"Link: {url}"
     )
@@ -75,24 +124,18 @@ async def search_tracks(
         Either a formatted error message string or a JSON-serializable dict
         with the search results.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.search,
             q=query,
             type="track",
-            limit=min(limit, 50),
+            limit=min(limit, BATCH_SIZE),
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error searching Spotify: {exc}"
 
     if not results or not isinstance(results, dict):
@@ -113,10 +156,7 @@ async def search_tracks(
                 artist.get("name", "Unknown") for artist in track.get("artists", [])
             ),
             "album": track.get("album", {}).get("name", "Unknown"),
-            "duration": (
-                f"{track.get('duration_ms', 0) // 60000}:"
-                f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-            ),
+            "duration": _format_duration(track.get("duration_ms", 0)),
             "uri": track.get("uri", ""),
             "url": track.get("external_urls", {}).get("spotify", ""),
         }
@@ -146,19 +186,13 @@ async def get_current_playback(
     Returns:
         Formatted playback information or message if nothing is playing.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        playback = await asyncio.to_thread(sp.current_playback)
-    except Exception as exc:  # noqa: BLE001
+        playback = await _call(sp.current_playback)
+    except _API_ERRORS as exc:
         return f"Error getting current playback: {exc}"
 
     if not playback or not playback.get("item"):
@@ -170,8 +204,7 @@ async def get_current_playback(
     shuffle = playback.get("shuffle_state", False)
     repeat = playback.get("repeat_state", "off")
     progress_ms = playback.get("progress_ms", 0)
-    progress_min = progress_ms // 60000
-    progress_sec = (progress_ms % 60000) // 1000
+    progress = _format_duration(progress_ms)
 
     # Resolve playback context (playlist, album, or artist)
     context_line = ""
@@ -182,22 +215,23 @@ async def get_current_playback(
         ctx_id = ctx_uri.split(":")[-1] if ctx_uri else ""
         if ctx_type == "playlist" and ctx_id:
             try:
-                pl = await asyncio.to_thread(
+                pl = await _call(
                     sp.playlist, ctx_id, fields="name,owner(display_name)"
                 )
-                context_line = f"Playing from playlist: {pl['name']} (by {pl['owner']['display_name']})"
+                owner = pl['owner']['display_name']
+                context_line = f"Playing from playlist: {pl['name']} (by {owner})"
             except Exception:  # noqa: BLE001
                 context_line = f"Playing from playlist: {ctx_uri}"
         elif ctx_type == "album" and ctx_id:
             try:
-                alb = await asyncio.to_thread(sp.album, ctx_id)
+                alb = await _call(sp.album, ctx_id)
                 alb_artists = ", ".join(a["name"] for a in alb.get("artists", []))
                 context_line = f"Playing from album: {alb['name']} by {alb_artists}"
             except Exception:  # noqa: BLE001
                 context_line = f"Playing from album: {ctx_uri}"
         elif ctx_type == "artist" and ctx_id:
             try:
-                art = await asyncio.to_thread(sp.artist, ctx_id)
+                art = await _call(sp.artist, ctx_id)
                 context_line = f"Playing from artist: {art['name']}"
             except Exception:  # noqa: BLE001
                 context_line = f"Playing from artist: {ctx_uri}"
@@ -212,7 +246,7 @@ async def get_current_playback(
         f"Volume: {device.get('volume_percent', 'N/A')}%",
         f"Shuffle: {'On' if shuffle else 'Off'}",
         f"Repeat: {repeat}",
-        f"Progress: {progress_min}:{progress_sec:02d}",
+        f"Progress: {progress}",
     ]
     if context_line:
         lines.append(context_line)
@@ -220,63 +254,209 @@ async def get_current_playback(
     return "\n".join(lines)
 
 
-@mcp.tool("spotify_play_track")
-@retry_on_rate_limit(max_retries=3)
-async def play_track(
-    track_uri: str,
-    user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+# ---------------------------------------------------------------------------
+# Private play helpers (used by the unified spotify_play tool)
+# ---------------------------------------------------------------------------
+
+
+async def _play_track_uri(
+    sp: Any, track_uri: str, device_id: str | None = None
 ) -> str:
-    """Start playing a specific track on Spotify.
-
-    Args:
-        track_uri: Spotify track URI or URL
-        user_email: User's email for authentication
-        device_id: Optional device ID to play on (default: active device)
-
-    Returns:
-        Confirmation message or error.
-    """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
-
+    """Play a single track by URI."""
     track_uri = normalize_track_uri(track_uri)
-
     try:
-        await asyncio.to_thread(
-            sp.start_playback,
-            uris=[track_uri],
-            device_id=device_id,
-        )
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.start_playback, uris=[track_uri], device_id=device_id)
+    except _API_ERRORS as exc:
         return f"Error playing track: {exc}. Make sure Spotify is open on a device."
 
     try:
         track_id = track_uri.split(":")[-1]
-        track = await asyncio.to_thread(sp.track, track_id)
+        track = await _call(sp.track, track_id)
         if track and isinstance(track, dict):
-            track_name = track.get("name", "Unknown")
+            name = track.get("name", "Unknown")
             artists = ", ".join(
-                artist.get("name", "Unknown") for artist in track.get("artists", [])
+                a.get("name", "Unknown") for a in track.get("artists", [])
             )
-            return f"Now playing: {track_name} by {artists}"
-        return f"Started playback of {track_uri}"
+            return f"Now playing: {name} by {artists}"
     except Exception:  # noqa: BLE001
-        return f"Started playback of {track_uri}"
+        pass
+    return f"Started playback of {track_uri}"
+
+
+async def _play_context_uri(
+    sp: Any, context_uri: str, shuffle: bool, device_id: str | None = None
+) -> str:
+    """Play a playlist, album, or artist by URI."""
+    try:
+        context_uri, context_type = normalize_context_uri(context_uri)
+    except ValueError as exc:
+        return str(exc)
+
+    try:
+        await _call(sp.start_playback, context_uri=context_uri, device_id=device_id)
+        if shuffle:
+            await _call(sp.shuffle, True, device_id=device_id)
+    except _API_ERRORS as exc:
+        return f"Error playing {context_type}: {exc}. Make sure Spotify is open on a device."
+
+    try:
+        context_id = context_uri.split(":")[-1]
+        if context_type == "playlist":
+            info = await _call(sp.playlist, context_id, fields="name")
+            name = info.get("name", "Unknown") if isinstance(info, dict) else "Unknown"
+            return f"Now playing playlist: {name}"
+        if context_type == "album":
+            info = await _call(sp.album, context_id)
+            if isinstance(info, dict):
+                name = info.get("name", "Unknown")
+                artists = ", ".join(
+                    a.get("name", "Unknown") for a in info.get("artists", [])
+                )
+                return f"Now playing album: {name} by {artists}"
+        if context_type == "artist":
+            info = await _call(sp.artist, context_id)
+            name = info.get("name", "Unknown") if isinstance(info, dict) else "Unknown"
+            return f"Now playing artist: {name}"
+    except Exception:  # noqa: BLE001
+        pass
+    return f"Started playback of {context_type}"
+
+
+async def _play_liked_songs(
+    sp: Any, limit: int, shuffle: bool, device_id: str | None = None
+) -> str:
+    """Fetch and play the user's Liked Songs library."""
+    limit = max(1, min(limit, 800))
+    all_uris: list[str] = []
+    try:
+        offset = 0
+        while True:
+            results = await _call(
+                sp.current_user_saved_tracks, limit=BATCH_SIZE, offset=offset
+            )
+            items = results.get("items", [])
+            if not items:
+                break
+            all_uris.extend(item["track"]["uri"] for item in items if item.get("track"))
+            if not results.get("next"):
+                break
+            offset += BATCH_SIZE
+    except _API_ERRORS as exc:
+        return f"Error fetching liked songs: {exc}"
+
+    if not all_uris:
+        return "No liked songs found in your library."
+
+    total = len(all_uris)
+    play_uris = random.sample(all_uris, min(limit, total)) if shuffle else all_uris[:limit]
+
+    try:
+        await _call(sp.start_playback, uris=play_uris, device_id=device_id)
+        if shuffle:
+            await _call(sp.shuffle, True, device_id=device_id)
+    except _API_ERRORS as exc:
+        return f"Error starting playback: {exc}. Make sure Spotify is open on a device."
+
+    return (
+        f"Now playing liked songs: queued {len(play_uris)} tracks "
+        f"(randomly selected from {total} total). Shuffle is {'on' if shuffle else 'off'}."
+    )
+
+
+async def _search_and_play(
+    sp: Any, query: str, device_id: str | None = None
+) -> str:
+    """Search Spotify and play the top result."""
+    try:
+        results = await _call(sp.search, q=query, type="track", limit=1)
+    except _API_ERRORS as exc:
+        return f"Error searching Spotify: {exc}"
+
+    tracks = results.get("tracks", {}).get("items", []) if results else []
+    if not tracks:
+        return f"No tracks found for '{query}'"
+
+    track = tracks[0]
+    track_uri = track.get("uri", "")
+    if not track_uri:
+        return f"No playable track found for '{query}'"
+
+    try:
+        await _call(sp.start_playback, uris=[track_uri], device_id=device_id)
+    except _API_ERRORS as exc:
+        return f"Error playing track: {exc}. Make sure Spotify is open on a device."
+
+    name = track.get("name", "Unknown")
+    artists = ", ".join(a.get("name", "Unknown") for a in track.get("artists", []))
+    return f"Now playing: {name} by {artists}"
+
+
+@mcp.tool("spotify_play")
+@retry_on_rate_limit(max_retries=3)
+async def play(
+    query: str,
+    shuffle: bool = True,
+    limit: int = 50,
+    user_email: str = DEFAULT_USER_EMAIL,
+    device_id: str | None = None,
+) -> str:
+    """Play music on Spotify. This single tool handles ALL play and resume requests.
+
+    Accepts any of the following as `query`:
+    - Liked songs keywords ("liked songs", "my likes", "saved songs", etc.)
+      → plays the user's Liked Songs library
+    - Resume keywords ("resume", "unpause", "continue")
+      → resumes paused playback
+    - A Spotify URI (spotify:track:..., spotify:album:..., spotify:playlist:...,
+      spotify:artist:...)
+    - A Spotify URL (https://open.spotify.com/track/...)
+    - A free-text search query (e.g. "bohemian rhapsody", "chill jazz")
+      → searches Spotify and plays the top result
+
+    Args:
+        query: What to play — see above for accepted formats.
+        shuffle: Enable shuffle mode (default True; applies to liked songs and contexts).
+        limit: Number of liked songs to queue (default 50, max 800).
+        user_email: User's email for authentication.
+        device_id: Optional device ID to play on (default: active device).
+
+    Returns:
+        Confirmation message or error.
+    """
+    sp, err = _get_client(user_email)
+    if err:
+        return err
+
+    _lower = query.strip().lower()
+
+    # Route 1: Liked Songs
+    if _LIKED_RE.search(_lower):
+        return await _play_liked_songs(sp, limit, shuffle, device_id)
+
+    # Route 2: Resume
+    if _lower in _RESUME_WORDS:
+        try:
+            await _call(sp.start_playback, device_id=device_id)
+        except _API_ERRORS as exc:
+            return f"Error resuming playback: {exc}. Make sure Spotify is open on a device."
+        return "Playback resumed"
+
+    # Route 3: Spotify URI or URL → track or context
+    _stripped = query.strip()
+    if _stripped.startswith("spotify:") or "open.spotify.com/" in _stripped:
+        if ":track:" in _stripped or "/track/" in _stripped:
+            return await _play_track_uri(sp, _stripped, device_id)
+        return await _play_context_uri(sp, _stripped, shuffle, device_id)
+
+    # Route 4: Search and play
+    return await _search_and_play(sp, query.strip(), device_id)
 
 
 @mcp.tool("spotify_pause")
 @retry_on_rate_limit(max_retries=3)
 async def pause_playback(
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Pause Spotify playback.
 
@@ -287,133 +467,23 @@ async def pause_playback(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        await asyncio.to_thread(sp.pause_playback, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.pause_playback, device_id=device_id)
+    except _API_ERRORS as exc:
         return f"Error pausing playback: {exc}. Make sure Spotify is open and playing."
 
     return "Playback paused"
-
-
-@mcp.tool("spotify_play_context")
-@retry_on_rate_limit(max_retries=3)
-async def play_context(
-    context_uri: str,
-    user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
-) -> str:
-    """Start playing a Spotify playlist, album, or artist.
-
-    Use this to play entire collections of tracks, not individual tracks.
-    For individual tracks, use spotify_play_track instead.
-
-    Args:
-        context_uri: Spotify URI or URL for playlist, album, or artist
-        user_email: User's email for authentication
-        device_id: Optional device ID to play on (default: active device)
-
-    Returns:
-        Confirmation message or error.
-    """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
-
-    try:
-        context_uri, context_type = normalize_context_uri(context_uri)
-    except ValueError as exc:
-        return str(exc)
-
-    try:
-        await asyncio.to_thread(
-            sp.start_playback,
-            context_uri=context_uri,
-            device_id=device_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return (
-            f"Error playing {context_type}: {exc}. "
-            "Make sure Spotify is open on a device."
-        )
-
-    try:
-        context_id = context_uri.split(":")[-1]
-        if context_type == "playlist":
-            info = await asyncio.to_thread(sp.playlist, context_id, fields="name")
-            name = info.get("name", "Unknown") if isinstance(info, dict) else "Unknown"
-            return f"Now playing playlist: {name}"
-        if context_type == "album":
-            info = await asyncio.to_thread(sp.album, context_id)
-            if isinstance(info, dict):
-                name = info.get("name", "Unknown")
-                artists = ", ".join(
-                    artist.get("name", "Unknown")
-                    for artist in info.get("artists", [])
-                )
-                return f"Now playing album: {name} by {artists}"
-        if context_type == "artist":
-            info = await asyncio.to_thread(sp.artist, context_id)
-            name = info.get("name", "Unknown") if isinstance(info, dict) else "Unknown"
-            return f"Now playing artist: {name}"
-        return f"Started playback of {context_type}"
-    except Exception:  # noqa: BLE001
-        return f"Started playback of {context_type}"
-
-
-@mcp.tool("spotify_resume")
-@retry_on_rate_limit(max_retries=3)
-async def resume_playback(
-    user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
-) -> str:
-    """Resume paused Spotify playback.
-
-    Args:
-        user_email: User's email for authentication
-        device_id: Optional device ID to resume on (default: active device)
-
-    Returns:
-        Confirmation message or error.
-    """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
-
-    try:
-        await asyncio.to_thread(sp.start_playback, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
-        return f"Error resuming playback: {exc}. Make sure Spotify is open on a device."
-
-    return "Playback resumed"
 
 
 @mcp.tool("spotify_next_track")
 @retry_on_rate_limit(max_retries=3)
 async def next_track(
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Skip to the next track in Spotify playback.
 
@@ -424,19 +494,13 @@ async def next_track(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        await asyncio.to_thread(sp.next_track, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.next_track, device_id=device_id)
+    except _API_ERRORS as exc:
         return (
             f"Error skipping to next track: {exc}. "
             "Make sure Spotify is open and playing."
@@ -449,7 +513,7 @@ async def next_track(
 @retry_on_rate_limit(max_retries=3)
 async def previous_track(
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Go back to the previous track in Spotify playback.
 
@@ -460,19 +524,13 @@ async def previous_track(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        await asyncio.to_thread(sp.previous_track, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.previous_track, device_id=device_id)
+    except _API_ERRORS as exc:
         return (
             f"Error going to previous track: {exc}. "
             "Make sure Spotify is open and playing."
@@ -486,7 +544,7 @@ async def previous_track(
 async def set_shuffle(
     state: bool,
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Toggle shuffle mode for Spotify playback.
 
@@ -498,19 +556,13 @@ async def set_shuffle(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        await asyncio.to_thread(sp.shuffle, state, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.shuffle, state, device_id=device_id)
+    except _API_ERRORS as exc:
         return f"Error setting shuffle: {exc}. Make sure Spotify is open and playing."
 
     return f"Shuffle {'enabled' if state else 'disabled'}"
@@ -521,7 +573,7 @@ async def set_shuffle(
 async def set_repeat(
     state: str,
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Set repeat mode for Spotify playback.
 
@@ -533,15 +585,9 @@ async def set_repeat(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     valid_states = {"track", "context", "off"}
     if state not in valid_states:
@@ -549,8 +595,8 @@ async def set_repeat(
         return f"Invalid repeat state '{state}'. Must be one of: {valid_states_str}"
 
     try:
-        await asyncio.to_thread(sp.repeat, state, device_id=device_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.repeat, state, device_id=device_id)
+    except _API_ERRORS as exc:
         return (
             f"Error setting repeat mode: {exc}. Make sure Spotify is open and playing."
         )
@@ -563,7 +609,7 @@ async def set_repeat(
 async def seek_position(
     position_ms: int,
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Seek to a specific position in the currently playing track.
 
@@ -575,32 +621,24 @@ async def seek_position(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     position_ms = max(0, position_ms)
-    position_min = position_ms // 60000
-    position_sec = (position_ms % 60000) // 1000
 
     try:
-        await asyncio.to_thread(
+        await _call(
             sp.seek_track,
             position_ms,
             device_id=device_id,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return (
             f"Error seeking to position: {exc}. Make sure Spotify is open and playing."
         )
 
-    return f"Seeked to {position_min}:{position_sec:02d}"
+    return f"Seeked to {_format_duration(position_ms)}"
 
 
 @mcp.tool("spotify_get_user_playlists")
@@ -619,29 +657,23 @@ async def get_user_playlists(
         Either a formatted error message string or a JSON-serializable dict
         with playlist metadata.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
         all_playlists: list[dict[str, Any]] = []
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.current_user_playlists,
-            limit=50,
+            limit=BATCH_SIZE,
         )
         while results and isinstance(results, dict):
             all_playlists.extend(results.get("items", []))
             if results.get("next"):
-                results = await asyncio.to_thread(sp.next, results)
+                results = await _call(sp.next, results)
             else:
                 break
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error fetching playlists: {exc}"
 
     if not all_playlists:
@@ -685,20 +717,14 @@ async def get_playlist_tracks(
         Either a formatted error message string or a JSON-serializable dict
         with track metadata for the playlist.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     playlist_id = normalize_playlist_id(playlist_id)
 
     try:
-        playlist_info = await asyncio.to_thread(
+        playlist_info = await _call(
             sp.playlist,
             playlist_id,
             fields="name,tracks.total",
@@ -710,7 +736,7 @@ async def get_playlist_tracks(
         total_tracks = playlist_info.get("tracks", {}).get("total", 0)
 
         all_items: list[dict[str, Any]] = []
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.playlist_items,
             playlist_id,
             limit=100,
@@ -718,10 +744,10 @@ async def get_playlist_tracks(
         while results and isinstance(results, dict):
             all_items.extend(results.get("items", []))
             if results.get("next"):
-                results = await asyncio.to_thread(sp.next, results)
+                results = await _call(sp.next, results)
             else:
                 break
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error fetching playlist tracks: {exc}"
 
     if not all_items:
@@ -740,10 +766,7 @@ async def get_playlist_tracks(
                     for artist in track.get("artists", [])
                 ),
                 "album": track.get("album", {}).get("name", "Unknown"),
-                "duration": (
-                    f"{track.get('duration_ms', 0) // 60000}:"
-                    f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                ),
+                "duration": _format_duration(track.get("duration_ms", 0)),
                 "uri": track.get("uri", ""),
                 "added_by": item.get("added_by", {}).get("id", "Unknown"),
             }
@@ -776,18 +799,12 @@ async def create_playlist(
     Returns:
         Confirmation message with playlist details and URL.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        user_info = await asyncio.to_thread(sp.current_user)
+        user_info = await _call(sp.current_user)
         if not isinstance(user_info, dict):
             return "Error: Invalid user info response"
 
@@ -795,14 +812,14 @@ async def create_playlist(
         if not user_id:
             return "Error: Could not get user ID"
 
-        playlist = await asyncio.to_thread(
+        playlist = await _call(
             sp.user_playlist_create,
             user_id,
             name,
             public=public,
             description=description,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error creating playlist: {exc}"
 
     if not playlist or not isinstance(playlist, dict):
@@ -840,20 +857,14 @@ async def delete_playlist(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     playlist_id = normalize_playlist_id(playlist_id)
 
     try:
-        playlist_info = await asyncio.to_thread(
+        playlist_info = await _call(
             sp.playlist,
             playlist_id,
             fields="name,owner.id",
@@ -864,7 +875,7 @@ async def delete_playlist(
         playlist_name = playlist_info.get("name", "Unknown")
         owner_id = playlist_info.get("owner", {}).get("id", "")
 
-        user_info = await asyncio.to_thread(sp.current_user)
+        user_info = await _call(sp.current_user)
         current_user_id = (
             user_info.get("id", "") if isinstance(user_info, dict) else ""
         )
@@ -873,12 +884,12 @@ async def delete_playlist(
                 f"Cannot delete playlist '{playlist_name}' - "
                 f"you don't own it (owner: {owner_id})"
             )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error checking playlist ownership: {exc}"
 
     try:
-        await asyncio.to_thread(sp.current_user_unfollow_playlist, playlist_id)
-    except Exception as exc:  # noqa: BLE001
+        await _call(sp.current_user_unfollow_playlist, playlist_id)
+    except _API_ERRORS as exc:
         return f"Error deleting playlist: {exc}"
 
     return f"Successfully deleted playlist: {playlist_name}"
@@ -901,15 +912,9 @@ async def add_tracks_to_playlist(
     Returns:
         Confirmation message with number of tracks added, or an error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     playlist_id = normalize_playlist_id(playlist_id)
 
@@ -919,12 +924,12 @@ async def add_tracks_to_playlist(
     normalized_uris = [normalize_track_uri(uri) for uri in track_uris]
 
     try:
-        await asyncio.to_thread(
+        await _call(
             sp.playlist_add_items,
             playlist_id,
             normalized_uris,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error adding tracks to playlist: {exc}"
 
     return f"Successfully added {len(normalized_uris)} track(s) to playlist"
@@ -935,7 +940,7 @@ async def add_tracks_to_playlist(
 async def add_to_queue(
     track_uri: str,
     user_email: str = DEFAULT_USER_EMAIL,
-    device_id: Optional[str] = None,
+    device_id: str | None = None,
 ) -> str:
     """Add a track to the playback queue.
 
@@ -947,25 +952,19 @@ async def add_to_queue(
     Returns:
         Confirmation message with track details, or an error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     track_uri = normalize_track_uri(track_uri)
 
     try:
-        await asyncio.to_thread(
+        await _call(
             sp.add_to_queue,
             track_uri,
             device_id=device_id,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return (
             f"Error adding track to queue: {exc}. "
             "Make sure Spotify is open and playing."
@@ -973,7 +972,7 @@ async def add_to_queue(
 
     try:
         track_id = track_uri.split(":")[-1]
-        track = await asyncio.to_thread(sp.track, track_id)
+        track = await _call(sp.track, track_id)
         if track and isinstance(track, dict):
             track_name = track.get("name", "Unknown")
             artists = ", ".join(
@@ -999,19 +998,13 @@ async def get_queue(
         Either a human-readable string for empty states or a JSON-serializable
         dict with the currently playing track and upcoming queue.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        queue_data = await asyncio.to_thread(sp.queue)
-    except Exception as exc:  # noqa: BLE001
+        queue_data = await _call(sp.queue)
+    except _API_ERRORS as exc:
         return f"Error getting queue: {exc}. Make sure Spotify is open and playing."
 
     if not queue_data or not isinstance(queue_data, dict):
@@ -1040,10 +1033,7 @@ async def get_queue(
                 for artist in currently_playing.get("artists", [])
             ),
             "album": currently_playing.get("album", {}).get("name", "Unknown"),
-            "duration": (
-                f"{currently_playing.get('duration_ms', 0) // 60000}:"
-                f"{(currently_playing.get('duration_ms', 0) % 60000) // 1000:02d}"
-            ),
+            "duration": _format_duration(currently_playing.get("duration_ms", 0)),
             "uri": currently_playing.get("uri", ""),
         }
 
@@ -1059,10 +1049,7 @@ async def get_queue(
                         artist.get("name", "Unknown")
                         for artist in track.get("artists", [])
                     ),
-                    "duration": (
-                        f"{track.get('duration_ms', 0) // 60000}:"
-                        f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                    ),
+                    "duration": _format_duration(track.get("duration_ms", 0)),
                     "uri": track.get("uri", ""),
                 }
             )
@@ -1086,19 +1073,13 @@ async def get_devices(
         Either a formatted error message string or a JSON-serializable dict
         with device information.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        devices_data = await asyncio.to_thread(sp.devices)
-    except Exception as exc:  # noqa: BLE001
+        devices_data = await _call(sp.devices)
+    except _API_ERRORS as exc:
         return f"Error fetching devices: {exc}"
 
     if not devices_data or not isinstance(devices_data, dict):
@@ -1142,23 +1123,17 @@ async def transfer_playback(
     Returns:
         Confirmation message or error.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        await asyncio.to_thread(
+        await _call(
             sp.transfer_playback,
             device_id=device_id,
             force_play=play,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return (
             f"Error transferring playback: {exc}. "
             "Make sure the target device is active."
@@ -1183,22 +1158,16 @@ async def get_recently_played(
         Either a formatted error message string or a JSON-serializable dict
         with recently played track metadata.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.current_user_recently_played,
-            limit=min(limit, 50),
+            limit=min(limit, BATCH_SIZE),
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error fetching recently played tracks: {exc}"
 
     if not results or not isinstance(results, dict):
@@ -1222,10 +1191,7 @@ async def get_recently_played(
                     for artist in track.get("artists", [])
                 ),
                 "album": track.get("album", {}).get("name", "Unknown"),
-                "duration": (
-                    f"{track.get('duration_ms', 0) // 60000}:"
-                    f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                ),
+                "duration": _format_duration(track.get("duration_ms", 0)),
                 "uri": track.get("uri", ""),
                 "played_at": played_at,
             }
@@ -1255,15 +1221,9 @@ async def check_saved_tracks(
     Returns:
         A dict mapping each track URI to True (saved) or False (not saved).
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     if not track_uris:
         return "Error: No track URIs provided"
@@ -1272,10 +1232,10 @@ async def check_saved_tracks(
     track_ids = [uri.split(":")[-1] for uri in normalized]
 
     try:
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.current_user_saved_tracks_contains, track_ids
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error checking saved tracks: {exc}"
 
     if not isinstance(results, list):
@@ -1283,7 +1243,7 @@ async def check_saved_tracks(
 
     return {
         "results": {
-            uri: saved for uri, saved in zip(normalized, results)
+            uri: saved for uri, saved in zip(normalized, results, strict=True)
         },
     }
 
@@ -1313,22 +1273,16 @@ async def find_saved_by_artist(
     Returns:
         Dict with all saved tracks by that artist.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     # Step 1: resolve artist name → Spotify artist ID
     try:
-        search_result = await asyncio.to_thread(
+        search_result = await _call(
             sp.search, q=f"artist:{artist_name}", type="artist", limit=5
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error searching for artist: {exc}"
 
     artists_items = (
@@ -1345,19 +1299,19 @@ async def find_saved_by_artist(
     # Step 2: get ALL albums (albums, singles, compilations, appears_on)
     all_albums: list[dict[str, Any]] = []
     try:
-        results = await asyncio.to_thread(
+        results = await _call(
             sp.artist_albums,
             artist_id,
             include_groups="album,single,compilation,appears_on",
-            limit=50,
+            limit=BATCH_SIZE,
         )
         while results and isinstance(results, dict):
             all_albums.extend(results.get("items", []))
             if results.get("next"):
-                results = await asyncio.to_thread(sp.next, results)
+                results = await _call(sp.next, results)
             else:
                 break
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error fetching artist albums: {exc}"
 
     if not all_albums:
@@ -1371,8 +1325,8 @@ async def find_saved_by_artist(
         if not album_id:
             continue
         try:
-            album_tracks = await asyncio.to_thread(
-                sp.album_tracks, album_id, limit=50
+            album_tracks = await _call(
+                sp.album_tracks, album_id, limit=BATCH_SIZE
             )
             while album_tracks and isinstance(album_tracks, dict):
                 for track in album_tracks.get("items", []):
@@ -1388,7 +1342,7 @@ async def find_saved_by_artist(
                         track["_album_name"] = album.get("name", "Unknown")
                         all_tracks.append(track)
                 if album_tracks.get("next"):
-                    album_tracks = await asyncio.to_thread(sp.next, album_tracks)
+                    album_tracks = await _call(sp.next, album_tracks)
                 else:
                     break
         except Exception:  # noqa: BLE001
@@ -1400,10 +1354,10 @@ async def find_saved_by_artist(
     # Step 4: batch-check saved status (50 at a time)
     track_ids = [t["id"] for t in all_tracks]
     saved_flags: list[bool] = []
-    for i in range(0, len(track_ids), 50):
-        batch = track_ids[i : i + 50]
+    for i in range(0, len(track_ids), BATCH_SIZE):
+        batch = track_ids[i : i + BATCH_SIZE]
         try:
-            flags = await asyncio.to_thread(
+            flags = await _call(
                 sp.current_user_saved_tracks_contains, batch
             )
             saved_flags.extend(flags)
@@ -1412,7 +1366,7 @@ async def find_saved_by_artist(
 
     saved_ids: set[str] = set()
     saved_tracks: list[dict[str, Any]] = []
-    for track, is_saved in zip(all_tracks, saved_flags):
+    for track, is_saved in zip(all_tracks, saved_flags, strict=True):
         if is_saved:
             saved_ids.add(track["id"])
             saved_tracks.append({
@@ -1421,10 +1375,7 @@ async def find_saved_by_artist(
                     a.get("name", "Unknown") for a in track.get("artists", [])
                 ),
                 "album": track.get("_album_name", "Unknown"),
-                "duration": (
-                    f"{track.get('duration_ms', 0) // 60000}:"
-                    f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                ),
+                "duration": _format_duration(track.get("duration_ms", 0)),
                 "uri": track.get("uri", ""),
             })
 
@@ -1434,7 +1385,7 @@ async def find_saved_by_artist(
     # (~50 per request) is the only reliable way to catch everything.
     liked_extra = 0
     try:
-        results = await asyncio.to_thread(sp.current_user_saved_tracks, limit=50)
+        results = await _call(sp.current_user_saved_tracks, limit=BATCH_SIZE)
         while results and isinstance(results, dict):
             for item in results.get("items", []):
                 track = item.get("track")
@@ -1455,15 +1406,12 @@ async def find_saved_by_artist(
                             for a in track.get("artists", [])
                         ),
                         "album": track.get("album", {}).get("name", "Unknown"),
-                        "duration": (
-                            f"{track.get('duration_ms', 0) // 60000}:"
-                            f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                        ),
+                        "duration": _format_duration(track.get("duration_ms", 0)),
                         "uri": track.get("uri", ""),
                     })
                     liked_extra += 1
             if results.get("next"):
-                results = await asyncio.to_thread(sp.next, results)
+                results = await _call(sp.next, results)
             else:
                 break
     except Exception:  # noqa: BLE001
@@ -1493,21 +1441,15 @@ async def get_artist_info(
     Returns:
         Dict with artist details, top tracks, and album list.
     """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
+    sp, err = _get_client(user_email)
+    if err:
+        return err
 
     try:
-        search_result = await asyncio.to_thread(
+        search_result = await _call(
             sp.search, q=f"artist:{artist_name}", type="artist", limit=5
         )
-    except Exception as exc:  # noqa: BLE001
+    except _API_ERRORS as exc:
         return f"Error searching for artist: {exc}"
 
     artists_items = (
@@ -1521,7 +1463,7 @@ async def get_artist_info(
 
     # Get top tracks
     try:
-        top_result = await asyncio.to_thread(sp.artist_top_tracks, artist_id)
+        top_result = await _call(sp.artist_top_tracks, artist_id)
         top_tracks = [
             {
                 "name": t.get("name", "Unknown"),
@@ -1535,8 +1477,8 @@ async def get_artist_info(
 
     # Get albums
     try:
-        albums_result = await asyncio.to_thread(
-            sp.artist_albums, artist_id, include_groups="album,single", limit=50
+        albums_result = await _call(
+            sp.artist_albums, artist_id, include_groups="album,single", limit=BATCH_SIZE
         )
         albums = [
             {
@@ -1560,94 +1502,6 @@ async def get_artist_info(
         "url": artist.get("external_urls", {}).get("spotify", ""),
         "top_tracks": top_tracks,
         "albums": albums,
-    }
-
-
-@mcp.tool("spotify_export_saved_library")
-@retry_on_rate_limit(max_retries=3)
-async def export_saved_library(
-    user_email: str = DEFAULT_USER_EMAIL,
-    limit: int = 50,
-) -> str | dict[str, Any]:
-    """EXPENSIVE bulk export of the user's entire saved/liked track library.
-
-    WARNING: This dumps raw library data and can produce enormous output
-    (thousands of tracks, 100K+ tokens). Only use for full library export
-    or backup — NEVER for answering questions like "what <artist> do I have
-    saved?" or "is this song in my favorites?".
-
-    For those queries, use instead:
-    - spotify_find_saved_by_artist — "what <artist> tracks are in my library?"
-    - spotify_check_saved_tracks — "is this specific track saved?"
-
-    Args:
-        user_email: User's email for authentication
-        limit: Number of tracks to return (default 50, 0 = all)
-
-    Returns:
-        Either a formatted error message string or a JSON-serializable dict
-        with saved track metadata.
-    """
-    try:
-        sp = get_spotify_client(user_email)
-    except ValueError as exc:
-        return (
-            f"Authentication error: {exc}. "
-            "Click 'Connect Spotify' in Settings to authorize this account."
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"Error creating Spotify client: {exc}"
-
-    fetch_all = limit == 0
-    page_size = 50 if fetch_all else min(limit, 50)
-
-    try:
-        all_items: list[dict[str, Any]] = []
-        results = await asyncio.to_thread(
-            sp.current_user_saved_tracks,
-            limit=page_size,
-        )
-        while results and isinstance(results, dict):
-            all_items.extend(results.get("items", []))
-            if not fetch_all and len(all_items) >= limit:
-                all_items = all_items[:limit]
-                break
-            if results.get("next"):
-                results = await asyncio.to_thread(sp.next, results)
-            else:
-                break
-    except Exception as exc:  # noqa: BLE001
-        return f"Error fetching saved tracks: {exc}"
-
-    if not all_items:
-        return "No saved tracks found"
-
-    tracks_list: list[dict[str, Any]] = []
-    for item in all_items:
-        track = item.get("track")
-        if not track:
-            continue
-        added_at = item.get("added_at")
-        tracks_list.append(
-            {
-                "name": track.get("name", "Unknown"),
-                "artist": ", ".join(
-                    artist.get("name", "Unknown")
-                    for artist in track.get("artists", [])
-                ),
-                "album": track.get("album", {}).get("name", "Unknown"),
-                "duration": (
-                    f"{track.get('duration_ms', 0) // 60000}:"
-                    f"{(track.get('duration_ms', 0) % 60000) // 1000:02d}"
-                ),
-                "uri": track.get("uri", ""),
-                "added_at": added_at,
-            }
-        )
-
-    return {
-        "count": len(tracks_list),
-        "tracks": tracks_list,
     }
 
 
@@ -1709,10 +1563,8 @@ __all__ = [
     "run",
     "search_tracks",
     "get_current_playback",
-    "play_track",
-    "play_context",
+    "play",
     "pause_playback",
-    "resume_playback",
     "next_track",
     "previous_track",
     "set_shuffle",
@@ -1731,5 +1583,4 @@ __all__ = [
     "check_saved_tracks",
     "find_saved_by_artist",
     "get_artist_info",
-    "export_saved_library",
 ]

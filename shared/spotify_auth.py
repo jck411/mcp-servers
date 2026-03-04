@@ -16,11 +16,12 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -185,9 +186,15 @@ def get_credentials(user_email: str) -> dict[str, Any] | None:
         with open(token_path) as f:
             token_data = json.load(f)
         if "access_token" not in token_data:
+            logging.getLogger(__name__).warning(
+                "Token file for %s exists but has no access_token", user_email
+            )
             return None
         return token_data
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read token for %s: %s", user_email, exc
+        )
         return None
 
 
@@ -204,7 +211,12 @@ def store_credentials(user_email: str, token_info: dict[str, Any]) -> None:
 
 
 def get_spotify_client(user_email: str) -> spotipy.Spotify:
-    """Return an authenticated Spotify client (auto-refreshes tokens)."""
+    """Return an authenticated Spotify client (auto-refreshes tokens).
+
+    Raises:
+        ValueError: If credentials are missing, expired, or unrefreshable.
+        FileNotFoundError: If the credentials config file is missing.
+    """
     credentials = get_credentials(user_email)
     if not credentials:
         raise ValueError(
@@ -224,9 +236,13 @@ def get_spotify_client(user_email: str) -> spotipy.Spotify:
             open_browser=False,
             show_dialog=False,
         )
-        token_info = auth_manager.validate_token(
-            auth_manager.cache_handler.get_cached_token()
-        )
+        cached_token = auth_manager.cache_handler.get_cached_token()
+        if not cached_token:
+            raise ValueError(
+                f"Token cache is empty for {user_email}. "
+                "Re-authorize via the backend's Spotify OAuth flow."
+            )
+        token_info = auth_manager.validate_token(cached_token)
 
     if not token_info:
         raise ValueError(
