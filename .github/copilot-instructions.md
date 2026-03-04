@@ -16,11 +16,29 @@ Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via syste
 ## Local Development Workflow
 
 - Edit servers directly in this repo — it is the source of truth for all MCP server code
-- Run locally to test: `python -m servers.<name> --transport streamable-http --host 127.0.0.1 --port <port>`
-- Ctrl+C and rerun after edits (~1-second feedback loop)
-- Auto-reload with watchfiles: `watchfiles "python -m servers.<name> --transport streamable-http --host 127.0.0.1 --port <port>" servers/ shared/`
-- Smoke-test tools via curl: `curl -s http://127.0.0.1:<port>/mcp -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
+- **Use `./dev.sh`** to launch servers locally with auto-reload (watchfiles watches `servers/` and `shared/`)
+  - `./dev.sh` — interactive menu to pick servers
+  - `./dev.sh spotify` — launch a single server
+  - `./dev.sh spotify calculator` — launch multiple servers
+  - `./dev.sh --list` — show available servers and ports
+- Servers run on `127.0.0.1` at their assigned port with hot reload — code changes take effect automatically
+- **After adding/removing tools:** the backend must re-fetch the tool list. Tell the user to click **Refresh** in Settings → Server status, or run:
+  ```
+  curl -sk -X POST https://127.0.0.1:8000/api/mcp/servers/refresh -H "Content-Type: application/json" -H "Accept: application/json"
+  ```
+- Smoke-test tools via curl: `curl -s http://127.0.0.1:<port>/mcp -X POST -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
 - Only deploy to LXC once local testing passes — never iterate on the LXC directly
+- The backend runs locally on HTTPS at `https://127.0.0.1:8000` (use `curl -sk` to skip cert verification)
+
+### Adding/modifying tools on an existing server
+
+When adding new tools to an existing server during local dev:
+1. Edit the server file and add the tool (add to `__all__` too)
+2. Verify import: `python -c "from servers.<name> import <new_func>; print('OK')"`
+3. `dev.sh` auto-reloads — no restart needed
+4. **Refresh the backend** so it picks up the new tool list (UI refresh button or curl)
+5. Verify tool appears: check the refresh response for the new tool name
+6. Commit and push only after confirming the tool works end-to-end
 
 ## Architecture
 
@@ -57,6 +75,12 @@ When the user asks to add/port a server, execute every step below without asking
 - `uv sync --extra <name>` in the local venv
 - `python -c "from servers.<name> import mcp, DEFAULT_HTTP_PORT, run, main"` — must succeed
 - Verify no `from backend` or `import backend` in the source
+- If `dev.sh` is running, it auto-reloads. Otherwise start it: `./dev.sh <name>`
+- **Refresh the backend** to pick up the new server's tools:
+  ```
+  curl -sk -X POST https://127.0.0.1:8000/api/mcp/servers/refresh -H "Content-Type: application/json" -H "Accept: application/json"
+  ```
+- Confirm the server appears with `connected: true` and expected tool count before proceeding
 
 ### 5. Commit and push
 
@@ -119,8 +143,8 @@ Next available: 9015
 ## Credential Sources
 
 When porting a server that needs credentials from Backend_FastAPI:
-- Google OAuth client secret: `/home/human/REPOS/Backend_FastAPI/credentials/client_secret_pihome123.json`
-- Google OAuth token: `/home/human/REPOS/Backend_FastAPI/data/tokens/jck411_at_gmail_com.json`
+- Google OAuth client secret: `/home/jack/REPOS/Backend_FastAPI/credentials/client_secret_pihome123.json`
+- Google OAuth token: `/home/jack/REPOS/Backend_FastAPI/data/tokens/jck411_at_gmail_com.json`
 - Spotify creds: already in this repo's `credentials/` and `data/tokens/`
 - Copy to this repo locally AND scp to LXC — both are gitignored
 

@@ -694,6 +694,54 @@ async def seek_position(
     return f"Seeked to {_format_duration(position_ms)}"
 
 
+@mcp.tool("spotify_set_volume")
+@retry_on_rate_limit(max_retries=3)
+async def set_volume(
+    volume_percent: int,
+    user_email: str = DEFAULT_USER_EMAIL,
+    device_id: str | None = None,
+) -> str:
+    """Set playback volume.
+
+    Args:
+        volume_percent: Volume level from 0 to 100
+        user_email: User's email for authentication
+        device_id: Optional device ID (default: active device)
+
+    Returns:
+        Confirmation message or error.
+    """
+    sp, err = _get_client(user_email)
+    if err:
+        return err
+
+    volume_percent = max(0, min(100, volume_percent))
+
+    # Check if the target device supports volume control
+    if device_id is None:
+        try:
+            playback = await _call(sp.current_playback)
+            if playback:
+                dev = playback.get("device", {})
+                if not dev.get("supports_volume", True):
+                    dev_name = dev.get("name", "current device")
+                    return (
+                        f"'{dev_name}' does not support remote volume control "
+                        f"(common on phones). Use spotify_transfer_playback to "
+                        f"switch to a speaker or TV first, or use "
+                        f"spotify_get_devices to find one that supports volume."
+                    )
+        except _API_ERRORS:
+            pass  # Proceed and let the volume call itself report the error
+
+    try:
+        await _call(sp.volume, volume_percent, device_id=device_id)
+    except _API_ERRORS as exc:
+        return f"Error setting volume: {exc}"
+
+    return f"Volume set to {volume_percent}%"
+
+
 @mcp.tool("spotify_get_user_playlists")
 @retry_on_rate_limit(max_retries=3)
 async def get_user_playlists(
@@ -1689,6 +1737,7 @@ __all__ = [
     "set_shuffle",
     "set_repeat",
     "seek_position",
+    "set_volume",
     "get_user_playlists",
     "get_playlist_tracks",
     "create_playlist",
