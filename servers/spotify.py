@@ -173,6 +173,35 @@ async def get_current_playback(
     progress_min = progress_ms // 60000
     progress_sec = (progress_ms % 60000) // 1000
 
+    # Resolve playback context (playlist, album, or artist)
+    context_line = ""
+    ctx = playback.get("context")
+    if ctx:
+        ctx_type = ctx.get("type", "")
+        ctx_uri = ctx.get("uri", "")
+        ctx_id = ctx_uri.split(":")[-1] if ctx_uri else ""
+        if ctx_type == "playlist" and ctx_id:
+            try:
+                pl = await asyncio.to_thread(
+                    sp.playlist, ctx_id, fields="name,owner(display_name)"
+                )
+                context_line = f"Playing from playlist: {pl['name']} (by {pl['owner']['display_name']})"
+            except Exception:  # noqa: BLE001
+                context_line = f"Playing from playlist: {ctx_uri}"
+        elif ctx_type == "album" and ctx_id:
+            try:
+                alb = await asyncio.to_thread(sp.album, ctx_id)
+                alb_artists = ", ".join(a["name"] for a in alb.get("artists", []))
+                context_line = f"Playing from album: {alb['name']} by {alb_artists}"
+            except Exception:  # noqa: BLE001
+                context_line = f"Playing from album: {ctx_uri}"
+        elif ctx_type == "artist" and ctx_id:
+            try:
+                art = await asyncio.to_thread(sp.artist, ctx_id)
+                context_line = f"Playing from artist: {art['name']}"
+            except Exception:  # noqa: BLE001
+                context_line = f"Playing from artist: {ctx_uri}"
+
     lines = [
         "Current Playback:",
         "",
@@ -185,6 +214,8 @@ async def get_current_playback(
         f"Repeat: {repeat}",
         f"Progress: {progress_min}:{progress_sec:02d}",
     ]
+    if context_line:
+        lines.append(context_line)
 
     return "\n".join(lines)
 
