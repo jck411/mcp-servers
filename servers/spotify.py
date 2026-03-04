@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import re
 from collections.abc import Callable
@@ -37,6 +38,9 @@ DEFAULT_HTTP_PORT = 9010
 SPOTIFY_API_TIMEOUT = 25  # seconds per Spotify API call
 BATCH_SIZE = 50  # Spotify API max items per request
 
+# Limit concurrent Spotify API calls to avoid accidental bursts
+_api_semaphore = asyncio.Semaphore(int(os.getenv("SPOTIFY_API_CONCURRENCY", "5")))
+
 mcp = FastMCP("spotify")
 
 _AUTH_HINT = "Click 'Connect Spotify' in Settings to authorize this account."
@@ -60,11 +64,12 @@ _RESUME_WORDS = frozenset(
 async def _call(
     func: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
-    """Execute a blocking Spotify API function with timeout protection."""
-    return await asyncio.wait_for(
-        asyncio.to_thread(func, *args, **kwargs),
-        timeout=SPOTIFY_API_TIMEOUT,
-    )
+    """Execute a blocking Spotify API function with timeout and concurrency protection."""
+    async with _api_semaphore:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=SPOTIFY_API_TIMEOUT,
+        )
 
 
 def _format_duration(ms: int) -> str:
@@ -325,50 +330,93 @@ async def _play_context_uri(
 async def _play_liked_songs(
     sp: Any, limit: int, shuffle: bool, device_id: str | None = None
 ) -> str:
-    """Fetch and play the user's Liked Songs library."""
+    """Fetch and play the user's Liked Songs library.
+
+    When shuffle=True uses random page sampling instead of fetching the entire
+    library, which is much faster for large collections.
+    """
     limit = max(1, min(limit, 800))
-    all_uris: list[str] = []
+    uris: list[str] = []
+    seen: set[str] = set()
+
     try:
-        offset = 0
-        while True:
-            results = await _call(
-                sp.current_user_saved_tracks, limit=BATCH_SIZE, offset=offset
-            )
-            items = results.get("items", [])
-            if not items:
-                break
-            all_uris.extend(item["track"]["uri"] for item in items if item.get("track"))
-            if not results.get("next"):
-                break
-            offset += BATCH_SIZE
+        # One lightweight call to get the total count.
+        first = await _call(sp.current_user_saved_tracks, limit=1, offset=0)
+        total = int((first or {}).get("total", 0) or 0)
+        if total <= 0:
+            return "No liked songs found in your library."
+
+        if not shuffle:
+            # Sequential fetch from the start until we have enough.
+            offset = 0
+            while len(uris) < limit:
+                resp = await _call(
+                    sp.current_user_saved_tracks,
+                    limit=min(BATCH_SIZE, limit - len(uris)),
+                    offset=offset,
+                )
+                items = (resp or {}).get("items", [])
+                if not items:
+                    break
+                for it in items:
+                    tr = (it or {}).get("track")
+                    if isinstance(tr, dict) and tr.get("uri") and tr["uri"] not in seen:
+                        seen.add(tr["uri"])
+                        uris.append(tr["uri"])
+                        if len(uris) >= limit:
+                            break
+                offset += len(items)
+        else:
+            # Random page sampling — avoids scanning the entire library.
+            max_page = max(0, (total - 1) // BATCH_SIZE)
+            max_attempts = min(25, 5 + (limit // 10))
+            for _ in range(max_attempts):
+                if len(uris) >= limit:
+                    break
+                offset = random.randint(0, max_page) * BATCH_SIZE
+                resp = await _call(sp.current_user_saved_tracks, limit=BATCH_SIZE, offset=offset)
+                items = (resp or {}).get("items", [])
+                if not items:
+                    continue
+                random.shuffle(items)
+                for it in items:
+                    tr = (it or {}).get("track")
+                    if isinstance(tr, dict) and tr.get("uri") and tr["uri"] not in seen:
+                        seen.add(tr["uri"])
+                        uris.append(tr["uri"])
+                        if len(uris) >= limit:
+                            break
+
     except _API_ERRORS as exc:
         return f"Error fetching liked songs: {exc}"
 
-    if not all_uris:
+    if not uris:
         return "No liked songs found in your library."
 
-    total = len(all_uris)
-    play_uris = random.sample(all_uris, min(limit, total)) if shuffle else all_uris[:limit]
-
     try:
-        await _call(sp.start_playback, uris=play_uris, device_id=device_id)
+        await _call(sp.start_playback, uris=uris, device_id=device_id)
         if shuffle:
             await _call(sp.shuffle, True, device_id=device_id)
     except _API_ERRORS as exc:
         return f"Error starting playback: {exc}. Make sure Spotify is open on a device."
 
     return (
-        f"Now playing liked songs: queued {len(play_uris)} tracks "
-        f"(randomly selected from {total} total). Shuffle is {'on' if shuffle else 'off'}."
+        f"Now playing liked songs: queued {len(uris)} tracks "
+        f"(from {total} total). Shuffle is {'on' if shuffle else 'off'}."
     )
 
 
 async def _search_and_play(
-    sp: Any, query: str, device_id: str | None = None
+    sp: Any,
+    query: str,
+    shuffle: bool = True,
+    limit: int = 20,
+    device_id: str | None = None,
 ) -> str:
-    """Search Spotify and play the top result."""
+    """Search Spotify and play the top results."""
+    search_limit = max(1, min(limit, BATCH_SIZE))
     try:
-        results = await _call(sp.search, q=query, type="track", limit=1)
+        results = await _call(sp.search, q=query, type="track", limit=search_limit)
     except _API_ERRORS as exc:
         return f"Error searching Spotify: {exc}"
 
@@ -376,19 +424,24 @@ async def _search_and_play(
     if not tracks:
         return f"No tracks found for '{query}'"
 
-    track = tracks[0]
-    track_uri = track.get("uri", "")
-    if not track_uri:
-        return f"No playable track found for '{query}'"
+    track_uris = [t.get("uri", "") for t in tracks if t.get("uri")]
+    if not track_uris:
+        return f"No playable tracks found for '{query}'"
+
+    if shuffle:
+        random.shuffle(track_uris)
 
     try:
-        await _call(sp.start_playback, uris=[track_uri], device_id=device_id)
+        await _call(sp.start_playback, uris=track_uris, device_id=device_id)
+        if shuffle:
+            await _call(sp.shuffle, True, device_id=device_id)
     except _API_ERRORS as exc:
-        return f"Error playing track: {exc}. Make sure Spotify is open on a device."
+        return f"Error playing tracks: {exc}. Make sure Spotify is open on a device."
 
-    name = track.get("name", "Unknown")
-    artists = ", ".join(a.get("name", "Unknown") for a in track.get("artists", []))
-    return f"Now playing: {name} by {artists}"
+    first = tracks[0]
+    name = first.get("name", "Unknown")
+    artists = ", ".join(a.get("name", "Unknown") for a in first.get("artists", []))
+    return f"Now playing: {name} by {artists} (queued {len(track_uris)} tracks)"
 
 
 @mcp.tool("spotify_play")
@@ -449,7 +502,7 @@ async def play(
         return await _play_context_uri(sp, _stripped, shuffle, device_id)
 
     # Route 4: Search and play
-    return await _search_and_play(sp, query.strip(), device_id)
+    return await _search_and_play(sp, query.strip(), shuffle, min(limit, BATCH_SIZE), device_id)
 
 
 @mcp.tool("spotify_pause")
@@ -1505,6 +1558,72 @@ async def get_artist_info(
     }
 
 
+@mcp.tool("spotify_save_tracks")
+@retry_on_rate_limit(max_retries=3)
+async def save_tracks(
+    track_uris: list[str],
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str | dict[str, Any]:
+    """Save (like) one or more tracks to the user's library.
+
+    Args:
+        track_uris: Spotify track URIs, URLs, or IDs to save (max 50)
+        user_email: User's email for authentication
+    """
+    sp, err = _get_client(user_email)
+    if err:
+        return err
+
+    if not track_uris:
+        return "Error: No track URIs provided"
+
+    normalized = [normalize_track_uri(uri) for uri in track_uris[:50]]
+    track_ids = [uri.split(":")[-1] for uri in normalized]
+
+    try:
+        await _call(sp.current_user_saved_tracks_add, track_ids)
+    except _API_ERRORS as exc:
+        return f"Error saving tracks: {exc}"
+
+    return {
+        "saved": len(track_ids),
+        "track_uris": normalized,
+    }
+
+
+@mcp.tool("spotify_remove_saved_tracks")
+@retry_on_rate_limit(max_retries=3)
+async def remove_saved_tracks(
+    track_uris: list[str],
+    user_email: str = DEFAULT_USER_EMAIL,
+) -> str | dict[str, Any]:
+    """Remove (unlike) one or more tracks from the user's library.
+
+    Args:
+        track_uris: Spotify track URIs, URLs, or IDs to remove (max 50)
+        user_email: User's email for authentication
+    """
+    sp, err = _get_client(user_email)
+    if err:
+        return err
+
+    if not track_uris:
+        return "Error: No track URIs provided"
+
+    normalized = [normalize_track_uri(uri) for uri in track_uris[:50]]
+    track_ids = [uri.split(":")[-1] for uri in normalized]
+
+    try:
+        await _call(sp.current_user_saved_tracks_delete, track_ids)
+    except _API_ERRORS as exc:
+        return f"Error removing saved tracks: {exc}"
+
+    return {
+        "removed": len(track_ids),
+        "track_uris": normalized,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -1583,4 +1702,6 @@ __all__ = [
     "check_saved_tracks",
     "find_saved_by_artist",
     "get_artist_info",
+    "save_tracks",
+    "remove_saved_tracks",
 ]
