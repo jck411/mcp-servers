@@ -31,6 +31,7 @@ declare -A PORTS=(
     [kiosk_clock_tools]=9012
     [tv]=9013
     [rag]=9014
+    [hue]=9015
 )
 
 RED='\033[0;31m'

@@ -29,10 +29,11 @@ declare -A PORT_MAP=(
     [kiosk_clock_tools]=9012
     [tv]=9013
     [rag]=9014
+    [hue]=9015
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag")
+DEFAULT_SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag" "hue")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then
