@@ -100,6 +100,13 @@ if [[ "$1" == "--list" || "$1" == "-l" ]]; then
     exit 0
 fi
 
+# Load .env if present (export vars for child processes)
+if [[ -f .env ]]; then
+    set -a
+    source .env
+    set +a
+fi
+
 # Ensure venv exists
 if [[ ! -d .venv ]]; then
     echo -e "${CYAN}Creating venv...${NC}"
