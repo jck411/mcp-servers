@@ -13,6 +13,11 @@ set -euo pipefail
 
 REPO_DIR="/opt/mcp-servers"
 
+# Ensure dependencies are installed before starting servers
+echo "=== Syncing dependencies ==="
+export PATH="/root/.local/bin:/home/mcp/.local/bin:$PATH"
+cd "$REPO_DIR" && uv sync --extra all
+
 # Port map — must match .env.example
 declare -A PORT_MAP=(
     [shell_control]=9001
