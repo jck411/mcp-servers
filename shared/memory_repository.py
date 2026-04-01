@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -136,34 +136,6 @@ class MemoryRepository:
         )
         rows = await cursor.fetchall()
         return [row["id"] for row in rows]
-
-    async def get_stale(self, min_importance: float, max_access: int = 0) -> list[str]:
-        """Return IDs of low-importance, never-accessed memories."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            """
-            SELECT id FROM memory_meta
-            WHERE pinned = 0 AND importance < ? AND access_count <= ?
-            """,
-            (min_importance, max_access),
-        )
-        rows = await cursor.fetchall()
-        return [row["id"] for row in rows]
-
-    async def decay_importance(self, factor: float = 0.95, min_age_days: int = 7) -> int:
-        """Reduce importance of old non-pinned memories. Return affected count."""
-        assert self._conn is not None
-        cutoff = (datetime.now(UTC) - timedelta(days=min_age_days)).isoformat()
-        cursor = await self._conn.execute(
-            """
-            UPDATE memory_meta
-            SET importance = importance * ?
-            WHERE pinned = 0 AND created_at < ?
-            """,
-            (factor, cutoff),
-        )
-        await self._conn.commit()
-        return cursor.rowcount
 
     async def stats(self, user_id: str = "default") -> dict[str, Any]:
         """Return aggregate memory statistics."""
