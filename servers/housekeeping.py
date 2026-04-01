@@ -128,21 +128,25 @@ async def _remember_impl(
     tags: list[str] | None = None,
     importance: float = 0.5,
     session_id: str | None = None,
-    pinned: bool = False,
+    pinned: bool = True,
     ttl_hours: int | None = None,
 ) -> dict[str, Any]:
     """Store a memory for a specific user profile."""
     embeddings, vectors, repo = _require_memory()
 
     memory_id = str(uuid4())
-    embedding = await embeddings.embed(content)
-
     now = datetime.now(UTC)
+
+    # Prepend the current date so every memory records when it was stored
+    date_stamp = now.strftime("%Y-%m-%d")
+    stamped_content = f"[{date_stamp}] {content}"
+
+    embedding = await embeddings.embed(stamped_content)
     expires_at = (now + timedelta(hours=ttl_hours)).isoformat() if ttl_hours else None
 
     payload = {
         "user_id": user_id,
-        "content": content,
+        "content": stamped_content,
         "category": category,
         "tags": tags or [],
         "importance": importance,
@@ -157,7 +161,7 @@ async def _remember_impl(
         memory_id=memory_id,
         user_id=user_id,
         category=category,
-        content_preview=content[:200],
+        content_preview=stamped_content[:200],
         importance=importance,
         pinned=pinned,
         session_id=session_id,
@@ -168,7 +172,7 @@ async def _remember_impl(
         "success": True,
         "memory_id": memory_id,
         "profile": user_id,
-        "content_preview": content[:100] + ("\u2026" if len(content) > 100 else ""),
+        "content_preview": stamped_content[:100] + ("\u2026" if len(stamped_content) > 100 else ""),
         "category": category,
         "pinned": pinned,
         "expires_at": expires_at,
@@ -318,7 +322,7 @@ def _register_profile_tools(profile: str) -> None:
         tags: list[str] | None = None,
         importance: float = 0.5,
         session_id: str | None = None,
-        pinned: bool = False,
+        pinned: bool = True,
         ttl_hours: int | None = None,
         _profile: str = profile,
     ) -> dict[str, Any]:
