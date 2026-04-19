@@ -1402,6 +1402,13 @@ housekeeping = [
 hue = [
     { name = "httpx" },
 ]
+knowledge = [
+    { name = "aiosqlite" },
+    { name = "httpx" },
+    { name = "kreuzberg" },
+    { name = "pydantic-settings" },
+    { name = "qdrant-client" },
+]
 monarch = [
     { name = "gql" },
     { name = "monarchmoney" },
@@ -1439,6 +1446,7 @@ tv = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'housekeeping'", specifier = ">=0.20.0" },
+    { name = "aiosqlite", marker = "extra == 'knowledge'", specifier = ">=0.20.0" },
     { name = "aiosqlite", marker = "extra == 'rag'", specifier = ">=0.20.0" },
     { name = "androidtvremote2", marker = "extra == 'tv'", specifier = ">=0.3.0" },
     { name = "bscpylgtv", marker = "extra == 'tv'", specifier = ">=0.4.9" },
@@ -1458,16 +1466,19 @@ requires-dist = [
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gdrive'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'gmail'" },
     { name = "mcp-servers", extras = ["google"], marker = "extra == 'notes'" },
-    { name = "mcp-servers", extras = ["housekeeping", "shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf", "rag", "tv", "hue"], marker = "extra == 'all'" },
+    { name = "mcp-servers", extras = ["housekeeping", "shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf", "rag", "tv", "hue", "knowledge"], marker = "extra == 'all'" },
+    { name = "mcp-servers", extras = ["pdf"], marker = "extra == 'knowledge'" },
     { name = "mcp-servers", extras = ["pdf"], marker = "extra == 'rag'" },
     { name = "monarchmoney", marker = "extra == 'monarch'", specifier = ">=0.1.12" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.57.0" },
     { name = "pydantic-settings", marker = "extra == 'housekeeping'", specifier = ">=2.0" },
+    { name = "pydantic-settings", marker = "extra == 'knowledge'", specifier = ">=2.0" },
     { name = "pydantic-settings", marker = "extra == 'rag'", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25.2" },
     { name = "python-dateutil", marker = "extra == 'google'", specifier = ">=2.8.0" },
     { name = "qdrant-client", marker = "extra == 'housekeeping'", specifier = ">=1.9" },
+    { name = "qdrant-client", marker = "extra == 'knowledge'", specifier = ">=1.9" },
     { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "spotipy", marker = "extra == 'spotify'", specifier = ">=2.25.1" },
@@ -1475,7 +1486,7 @@ requires-dist = [
     { name = "wakeonlan", marker = "extra == 'tv'", specifier = ">=3.0.0" },
     { name = "watchfiles", marker = "extra == 'dev'", specifier = ">=1.0.0" },
 ]
-provides-extras = ["housekeeping", "shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf", "rag", "tv", "hue", "all", "dev"]
+provides-extras = ["housekeeping", "shell", "playwright", "google", "gdrive", "gmail", "calendar", "notes", "spotify", "monarch", "pdf", "rag", "knowledge", "tv", "hue", "all", "dev"]
 
 [[package]]
 name = "mdurl"

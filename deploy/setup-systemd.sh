@@ -35,10 +35,11 @@ declare -A PORT_MAP=(
     [tv]=9013
     [rag]=9014
     [hue]=9015
+    [knowledge]=9017
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag" "hue")
+DEFAULT_SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag" "hue" "knowledge")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

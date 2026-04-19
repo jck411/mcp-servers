@@ -22,7 +22,7 @@ BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
 ALL_SERVERS=(
     housekeeping calculator shell_control playwright spotify
-    gdrive gmail calendar notes pdf monarch tv rag hue
+    gdrive gmail calendar notes pdf monarch tv rag hue knowledge
 )
 
 # ── Parse args ────────────────────────────────────────────────────────────────

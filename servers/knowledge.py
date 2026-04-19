@@ -1,0 +1,1384 @@
+"""Standalone MCP server for personal knowledge management.
+
+Central knowledge base for life domains (health, finances, schedule, etc.)
+with semantic search, structured facts, cross-domain queries, and file ingestion.
+
+Domains are created on the fly. Each domain can declare related domains so
+cross-domain queries automatically fan out. A special "core" domain holds
+foundational personal profile facts that are implicitly included in queries.
+
+Storage:
+  - Qdrant (vector search): one collection, filtered by domain
+  - SQLite (structured data): domains, facts, sources, ingest tracking
+
+Directory structure for file ingestion:
+    /opt/mcp-servers/knowledge/
+    ├── health/          → lab reports, doctor summaries
+    ├── finances/        → statements, budgets
+    ├── schedule/        → routines, commitments
+    └── gardening/       → research, plans
+
+Run:
+    python -m servers.knowledge --transport streamable-http --host 0.0.0.0 --port 9017
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import re
+import sys
+import uuid
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+import httpx
+import kreuzberg
+from fastmcp import FastMCP
+from kreuzberg import ChunkingConfig, ExtractionConfig
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    Fusion,
+    FusionQuery,
+    MatchValue,
+    PayloadSchemaType,
+    PointStruct,
+    Prefetch,
+    ScoredPoint,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
+
+# Default port for HTTP transport
+DEFAULT_HTTP_PORT = 9017
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+mcp = FastMCP("knowledge")
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeSettings(BaseSettings):
+    """Knowledge server configuration from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=str(PROJECT_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Knowledge storage
+    knowledge_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "knowledge",
+        validation_alias="KNOWLEDGE_PATH",
+    )
+
+    # OpenRouter embedding API
+    openrouter_api_key: str = Field(..., validation_alias="OPENROUTER_API_KEY")
+    embedding_model: str = Field(
+        default="openai/text-embedding-3-small",
+        validation_alias="EMBEDDING_MODEL",
+    )
+    embedding_dimensions: int = Field(default=1536, validation_alias="EMBEDDING_DIMENSIONS")
+
+    # Qdrant vector store
+    qdrant_url: str = Field(default="http://127.0.0.1:6333", validation_alias="QDRANT_URL")
+    qdrant_collection: str = Field(
+        default="knowledge", validation_alias="KNOWLEDGE_QDRANT_COLLECTION"
+    )
+
+    # SQLite database
+    db_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "data" / "knowledge.db",
+        validation_alias="KNOWLEDGE_DB_PATH",
+    )
+
+    # Chunking
+    chunk_max_chars: int = Field(default=1000, validation_alias="KNOWLEDGE_CHUNK_MAX_CHARS")
+    chunk_overlap: int = Field(default=200, validation_alias="KNOWLEDGE_CHUNK_OVERLAP")
+
+
+# ---------------------------------------------------------------------------
+# Embedding Client
+# ---------------------------------------------------------------------------
+
+
+class EmbeddingClient:
+    """Generate text embeddings via OpenRouter API."""
+
+    def __init__(self, settings: KnowledgeSettings) -> None:
+        self._api_key = settings.openrouter_api_key
+        self._model = settings.embedding_model
+        self._dimensions = settings.embedding_dimensions
+        self._url = "https://openrouter.ai/api/v1/embeddings"
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        return self._client
+
+    async def embed(self, text: str) -> list[float]:
+        """Embed a single text string."""
+        results = await self.embed_batch([text])
+        return results[0]
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed multiple texts in one API call."""
+        if not texts:
+            return []
+        client = await self._get_client()
+        payload: dict = {"model": self._model, "input": texts}
+        if "text-embedding-3" in self._model:
+            payload["dimensions"] = self._dimensions
+
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await client.post(self._url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                sorted_data = sorted(data["data"], key=lambda x: x["index"])
+                return [item["embedding"] for item in sorted_data]
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+
+        raise RuntimeError(f"Embedding failed after 3 attempts: {last_error}")
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# BM25 Sparse Encoder
+# ---------------------------------------------------------------------------
+
+
+class BM25SparseEncoder:
+    """BM25-based sparse vectors for hybrid search via feature hashing."""
+
+    def __init__(self, vocab_size: int = 30000) -> None:
+        self._vocab_size = vocab_size
+        self._k1 = 1.5
+        self._b = 0.75
+        self._doc_count = 0
+        self._doc_freqs: Counter[int] = Counter()
+        self._avg_doc_len = 0.0
+        self._total_doc_len = 0
+
+    def _tokenize(self, text: str) -> list[str]:
+        text = text.lower()
+        tokens = re.findall(r"\b[a-z0-9]+\b", text)
+        return [t for t in tokens if len(t) > 1]
+
+    def _hash_token(self, token: str) -> int:
+        h = hashlib.sha256(token.encode()).digest()
+        return int.from_bytes(h[:4], "little") % self._vocab_size
+
+    def fit_batch(self, texts: list[str]) -> None:
+        for text in texts:
+            tokens = self._tokenize(text)
+            self._doc_count += 1
+            self._total_doc_len += len(tokens)
+            unique_indices = set(self._hash_token(t) for t in tokens)
+            for idx in unique_indices:
+                self._doc_freqs[idx] += 1
+        if self._doc_count > 0:
+            self._avg_doc_len = self._total_doc_len / self._doc_count
+
+    def encode(self, text: str) -> tuple[list[int], list[float]]:
+        tokens = self._tokenize(text)
+        if not tokens:
+            return [], []
+        doc_len = len(tokens)
+        term_freqs: Counter[int] = Counter()
+        for token in tokens:
+            term_freqs[self._hash_token(token)] += 1
+
+        indices = []
+        values = []
+        for idx, tf in term_freqs.items():
+            tf_score = (tf * (self._k1 + 1)) / (
+                tf + self._k1 * (1 - self._b + self._b * doc_len / max(self._avg_doc_len, 1))
+            )
+            df = self._doc_freqs.get(idx, 0)
+            idf = max(0.0, (self._doc_count - df + 0.5) / (df + 0.5))
+            if idf > 0:
+                idf = (idf + 1.0) ** 0.5
+            score = tf_score * idf
+            if score > 0:
+                indices.append(idx)
+                values.append(float(score))
+
+        if indices:
+            sorted_pairs = sorted(zip(indices, values, strict=True), key=lambda x: x[0])
+            indices, values = zip(*sorted_pairs, strict=True)
+            return list(indices), list(values)
+        return [], []
+
+    def encode_query(self, text: str) -> tuple[list[int], list[float]]:
+        return self.encode(text)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Store (SQLite)
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeDB:
+    """SQLite store for domains, facts, and source tracking."""
+
+    def __init__(self, db_path: Path) -> None:
+        self._path = db_path
+        self._conn: aiosqlite.Connection | None = None
+
+    async def initialize(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = await aiosqlite.connect(self._path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS domains (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                related_domains TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS facts (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL REFERENCES domains(name),
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                valid_from TEXT,
+                valid_until TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_domain_key
+                ON facts(domain, key);
+            CREATE INDEX IF NOT EXISTS idx_facts_domain
+                ON facts(domain);
+
+            CREATE TABLE IF NOT EXISTS sources (
+                id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL REFERENCES domains(name),
+                source_type TEXT NOT NULL,
+                filename TEXT,
+                content_hash TEXT,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                ingested_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sources_domain
+                ON sources(domain);
+            CREATE INDEX IF NOT EXISTS idx_sources_hash
+                ON sources(content_hash);
+        """)
+        await self._conn.commit()
+
+    # -- Domains --
+
+    async def domain_create(
+        self, name: str, description: str, related_domains: list[str]
+    ) -> bool:
+        """Create a domain. Returns False if it already exists."""
+        assert self._conn is not None
+        import json
+
+        try:
+            await self._conn.execute(
+                "INSERT INTO domains (name, description, related_domains, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (name, description, json.dumps(related_domains), datetime.now(UTC).isoformat()),
+            )
+            await self._conn.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+    async def domain_list(self) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        import json
+
+        cursor = await self._conn.execute(
+            "SELECT name, description, related_domains, created_at, archived FROM domains"
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            results.append({
+                "name": row["name"],
+                "description": row["description"],
+                "related_domains": json.loads(row["related_domains"]),
+                "created_at": row["created_at"],
+                "archived": bool(row["archived"]),
+            })
+        return results
+
+    async def domain_get(self, name: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        import json
+
+        cursor = await self._conn.execute(
+            "SELECT name, description, related_domains, created_at, archived "
+            "FROM domains WHERE name = ?",
+            (name,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "name": row["name"],
+            "description": row["description"],
+            "related_domains": json.loads(row["related_domains"]),
+            "created_at": row["created_at"],
+            "archived": bool(row["archived"]),
+        }
+
+    async def domain_update_related(self, name: str, related_domains: list[str]) -> bool:
+        assert self._conn is not None
+        import json
+
+        cursor = await self._conn.execute(
+            "UPDATE domains SET related_domains = ? WHERE name = ?",
+            (json.dumps(related_domains), name),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def domain_archive(self, name: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "UPDATE domains SET archived = 1 WHERE name = ? AND archived = 0",
+            (name,),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def domain_exists(self, name: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT 1 FROM domains WHERE name = ?", (name,)
+        )
+        return await cursor.fetchone() is not None
+
+    # -- Facts --
+
+    async def fact_set(
+        self,
+        domain: str,
+        key: str,
+        value: str,
+        source: str | None = None,
+        confidence: float = 1.0,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+    ) -> str:
+        """Set a fact. Upserts by (domain, key). Returns fact ID."""
+        assert self._conn is not None
+        now = datetime.now(UTC).isoformat()
+        fact_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain}:{key}"))
+
+        await self._conn.execute(
+            """
+            INSERT INTO facts (id, domain, key, value, source, confidence,
+                               valid_from, valid_until, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(domain, key) DO UPDATE SET
+                value = excluded.value,
+                source = excluded.source,
+                confidence = excluded.confidence,
+                valid_from = excluded.valid_from,
+                valid_until = excluded.valid_until,
+                updated_at = excluded.updated_at
+            """,
+            (fact_id, domain, key, value, source, confidence,
+             valid_from, valid_until, now, now),
+        )
+        await self._conn.commit()
+        return fact_id
+
+    async def fact_get(self, domain: str, key: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT * FROM facts WHERE domain = ? AND key = ?", (domain, key)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    async def fact_delete(self, domain: str, key: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "DELETE FROM facts WHERE domain = ? AND key = ?", (domain, key)
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def facts_list(self, domain: str) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT key, value, source, confidence, valid_from, valid_until, updated_at "
+            "FROM facts WHERE domain = ? ORDER BY key",
+            (domain,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def facts_search(self, domains: list[str], keys: list[str]) -> list[dict[str, Any]]:
+        """Search facts across multiple domains by key substring match."""
+        assert self._conn is not None
+        placeholders_d = ",".join("?" for _ in domains)
+        conditions = [f"domain IN ({placeholders_d})"]
+        params: list[Any] = list(domains)
+
+        if keys:
+            key_conditions = []
+            for k in keys:
+                key_conditions.append("key LIKE ?")
+                params.append(f"%{k}%")
+            conditions.append(f"({' OR '.join(key_conditions)})")
+
+        where = " AND ".join(conditions)
+        cursor = await self._conn.execute(
+            f"SELECT domain, key, value, source, confidence, valid_from, valid_until, updated_at "  # noqa: S608
+            f"FROM facts WHERE {where} ORDER BY domain, key",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # -- Sources --
+
+    async def source_exists(self, content_hash: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT 1 FROM sources WHERE content_hash = ?", (content_hash,)
+        )
+        return await cursor.fetchone() is not None
+
+    async def source_add(
+        self,
+        source_id: str,
+        domain: str,
+        source_type: str,
+        filename: str | None,
+        content_hash: str,
+        chunk_count: int,
+    ) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            """
+            INSERT OR REPLACE INTO sources
+            (id, domain, source_type, filename, content_hash, chunk_count, ingested_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (source_id, domain, source_type, filename, content_hash,
+             chunk_count, datetime.now(UTC).isoformat()),
+        )
+        await self._conn.commit()
+
+    async def source_remove(self, source_id: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "DELETE FROM sources WHERE id = ?", (source_id,)
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def sources_list(self, domain: str) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT id, source_type, filename, content_hash, chunk_count, ingested_at "
+            "FROM sources WHERE domain = ? ORDER BY ingested_at DESC",
+            (domain,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def close(self) -> None:
+        if self._conn:
+            await self._conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Vector Store (Qdrant)
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeVectorStore:
+    """Qdrant operations for knowledge with hybrid search."""
+
+    DENSE_VECTOR_NAME = "dense"
+    SPARSE_VECTOR_NAME = "sparse"
+
+    def __init__(self, settings: KnowledgeSettings) -> None:
+        self._client = AsyncQdrantClient(url=settings.qdrant_url)
+        self._collection = settings.qdrant_collection
+        self._dimensions = settings.embedding_dimensions
+
+    async def ensure_collection(self) -> None:
+        collections = await self._client.get_collections()
+        exists = any(c.name == self._collection for c in collections.collections)
+
+        if not exists:
+            await self._client.create_collection(
+                collection_name=self._collection,
+                vectors_config={
+                    self.DENSE_VECTOR_NAME: VectorParams(
+                        size=self._dimensions, distance=Distance.COSINE
+                    ),
+                },
+                sparse_vectors_config={
+                    self.SPARSE_VECTOR_NAME: SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    ),
+                },
+            )
+
+        import contextlib
+
+        indexes: list[tuple[str, PayloadSchemaType]] = [
+            ("domain", PayloadSchemaType.KEYWORD),
+            ("source_id", PayloadSchemaType.KEYWORD),
+            ("source_type", PayloadSchemaType.KEYWORD),
+            ("chunk_index", PayloadSchemaType.INTEGER),
+        ]
+        for field, schema in indexes:
+            with contextlib.suppress(Exception):
+                await self._client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name=field,
+                    field_schema=schema,
+                )
+
+    async def upsert_chunks(
+        self,
+        chunks: list[dict[str, Any]],
+        embeddings: list[list[float]],
+        sparse_vectors: list[tuple[list[int], list[float]]],
+    ) -> None:
+        points = []
+        for chunk, embedding, (indices, values) in zip(
+            chunks, embeddings, sparse_vectors, strict=True
+        ):
+            vector_data: dict[str, Any] = {self.DENSE_VECTOR_NAME: embedding}
+            if indices and values:
+                vector_data[self.SPARSE_VECTOR_NAME] = SparseVector(
+                    indices=indices, values=values
+                )
+            points.append(PointStruct(id=chunk["id"], vector=vector_data, payload=chunk))
+        await self._client.upsert(collection_name=self._collection, points=points)
+
+    async def delete_by_source(self, source_id: str) -> None:
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
+            ),
+        )
+
+    async def delete_by_domain(self, domain: str) -> None:
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="domain", match=MatchValue(value=domain))]
+            ),
+        )
+
+    async def search(
+        self,
+        query_embedding: list[float],
+        sparse_query: tuple[list[int], list[float]] | None = None,
+        domains: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.25,
+    ) -> list[ScoredPoint]:
+        """Hybrid search filtered by domain(s)."""
+        must_conditions: list[FieldCondition] = []
+        if domains and len(domains) == 1:
+            must_conditions.append(
+                FieldCondition(key="domain", match=MatchValue(value=domains[0]))
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
+
+        # Multi-domain filter uses should with min_count
+        if domains and len(domains) > 1:
+            should_conditions = [
+                FieldCondition(key="domain", match=MatchValue(value=d)) for d in domains
+            ]
+            query_filter = Filter(should=should_conditions, must=must_conditions or None)
+
+        if sparse_query and sparse_query[0] and sparse_query[1]:
+            indices, values = sparse_query
+            prefetch_limit = max(limit * 4, 20)
+            results = await self._client.query_points(
+                collection_name=self._collection,
+                prefetch=[
+                    Prefetch(
+                        query=query_embedding,
+                        using=self.DENSE_VECTOR_NAME,
+                        filter=query_filter,
+                        limit=prefetch_limit,
+                    ),
+                    Prefetch(
+                        query=SparseVector(indices=indices, values=values),
+                        using=self.SPARSE_VECTOR_NAME,
+                        filter=query_filter,
+                        limit=prefetch_limit,
+                    ),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=limit,
+                with_payload=True,
+            )
+        else:
+            results = await self._client.query_points(
+                collection_name=self._collection,
+                query=query_embedding,
+                using=self.DENSE_VECTOR_NAME,
+                query_filter=query_filter,
+                limit=limit,
+                score_threshold=min_score,
+                with_payload=True,
+            )
+        return results.points
+
+    async def count_by_domain(self, domain: str) -> int:
+        result = await self._client.count(
+            collection_name=self._collection,
+            count_filter=Filter(
+                must=[FieldCondition(key="domain", match=MatchValue(value=domain))]
+            ),
+        )
+        return result.count
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
+# ---------------------------------------------------------------------------
+# Document Processing
+# ---------------------------------------------------------------------------
+
+
+def compute_file_hash(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def compute_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
+    """Extract text from a file and split into chunks."""
+    config = ExtractionConfig(
+        chunking=ChunkingConfig(
+            max_chars=settings.chunk_max_chars,
+            max_overlap=settings.chunk_overlap,
+        )
+    )
+    result = await kreuzberg.extract_file(str(path), config=config)
+
+    if result.chunks:
+        return [c.content for c in result.chunks]
+
+    content = result.content
+    if not content:
+        return []
+
+    chunks = []
+    current = ""
+    for para in content.split("\n\n"):
+        if len(current) + len(para) > settings.chunk_max_chars:
+            if current:
+                chunks.append(current.strip())
+            current = para
+        else:
+            current = current + "\n\n" + para if current else para
+    if current:
+        chunks.append(current.strip())
+
+    return [c for c in chunks if c]
+
+
+def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
+    """Chunk plain text into overlapping segments."""
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks = []
+    current = ""
+    for para in text.split("\n\n"):
+        if len(current) + len(para) > max_chars:
+            if current:
+                chunks.append(current.strip())
+            # Start new chunk with overlap from end of previous
+            if chunks and overlap > 0:
+                prev = chunks[-1]
+                current = prev[-overlap:] + "\n\n" + para
+            else:
+                current = para
+        else:
+            current = current + "\n\n" + para if current else para
+    if current:
+        chunks.append(current.strip())
+
+    return [c for c in chunks if c]
+
+
+# ---------------------------------------------------------------------------
+# Global State
+# ---------------------------------------------------------------------------
+
+_settings: KnowledgeSettings | None = None
+_embeddings: EmbeddingClient | None = None
+_sparse_encoder: BM25SparseEncoder | None = None
+_vectors: KnowledgeVectorStore | None = None
+_db: KnowledgeDB | None = None
+_ready = False
+
+
+def _require_ready() -> (
+    tuple[KnowledgeSettings, EmbeddingClient, BM25SparseEncoder, KnowledgeVectorStore, KnowledgeDB]
+):
+    if not _ready or not _settings or not _embeddings or not _sparse_encoder or not _vectors or not _db:
+        raise RuntimeError("Knowledge subsystem not initialized")
+    return _settings, _embeddings, _sparse_encoder, _vectors, _db
+
+
+async def _resolve_domains(domain: str | None, domains: list[str] | None) -> list[str]:
+    """Resolve a domain query to a list of domains including related ones.
+
+    If a single domain is given, automatically includes its related domains.
+    The 'core' domain is always included unless the caller explicitly excludes it.
+    """
+    _, _, _, _, db = _require_ready()
+
+    if domains:
+        result = list(domains)
+    elif domain:
+        result = [domain]
+        domain_info = await db.domain_get(domain)
+        if domain_info and domain_info["related_domains"]:
+            for related in domain_info["related_domains"]:
+                if related not in result:
+                    result.append(related)
+    else:
+        # All non-archived domains
+        all_domains = await db.domain_list()
+        result = [d["name"] for d in all_domains if not d["archived"]]
+
+    # Always include core if it exists and isn't already there
+    if "core" not in result and await db.domain_exists("core"):
+        result.append("core")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Domain Management
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_domain_create")
+async def knowledge_domain_create(
+    name: str,
+    description: str = "",
+    related_domains: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create a new knowledge domain.
+
+    A domain is a topic area (health, finances, gardening, etc.).
+    Related domains are automatically included when searching this domain.
+    The 'core' domain is always included in searches implicitly.
+
+    Args:
+        name: Domain name (lowercase, no spaces — use underscores).
+        description: What this domain covers.
+        related_domains: Other domains to include when searching this one.
+    """
+    settings, _, _, _, db = _require_ready()
+
+    # Sanitize name
+    clean_name = re.sub(r"[^a-z0-9_]", "_", name.lower().strip())
+    if not clean_name:
+        return {"success": False, "error": "Invalid domain name"}
+
+    created = await db.domain_create(clean_name, description, related_domains or [])
+    if not created:
+        return {"success": False, "error": f"Domain '{clean_name}' already exists"}
+
+    # Create knowledge subdirectory
+    domain_dir = settings.knowledge_path / clean_name
+    domain_dir.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "success": True,
+        "domain": clean_name,
+        "description": description,
+        "related_domains": related_domains or [],
+        "knowledge_path": str(domain_dir),
+        "message": f"Domain '{clean_name}' created. Place files in {domain_dir} for ingestion.",
+    }
+
+
+@mcp.tool("knowledge_domain_list")
+async def knowledge_domain_list() -> dict[str, Any]:
+    """List all knowledge domains with their descriptions and related domains."""
+    _, _, _, vectors, db = _require_ready()
+
+    domains = await db.domain_list()
+    for d in domains:
+        d["chunk_count"] = await vectors.count_by_domain(d["name"])
+        sources = await db.sources_list(d["name"])
+        d["source_count"] = len(sources)
+        facts = await db.facts_list(d["name"])
+        d["fact_count"] = len(facts)
+
+    return {"success": True, "count": len(domains), "domains": domains}
+
+
+@mcp.tool("knowledge_domain_archive")
+async def knowledge_domain_archive(name: str) -> dict[str, Any]:
+    """Archive a domain. Archived domains are excluded from searches by default.
+
+    Does NOT delete data — the domain can still be searched explicitly.
+
+    Args:
+        name: Domain to archive.
+    """
+    _, _, _, _, db = _require_ready()
+
+    archived = await db.domain_archive(name)
+    if not archived:
+        return {"success": False, "error": f"Domain '{name}' not found or already archived"}
+
+    return {
+        "success": True,
+        "domain": name,
+        "message": f"Domain '{name}' archived. Data preserved, excluded from default searches.",
+    }
+
+
+@mcp.tool("knowledge_domain_relate")
+async def knowledge_domain_relate(
+    name: str, related_domains: list[str]
+) -> dict[str, Any]:
+    """Update which domains are related to this one.
+
+    Related domains are automatically included when searching this domain.
+
+    Args:
+        name: Domain to update.
+        related_domains: Full list of related domain names (replaces existing).
+    """
+    _, _, _, _, db = _require_ready()
+
+    if not await db.domain_exists(name):
+        return {"success": False, "error": f"Domain '{name}' not found"}
+
+    await db.domain_update_related(name, related_domains)
+    return {"success": True, "domain": name, "related_domains": related_domains}
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Facts (Structured Key-Value Knowledge)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_fact_set")
+async def knowledge_fact_set(
+    domain: str,
+    key: str,
+    value: str,
+    source: str | None = None,
+    confidence: float = 1.0,
+    valid_from: str | None = None,
+    valid_until: str | None = None,
+) -> dict[str, Any]:
+    """Store a structured fact in a domain. Upserts — same key overwrites.
+
+    Facts are for precise, retrievable information that semantic search
+    would be unreliable for. Examples: "usda_zone" = "7b",
+    "fasting_glucose_2026_03" = "95 mg/dL", "monthly_budget" = "5000".
+
+    Args:
+        domain: Domain this fact belongs to.
+        key: Fact identifier (e.g. "usda_zone", "blood_type").
+        value: The fact value.
+        source: Where this fact came from (e.g. "lab report 2026-03-15").
+        confidence: How confident (0.0 to 1.0). Default 1.0.
+        valid_from: ISO date when this fact became true.
+        valid_until: ISO date when this fact expires.
+    """
+    _, _, _, _, db = _require_ready()
+
+    if not await db.domain_exists(domain):
+        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
+
+    fact_id = await db.fact_set(
+        domain, key, value, source, confidence, valid_from, valid_until
+    )
+    return {
+        "success": True,
+        "fact_id": fact_id,
+        "domain": domain,
+        "key": key,
+        "value": value,
+    }
+
+
+@mcp.tool("knowledge_fact_delete")
+async def knowledge_fact_delete(domain: str, key: str) -> dict[str, Any]:
+    """Delete a specific fact from a domain.
+
+    Args:
+        domain: Domain the fact belongs to.
+        key: The fact key to delete.
+    """
+    _, _, _, _, db = _require_ready()
+
+    deleted = await db.fact_delete(domain, key)
+    if not deleted:
+        return {"success": False, "error": f"Fact '{key}' not found in domain '{domain}'"}
+
+    return {"success": True, "domain": domain, "key": key, "message": "Fact deleted."}
+
+
+@mcp.tool("knowledge_facts_list")
+async def knowledge_facts_list(domain: str) -> dict[str, Any]:
+    """List all structured facts in a domain.
+
+    Args:
+        domain: Domain to list facts for.
+    """
+    _, _, _, _, db = _require_ready()
+
+    facts = await db.facts_list(domain)
+    return {"success": True, "domain": domain, "count": len(facts), "facts": facts}
+
+
+@mcp.tool("knowledge_facts_search")
+async def knowledge_facts_search(
+    query: str,
+    domains: list[str] | None = None,
+    keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """Search structured facts across domains.
+
+    Searches by key substring match. If no domains specified, searches all.
+
+    Args:
+        query: Not used for fact search — use keys param (kept for API consistency).
+        domains: Domains to search. If omitted, searches all non-archived.
+        keys: Key substrings to match (e.g. ["glucose", "budget"]).
+    """
+    _, _, _, _, db = _require_ready()
+
+    if not domains:
+        all_domains = await db.domain_list()
+        domains = [d["name"] for d in all_domains if not d["archived"]]
+
+    facts = await db.facts_search(domains, keys or [])
+    return {"success": True, "count": len(facts), "facts": facts}
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Ingestion
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_ingest_text")
+async def knowledge_ingest_text(
+    domain: str,
+    content: str,
+    source_name: str = "manual",
+    source_type: str = "note",
+) -> dict[str, Any]:
+    """Ingest free-form text into a domain's knowledge base.
+
+    Text is chunked, embedded, and stored for semantic search.
+    Use this for notes, summaries, research, doctor's advice, etc.
+
+    Args:
+        domain: Domain to ingest into.
+        content: The text content to ingest.
+        source_name: Label for this source (e.g. "Dr. Smith visit notes 2026-03").
+        source_type: Type of source (note, summary, transcript, research, etc.).
+    """
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+
+    if not await db.domain_exists(domain):
+        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
+
+    content_hash = compute_text_hash(content)
+
+    if await db.source_exists(content_hash):
+        return {
+            "success": True,
+            "message": "Content already ingested (identical hash).",
+            "chunks": 0,
+        }
+
+    # Chunk and embed
+    chunks_text = chunk_text(content, settings.chunk_max_chars, settings.chunk_overlap)
+    if not chunks_text:
+        return {"success": False, "error": "No content to ingest"}
+
+    sparse_encoder.fit_batch(chunks_text)
+    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
+    dense_vecs = await embeddings.embed_batch(chunks_text)
+
+    source_id = str(uuid.uuid4())
+    chunk_payloads = []
+    for i, text in enumerate(chunks_text):
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{content_hash}_{i}"))
+        chunk_payloads.append({
+            "id": chunk_id,
+            "domain": domain,
+            "source_id": source_id,
+            "source_type": source_type,
+            "source_name": source_name,
+            "chunk_index": i,
+            "content": text,
+            "ingested_at": datetime.now(UTC).isoformat(),
+        })
+
+    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
+    await db.source_add(source_id, domain, source_type, source_name, content_hash, len(chunks_text))
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "domain": domain,
+        "source_name": source_name,
+        "chunks": len(chunks_text),
+        "message": f"Ingested {len(chunks_text)} chunks into '{domain}'.",
+    }
+
+
+@mcp.tool("knowledge_ingest_file")
+async def knowledge_ingest_file(
+    domain: str,
+    filename: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Ingest file(s) from a domain's knowledge directory.
+
+    Files are extracted (PDF, images via OCR, text, CSV), chunked, embedded,
+    and stored for semantic search.
+
+    The knowledge directory is: <knowledge_path>/<domain>/
+    Place files there before calling this tool.
+
+    Args:
+        domain: Domain to ingest into (must exist, directory must have files).
+        filename: Specific file to ingest. If omitted, ingests all new files.
+        force: Re-ingest even if file hasn't changed.
+    """
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+
+    if not await db.domain_exists(domain):
+        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
+
+    domain_dir = settings.knowledge_path / domain
+    if not domain_dir.exists():
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        return {"success": False, "error": f"No files found. Place files in: {domain_dir}"}
+
+    # Collect files to process
+    if filename:
+        target = domain_dir / filename
+        if not target.exists():
+            return {"success": False, "error": f"File not found: {target}"}
+        files = [target]
+    else:
+        files = sorted(
+            f for f in domain_dir.iterdir()
+            if f.is_file() and not f.name.startswith(".")
+        )
+
+    if not files:
+        return {"success": False, "error": f"No files found in {domain_dir}"}
+
+    total_chunks = 0
+    results = []
+    for file_path in files:
+        try:
+            file_hash = compute_file_hash(file_path)
+
+            if not force and await db.source_exists(file_hash):
+                results.append({"file": file_path.name, "status": "skipped", "reason": "unchanged"})
+                continue
+
+            chunks_text = await extract_and_chunk(file_path, settings)
+            if not chunks_text:
+                results.append({"file": file_path.name, "status": "skipped", "reason": "no content"})
+                continue
+
+            sparse_encoder.fit_batch(chunks_text)
+            sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
+            dense_vecs = await embeddings.embed_batch(chunks_text)
+
+            source_id = str(uuid.uuid4())
+            chunk_payloads = []
+            for i, text in enumerate(chunks_text):
+                chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}"))
+                chunk_payloads.append({
+                    "id": chunk_id,
+                    "domain": domain,
+                    "source_id": source_id,
+                    "source_type": file_path.suffix.lstrip(".") or "file",
+                    "source_name": file_path.name,
+                    "chunk_index": i,
+                    "content": text,
+                    "ingested_at": datetime.now(UTC).isoformat(),
+                })
+
+            await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
+            await db.source_add(
+                source_id, domain, file_path.suffix.lstrip(".") or "file",
+                file_path.name, file_hash, len(chunks_text)
+            )
+
+            total_chunks += len(chunks_text)
+            results.append({
+                "file": file_path.name,
+                "status": "indexed",
+                "chunks": len(chunks_text),
+            })
+            print(
+                f"  [KNOWLEDGE] Indexed {file_path.name}: {len(chunks_text)} chunks",
+                file=sys.stderr,
+            )
+
+        except Exception as exc:
+            results.append({"file": file_path.name, "status": "error", "error": str(exc)})
+            print(f"  [KNOWLEDGE] Failed {file_path.name}: {exc}", file=sys.stderr)
+
+    return {
+        "success": True,
+        "domain": domain,
+        "total_chunks": total_chunks,
+        "files": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Search
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_search")
+async def knowledge_search(
+    query: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    limit: int = 10,
+    min_similarity: float = 0.25,
+    include_facts: bool = True,
+) -> dict[str, Any]:
+    """Search knowledge base using hybrid semantic + keyword search.
+
+    If a single domain is given, automatically includes its related domains
+    and the 'core' domain. If no domain is specified, searches everything.
+
+    Args:
+        query: What to search for.
+        domain: Search this domain + its related domains + core.
+        domains: Explicit list of domains to search (overrides auto-resolution).
+        limit: Max results to return.
+        min_similarity: Minimum similarity threshold (0.0 to 1.0).
+        include_facts: Also search structured facts for relevant matches.
+    """
+    settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
+
+    resolved_domains = await _resolve_domains(domain, domains)
+
+    # Semantic search
+    query_embedding = await embeddings_client.embed(query)
+    sparse_query = sparse_encoder.encode_query(query)
+
+    results = await vectors.search(
+        query_embedding,
+        sparse_query=sparse_query,
+        domains=resolved_domains,
+        limit=limit,
+        min_score=min_similarity,
+    )
+
+    formatted = []
+    for r in results:
+        p = r.payload or {}
+        formatted.append({
+            "content": p.get("content", ""),
+            "domain": p.get("domain", ""),
+            "source_name": p.get("source_name", ""),
+            "source_type": p.get("source_type", ""),
+            "chunk_index": p.get("chunk_index", 0),
+            "similarity": round(r.score, 4),
+        })
+
+    response: dict[str, Any] = {
+        "success": True,
+        "query": query,
+        "searched_domains": resolved_domains,
+        "count": len(formatted),
+        "results": formatted,
+    }
+
+    # Include relevant facts
+    if include_facts:
+        # Extract keywords from query for fact matching
+        keywords = [w for w in query.lower().split() if len(w) > 2]
+        if keywords:
+            facts = await db.facts_search(resolved_domains, keywords)
+            response["facts"] = facts
+            response["fact_count"] = len(facts)
+
+    return response
+
+
+@mcp.tool("knowledge_sources")
+async def knowledge_sources(domain: str) -> dict[str, Any]:
+    """List all ingested sources in a domain.
+
+    Args:
+        domain: Domain to list sources for.
+    """
+    _, _, _, _, db = _require_ready()
+
+    sources = await db.sources_list(domain)
+    return {"success": True, "domain": domain, "count": len(sources), "sources": sources}
+
+
+# ---------------------------------------------------------------------------
+# Startup / Shutdown
+# ---------------------------------------------------------------------------
+
+
+async def _startup() -> None:
+    global _settings, _embeddings, _sparse_encoder, _vectors, _db, _ready
+
+    try:
+        _settings = KnowledgeSettings()  # type: ignore[call-arg]
+    except Exception as exc:
+        print(f"[KNOWLEDGE] Disabled — config error: {exc}", file=sys.stderr)
+        return
+
+    _settings.knowledge_path.mkdir(parents=True, exist_ok=True)
+    print(f"[KNOWLEDGE] Knowledge path: {_settings.knowledge_path}", file=sys.stderr)
+
+    _embeddings = EmbeddingClient(_settings)
+    _sparse_encoder = BM25SparseEncoder()
+    _vectors = KnowledgeVectorStore(_settings)
+    _db = KnowledgeDB(_settings.db_path)
+
+    try:
+        await _vectors.ensure_collection()
+    except Exception as exc:
+        print(f"[KNOWLEDGE] Disabled — Qdrant unreachable: {exc}", file=sys.stderr)
+        return
+
+    await _db.initialize()
+
+    # Ensure 'core' domain exists
+    await _db.domain_create("core", "Foundational personal profile — always included in searches", [])
+
+    _ready = True
+    print("[KNOWLEDGE] Initialization complete", file=sys.stderr)
+
+
+async def _shutdown() -> None:
+    if _embeddings:
+        await _embeddings.close()
+    if _vectors:
+        await _vectors.close()
+    if _db:
+        await _db.close()
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+
+def run(
+    transport: str = "stdio",
+    host: str = "0.0.0.0",
+    port: int = DEFAULT_HTTP_PORT,
+) -> None:
+    """Run the Knowledge MCP server."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(_startup())
+
+    try:
+        if transport == "streamable-http":
+            mcp.run(
+                transport="streamable-http",
+                host=host,
+                port=port,
+                json_response=True,
+                stateless_http=True,
+                uvicorn_config={"access_log": False},
+            )
+        else:
+            mcp.run(transport="stdio")
+    finally:
+        asyncio.get_event_loop().run_until_complete(_shutdown())
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Knowledge MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default="stdio",
+    )
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
+    args = parser.parse_args()
+    run(args.transport, args.host, args.port)
+
+
+if __name__ == "__main__":
+    main()
+
+
+__all__ = ["mcp", "run", "main", "DEFAULT_HTTP_PORT"]
