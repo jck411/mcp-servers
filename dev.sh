@@ -18,7 +18,6 @@ cd "$SCRIPT_DIR"
 # Server → port mapping (must match deploy/setup-systemd.sh)
 declare -A PORTS=(
     [shell_control]=9001
-    [housekeeping]=9002
     [calculator]=9003
     [calendar]=9004
     [gmail]=9005

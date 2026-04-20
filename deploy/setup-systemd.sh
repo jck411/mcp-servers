@@ -21,7 +21,6 @@ cd "$REPO_DIR" && uv sync --extra all
 # Port map — must match .env.example
 declare -A PORT_MAP=(
     [shell_control]=9001
-    [housekeeping]=9002
     [calculator]=9003
     [calendar]=9004
     [gmail]=9005
@@ -39,7 +38,7 @@ declare -A PORT_MAP=(
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("housekeeping" "calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag" "hue" "knowledge")
+DEFAULT_SERVERS=("calculator" "shell_control" "playwright" "spotify" "gdrive" "gmail" "calendar" "notes" "pdf" "monarch" "tv" "rag" "hue" "knowledge")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

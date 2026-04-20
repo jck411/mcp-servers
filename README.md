@@ -26,7 +26,6 @@ Each server:
 | Server | Port |
 |--------|------|
 | shell-control | 9001 |
-| housekeeping | 9002 |
 | calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
