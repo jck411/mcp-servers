@@ -1,0 +1,49 @@
+# mcp-knowledge-api.service — Knowledge REST API (file upload + search + facts CRUD)
+#
+# A standalone FastAPI service that wraps the knowledge MCP server's internals
+# over plain HTTP (no MCP client required).
+#
+# Endpoints:
+#   POST /api/upload/{domain}          Upload + ingest a file
+#   GET  /api/search?q=...             Semantic search
+#   GET  /api/domains                  List all domains
+#   GET  /api/facts/{domain}           List facts in a domain
+#   POST /api/facts/{domain}/{key}     Upsert a fact
+#   DELETE /api/facts/{domain}/{key}   Delete a fact
+#
+# Exposed at: https://api-knowledge.jackshome.com
+#
+# Installation:
+#   sudo cp deploy/mcp-knowledge-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mcp-knowledge-api
+
+[Unit]
+Description=Knowledge REST API
+After=network.target mcp-server@knowledge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcp
+Group=mcp
+WorkingDirectory=/opt/mcp-servers
+EnvironmentFile=/opt/mcp-servers/.env
+ExecStart=/opt/mcp-servers/.venv/bin/python -m servers.knowledge_api \
+    --host 0.0.0.0 \
+    --port 9018
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-knowledge-api
+
+# Security hardening
+# ReadWritePaths includes /knowledge so the upload endpoint can write files there
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data /opt/mcp-servers/knowledge
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
