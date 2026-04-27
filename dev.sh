@@ -31,6 +31,7 @@ declare -A PORTS=(
     [tv]=9013
     [rag]=9014
     [hue]=9015
+    [web_search]=9016
     [knowledge]=9017
 )
 
