@@ -108,7 +108,7 @@ sshpass -p '97919791' ssh root@192.168.1.11 "pct exec 110 -- chown -R mcp:mcp /o
 
 ### 7. Trigger backend discovery
 
-The Backend_FastAPI auto-discovers servers on ports 9001–9016 when refreshed:
+The Backend_FastAPI auto-discovers servers on ports 9001–9017 when refreshed:
 ```
 curl -sk -X POST https://127.0.0.1:8000/api/mcp/servers/refresh -H "Content-Type: application/json" -H "Accept: application/json"
 ```
@@ -137,6 +137,7 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | tv | 9013 |
 | rag | 9014 |
 | hue | 9015 |
+| knowledge | 9017 |
 
 Note: Port 9012 was previously used by `kiosk_clock_tools` (removed). Do not reuse it.
 
