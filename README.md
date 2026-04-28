@@ -25,7 +25,7 @@ Each server:
 
 | Server | Port |
 |--------|------|
-| shell-control | 9001 |
+| shell_control | 9001 |
 | calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
@@ -35,11 +35,21 @@ Each server:
 | notes | 9009 |
 | spotify | 9010 |
 | playwright | 9011 |
-| kiosk-clock-tools | 9012 |
 | tv | 9013 |
 | rag | 9014 |
+| hue | 9015 |
+| web_search | 9016 |
+| knowledge | 9017 |
+
+Next available port: **9018**. Port `9012` is retired (was `kiosk_clock_tools`).
 
 All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
+
+## Related Repos
+
+- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — auto-discovers servers on ports 9001–9017.
+- [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — register a new server in OpenCode after deploying it here.
+- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure. See [`docs/infrastructure-map.md`](https://github.com/jck411/PROXMOX/blob/master/docs/infrastructure-map.md).
 
 ## Quick Start
 

@@ -7,9 +7,11 @@ Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via syste
 | Repo | Location | Purpose |
 |------|----------|--------|
 | Backend_FastAPI | LXC 111 (192.168.1.111:8000) | Chat backend, auto-discovers these servers |
+| opencode-config | LXC 114 (192.168.1.114:4096) | OpenCode config; needs explicit `add-mcp-server.sh` after a new server ships |
 | PROXMOX | Host (192.168.1.11) | Infrastructure, LXC definitions |
 
 - Backend auto-discovers servers on ports 9001–9017 via `/api/mcp/servers/refresh`
+- OpenCode does NOT auto-discover — use the `opencode-config` repo's `scripts/add-mcp-server.sh`
 - Knowledge server uses Qdrant at 192.168.1.110:6333 for vector search
 - Memory backup logs written by Backend_FastAPI, not MCP servers
 
@@ -114,9 +116,20 @@ curl -sk -X POST https://127.0.0.1:8000/api/mcp/servers/refresh -H "Content-Type
 ```
 Verify the server appears with `connected: true` and correct tool count in the response.
 
-### 8. Confirm done
+### 8. Register with OpenCode (if the user wants OpenCode to see it)
 
-Report: server name, port, tool count, connected status. One-liner, no summary doc.
+OpenCode does NOT auto-discover. From the **opencode-config** repo:
+```
+cd ~/REPOS/opencode-config
+./scripts/add-mcp-server.sh <name> <port>
+./scripts/sync-to-lxc.sh
+git commit -am "Add <name>" && git push
+```
+If the server needs an auth token, pass `--auth-env <VAR>` and add `<VAR>=<value>` to that repo's `.env` before syncing.
+
+### 9. Confirm done
+
+Report: server name, port, tool count, Backend connected status, OpenCode visibility. One-liner, no summary doc.
 
 ## Port Assignments
 
@@ -137,11 +150,12 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | tv | 9013 |
 | rag | 9014 |
 | hue | 9015 |
+| web_search | 9016 |
 | knowledge | 9017 |
 
 Note: Port 9012 was previously used by `kiosk_clock_tools` (removed). Do not reuse it.
 
-Next available: 9016
+Next available: 9018
 
 ## Credential Sources
 
