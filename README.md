@@ -45,6 +45,21 @@ Next available port: **9018**. Port `9012` is retired (was `kiosk_clock_tools`).
 
 All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
+### Knowledge Curation Queue
+
+The `knowledge` server owns a reviewed curation queue in SQLite. LibreChat and
+maintenance jobs can draft queue items for durable memory extraction, source
+consolidation, temporal fact cleanup, and pending maintenance review. The MCP
+tools are:
+
+- `knowledge_curation_list`
+- `knowledge_curation_get`
+- `knowledge_curation_apply`
+- `knowledge_curation_reject`
+- `knowledge_curation_snooze`
+
+Destructive actions require `confirmation` equal to the queue item id.
+
 ## Related Repos
 
 - [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — auto-discovers servers on ports 9001–9017.

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import sys
 import uuid
@@ -260,6 +261,7 @@ class KnowledgeDB:
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=10000")
         await self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS domains (
                 name TEXT PRIMARY KEY,
@@ -299,6 +301,24 @@ class KnowledgeDB:
                 ON sources(domain);
             CREATE INDEX IF NOT EXISTS idx_sources_hash
                 ON sources(content_hash);
+
+            CREATE TABLE IF NOT EXISTS curation_items (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                risk TEXT NOT NULL DEFAULT 'medium',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                source_refs TEXT NOT NULL DEFAULT '[]',
+                proposed_actions TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_curation_status
+                ON curation_items(status);
+            CREATE INDEX IF NOT EXISTS idx_curation_kind
+                ON curation_items(kind);
         """)
         await self._conn.commit()
 
@@ -320,6 +340,7 @@ class KnowledgeDB:
             await self._conn.commit()
             return True
         except aiosqlite.IntegrityError:
+            await self._conn.rollback()
             return False
 
     async def domain_list(self) -> list[dict[str, Any]]:
@@ -513,6 +534,16 @@ class KnowledgeDB:
         await self._conn.commit()
         return cursor.rowcount > 0
 
+    async def source_get(self, source_id: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT id, domain, source_type, filename, content_hash, chunk_count, ingested_at "
+            "FROM sources WHERE id = ?",
+            (source_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def sources_list(self, domain: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(
@@ -522,6 +553,116 @@ class KnowledgeDB:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # -- Curation Queue --
+
+    @staticmethod
+    def _decode_curation_row(row: aiosqlite.Row) -> dict[str, Any]:
+        item = dict(row)
+        for key in ("source_refs", "proposed_actions"):
+            try:
+                item[key] = json.loads(item[key] or "[]")
+            except json.JSONDecodeError:
+                item[key] = []
+        return item
+
+    async def curation_upsert(
+        self,
+        *,
+        kind: str,
+        title: str,
+        summary: str = "",
+        source_refs: list[dict[str, Any]] | None = None,
+        proposed_actions: list[dict[str, Any]] | None = None,
+        risk: str = "medium",
+        confidence: float = 0.0,
+        item_id: str | None = None,
+        status: str = "pending",
+        created_at: str | None = None,
+    ) -> str:
+        """Create or replace a curation queue item."""
+        assert self._conn is not None
+        curation_id = item_id or str(uuid.uuid4())
+        now = created_at or datetime.now(UTC).isoformat()
+        await self._conn.execute(
+            """
+            INSERT INTO curation_items
+                (id, kind, status, risk, confidence, title, summary, source_refs,
+                 proposed_actions, created_at, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                kind = excluded.kind,
+                status = excluded.status,
+                risk = excluded.risk,
+                confidence = excluded.confidence,
+                title = excluded.title,
+                summary = excluded.summary,
+                source_refs = excluded.source_refs,
+                proposed_actions = excluded.proposed_actions,
+                created_at = excluded.created_at,
+                reviewed_at = CASE
+                    WHEN excluded.status = 'pending' THEN NULL
+                    ELSE curation_items.reviewed_at
+                END
+            """,
+            (
+                curation_id,
+                kind,
+                status,
+                risk,
+                confidence,
+                title,
+                summary,
+                json.dumps(source_refs or []),
+                json.dumps(proposed_actions or []),
+                now,
+            ),
+        )
+        await self._conn.commit()
+        return curation_id
+
+    async def curation_get(self, item_id: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT * FROM curation_items WHERE id = ?",
+            (item_id,),
+        )
+        row = await cursor.fetchone()
+        return self._decode_curation_row(row) if row else None
+
+    async def curation_list(
+        self,
+        *,
+        status: str | None = "pending",
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        limit = max(1, min(limit, 200))
+        conditions = []
+        params: list[Any] = []
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        cursor = await self._conn.execute(
+            f"SELECT * FROM curation_items {where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
+            [*params, limit],
+        )
+        rows = await cursor.fetchall()
+        return [self._decode_curation_row(row) for row in rows]
+
+    async def curation_mark_status(self, item_id: str, status: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "UPDATE curation_items SET status = ?, reviewed_at = ? WHERE id = ?",
+            (status, datetime.now(UTC).isoformat(), item_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
 
     async def close(self) -> None:
         if self._conn:
@@ -774,9 +915,234 @@ _ready = False
 def _require_ready() -> (
     tuple[KnowledgeSettings, EmbeddingClient, BM25SparseEncoder, KnowledgeVectorStore, KnowledgeDB]
 ):
-    if not _ready or not _settings or not _embeddings or not _sparse_encoder or not _vectors or not _db:
+    if (
+        not _ready
+        or not _settings
+        or not _embeddings
+        or not _sparse_encoder
+        or not _vectors
+        or not _db
+    ):
         raise RuntimeError("Knowledge subsystem not initialized")
     return _settings, _embeddings, _sparse_encoder, _vectors, _db
+
+
+DESTRUCTIVE_CURATION_ACTIONS = {
+    "archive_domain",
+    "delete_source",
+    "domain_archive",
+    "fact_delete",
+}
+
+
+def curation_item_has_destructive_actions(item: dict[str, Any]) -> bool:
+    """Return True when a curation item proposes removing or archiving data."""
+    for action in item.get("proposed_actions") or []:
+        action_type = str(action.get("action") or action.get("type") or "")
+        if action_type in DESTRUCTIVE_CURATION_ACTIONS:
+            return True
+    return False
+
+
+async def _ingest_curation_text(
+    *,
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    domain: str,
+    content: str,
+    source_name: str,
+    source_type: str = "curated_note",
+) -> dict[str, Any]:
+    if not await db.domain_exists(domain):
+        raise ValueError(f"Domain '{domain}' not found")
+
+    chunks_text = chunk_text(content, settings.chunk_max_chars, settings.chunk_overlap)
+    if not chunks_text:
+        raise ValueError("No content to ingest")
+
+    content_hash = compute_text_hash(content)
+    if await db.source_exists(content_hash):
+        return {
+            "action": "ingest_text",
+            "status": "skipped",
+            "reason": "identical content already ingested",
+        }
+
+    sparse_encoder.fit_batch(chunks_text)
+    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
+    dense_vecs = await embeddings.embed_batch(chunks_text)
+
+    source_id = str(uuid.uuid4())
+    chunk_payloads = []
+    for i, text in enumerate(chunks_text):
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{content_hash}_{i}"))
+        chunk_payloads.append({
+            "id": chunk_id,
+            "domain": domain,
+            "source_id": source_id,
+            "source_type": source_type,
+            "source_name": source_name,
+            "chunk_index": i,
+            "content": text,
+            "ingested_at": datetime.now(UTC).isoformat(),
+        })
+
+    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
+    await db.source_add(source_id, domain, source_type, source_name, content_hash, len(chunks_text))
+    return {
+        "action": "ingest_text",
+        "status": "applied",
+        "domain": domain,
+        "source_id": source_id,
+        "source_name": source_name,
+        "chunks": len(chunks_text),
+    }
+
+
+async def execute_curation_action(
+    action: dict[str, Any],
+    *,
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+) -> dict[str, Any]:
+    """Apply one reviewed curation action to Knowledge storage."""
+    action_type = str(action.get("action") or action.get("type") or "")
+
+    if action_type == "fact_set":
+        domain = str(action["domain"])
+        key = str(action["key"])
+        if not await db.domain_exists(domain):
+            raise ValueError(f"Domain '{domain}' not found")
+        fact_id = await db.fact_set(
+            domain,
+            key,
+            str(action["value"]),
+            action.get("source"),
+            float(action.get("confidence", 1.0)),
+            action.get("valid_from"),
+            action.get("valid_until"),
+        )
+        return {"action": action_type, "status": "applied", "fact_id": fact_id}
+
+    if action_type == "fact_update_validity":
+        domain = str(action["domain"])
+        key = str(action["key"])
+        fact = await db.fact_get(domain, key)
+        if not fact:
+            raise ValueError(f"Fact '{domain}/{key}' not found")
+        await db.fact_set(
+            domain,
+            key,
+            fact["value"],
+            fact.get("source"),
+            float(fact.get("confidence", 1.0)),
+            action.get("valid_from", fact.get("valid_from")),
+            action.get("valid_until", fact.get("valid_until")),
+        )
+        return {"action": action_type, "status": "applied", "domain": domain, "key": key}
+
+    if action_type == "fact_delete":
+        domain = str(action["domain"])
+        key = str(action["key"])
+        deleted = await db.fact_delete(domain, key)
+        if not deleted:
+            raise ValueError(f"Fact '{domain}/{key}' not found")
+        return {"action": action_type, "status": "applied", "domain": domain, "key": key}
+
+    if action_type == "ingest_text":
+        return await _ingest_curation_text(
+            settings=settings,
+            embeddings=embeddings,
+            sparse_encoder=sparse_encoder,
+            vectors=vectors,
+            db=db,
+            domain=str(action["domain"]),
+            content=str(action["content"]),
+            source_name=str(action.get("source_name") or "curated_conversation_note"),
+            source_type=str(action.get("source_type") or "curated_note"),
+        )
+
+    if action_type == "delete_source":
+        source_id = str(action.get("target_id") or action.get("source_id") or "")
+        if not source_id:
+            raise ValueError("delete_source action requires target_id or source_id")
+        source = await db.source_get(source_id)
+        if not source:
+            raise ValueError(f"Source '{source_id}' not found")
+        await vectors.delete_by_source(source_id)
+        deleted = await db.source_remove(source_id)
+        if not deleted:
+            raise ValueError(f"Source '{source_id}' disappeared before delete")
+        return {
+            "action": action_type,
+            "status": "applied",
+            "source_id": source_id,
+            "source": source,
+        }
+
+    if action_type in {"archive_domain", "domain_archive"}:
+        domain = str(action.get("target_id") or action.get("domain") or "")
+        if not domain:
+            raise ValueError("archive_domain action requires target_id or domain")
+        archived = await db.domain_archive(domain)
+        if not archived:
+            raise ValueError(f"Domain '{domain}' not found or already archived")
+        return {"action": action_type, "status": "applied", "domain": domain}
+
+    if action_type in {"flag_for_review", "no_action"}:
+        return {"action": action_type, "status": "skipped"}
+
+    raise ValueError(f"Unsupported curation action '{action_type}'")
+
+
+async def apply_curation_item(
+    item_id: str,
+    *,
+    confirmation: str | None,
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+) -> dict[str, Any]:
+    """Apply a queue item after review, enforcing destructive-action confirmation."""
+    item = await db.curation_get(item_id)
+    if not item:
+        return {"success": False, "error": f"Curation item '{item_id}' not found"}
+    if item["status"] != "pending":
+        return {
+            "success": False,
+            "error": f"Curation item '{item_id}' is {item['status']}, not pending",
+        }
+    if curation_item_has_destructive_actions(item) and confirmation != item_id:
+        return {
+            "success": False,
+            "error": "Destructive curation actions require confirmation equal to the item id",
+            "requires_confirmation": item_id,
+        }
+
+    results = []
+    try:
+        for action in item.get("proposed_actions") or []:
+            results.append(await execute_curation_action(
+                action,
+                settings=settings,
+                embeddings=embeddings,
+                sparse_encoder=sparse_encoder,
+                vectors=vectors,
+                db=db,
+            ))
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "applied_before_error": results}
+
+    await db.curation_mark_status(item_id, "applied")
+    return {"success": True, "item_id": item_id, "results": results}
 
 
 async def _resolve_domains(domain: str | None, domains: list[str] | None) -> list[str]:
@@ -1146,7 +1512,11 @@ async def knowledge_ingest_file(
 
             chunks_text = await extract_and_chunk(file_path, settings)
             if not chunks_text:
-                results.append({"file": file_path.name, "status": "skipped", "reason": "no content"})
+                results.append({
+                    "file": file_path.name,
+                    "status": "skipped",
+                    "reason": "no content",
+                })
                 continue
 
             sparse_encoder.fit_batch(chunks_text)
@@ -1286,6 +1656,85 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# MCP Tools — Curation Queue
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_curation_list")
+async def knowledge_curation_list(
+    status: str | None = "pending",
+    kind: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List Knowledge curation queue items for review.
+
+    The queue contains proposed conversation distillations, source consolidation
+    candidates, temporal fact cleanups, and maintenance actions. Queue items are
+    drafts until explicitly applied.
+
+    Args:
+        status: Filter by status. Default is "pending". Use null to list all.
+        kind: Optional kind filter, e.g. "conversation_distill".
+        limit: Maximum items to return (1-200).
+    """
+    _, _, _, _, db = _require_ready()
+    items = await db.curation_list(status=status, kind=kind, limit=limit)
+    return {"success": True, "count": len(items), "items": items}
+
+
+@mcp.tool("knowledge_curation_get")
+async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
+    """Get one curation queue item by id."""
+    _, _, _, _, db = _require_ready()
+    item = await db.curation_get(item_id)
+    if not item:
+        return {"success": False, "error": f"Curation item '{item_id}' not found"}
+    return {"success": True, "item": item}
+
+
+@mcp.tool("knowledge_curation_apply")
+async def knowledge_curation_apply(
+    item_id: str,
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    """Apply a reviewed curation item.
+
+    Destructive actions such as source deletion, fact deletion, or domain archive
+    require confirmation equal to the queue item id.
+    """
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    return await apply_curation_item(
+        item_id,
+        confirmation=confirmation,
+        settings=settings,
+        embeddings=embeddings,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+    )
+
+
+@mcp.tool("knowledge_curation_reject")
+async def knowledge_curation_reject(item_id: str) -> dict[str, Any]:
+    """Reject a curation queue item without applying any proposed actions."""
+    _, _, _, _, db = _require_ready()
+    updated = await db.curation_mark_status(item_id, "rejected")
+    if not updated:
+        return {"success": False, "error": f"Curation item '{item_id}' not found"}
+    return {"success": True, "item_id": item_id, "status": "rejected"}
+
+
+@mcp.tool("knowledge_curation_snooze")
+async def knowledge_curation_snooze(item_id: str) -> dict[str, Any]:
+    """Snooze a curation queue item without applying or rejecting it."""
+    _, _, _, _, db = _require_ready()
+    updated = await db.curation_mark_status(item_id, "snoozed")
+    if not updated:
+        return {"success": False, "error": f"Curation item '{item_id}' not found"}
+    return {"success": True, "item_id": item_id, "status": "snoozed"}
+
+
+# ---------------------------------------------------------------------------
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
@@ -1316,7 +1765,11 @@ async def _startup() -> None:
     await _db.initialize()
 
     # Ensure 'core' domain exists
-    await _db.domain_create("core", "Foundational personal profile — always included in searches", [])
+    await _db.domain_create(
+        "core",
+        "Foundational personal profile — always included in searches",
+        [],
+    )
 
     _ready = True
     print("[KNOWLEDGE] Initialization complete", file=sys.stderr)

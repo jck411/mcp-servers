@@ -11,6 +11,12 @@ Endpoints:
     GET  /api/facts/{domain}           List facts in a domain
     POST /api/facts/{domain}/{key}     Upsert a fact
     DELETE /api/facts/{domain}/{key}   Delete a fact
+    GET  /api/curation                 List curation queue items
+    POST /api/curation                 Create/update a curation queue item
+    GET  /api/curation/{item_id}       Get one curation queue item
+    POST /api/curation/{item_id}/apply Apply a reviewed curation item
+    POST /api/curation/{item_id}/reject Reject a curation item
+    POST /api/curation/{item_id}/snooze Snooze a curation item
 
 Run:
     python -m servers.knowledge_api --host 0.0.0.0 --port 9018
@@ -19,6 +25,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -26,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
 
 from servers.knowledge import (
     BM25SparseEncoder,
@@ -34,6 +41,7 @@ from servers.knowledge import (
     KnowledgeDB,
     KnowledgeSettings,
     KnowledgeVectorStore,
+    apply_curation_item,
     compute_file_hash,
     extract_and_chunk,
 )
@@ -76,12 +84,6 @@ async def lifespan(app: FastAPI):
 
     await _vectors.ensure_collection()
     await _db.initialize()
-    # Ensure core domain exists (no-op if already present)
-    await _db.domain_create(
-        "core",
-        "Foundational personal profile — always included in searches",
-        [],
-    )
 
     yield
 
@@ -92,6 +94,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Knowledge REST API", version="1.0.0", lifespan=lifespan)
 
+UPLOAD_FILE = File(...)
+REQUIRED_BODY = Body(...)
+OPTIONAL_BODY = Body(None)
+AUTH_HEADER = Header(None)
+
+
+def require_write_auth(authorization: str | None = AUTH_HEADER) -> None:
+    """Require bearer auth for mutating routes when KNOWLEDGE_API_TOKEN is configured."""
+    token = os.environ.get("KNOWLEDGE_API_TOKEN")
+    if not token:
+        return
+    if authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Knowledge write token required")
+
+
+WRITE_AUTH = Depends(require_write_auth)
+
 
 # ---------------------------------------------------------------------------
 # POST /api/upload/{domain}
@@ -101,9 +120,10 @@ app = FastAPI(title="Knowledge REST API", version="1.0.0", lifespan=lifespan)
 @app.post("/api/upload/{domain}")
 async def upload_file(
     domain: str,
-    file: UploadFile = File(...),
+    file: UploadFile = UPLOAD_FILE,
     ingest: bool = True,
     overwrite: bool = False,
+    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Upload a file to a domain folder and optionally ingest it immediately."""
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
@@ -125,7 +145,10 @@ async def upload_file(
     if dest.exists() and not overwrite:
         raise HTTPException(
             status_code=409,
-            detail=f"File '{filename}' already exists in '{domain}'. Use ?overwrite=true to replace.",
+            detail=(
+                f"File '{filename}' already exists in '{domain}'. "
+                "Use ?overwrite=true to replace."
+            ),
         )
 
     data = await file.read()
@@ -292,7 +315,8 @@ async def get_facts(domain: str) -> dict[str, Any]:
 async def set_fact(
     domain: str,
     key: str,
-    body: dict[str, Any] = Body(...),
+    body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Upsert a structured fact in a domain."""
     _, _, _, _, db = _require_ready()
@@ -323,7 +347,7 @@ async def set_fact(
 
 
 @app.delete("/api/facts/{domain}/{key}")
-async def delete_fact(domain: str, key: str) -> dict[str, Any]:
+async def delete_fact(domain: str, key: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
     """Delete a structured fact from a domain."""
     _, _, _, _, db = _require_ready()
 
@@ -335,6 +359,102 @@ async def delete_fact(domain: str, key: str) -> dict[str, Any]:
         )
 
     return {"deleted": True, "domain": domain, "key": key}
+
+
+# ---------------------------------------------------------------------------
+# Curation Queue
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/curation")
+async def list_curation(
+    status: str | None = "pending",
+    kind: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List curation queue items."""
+    _, _, _, _, db = _require_ready()
+    items = await db.curation_list(status=status, kind=kind, limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/curation")
+async def create_curation_item(
+    body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = WRITE_AUTH,
+) -> dict[str, Any]:
+    """Create or replace a curation queue item."""
+    _, _, _, _, db = _require_ready()
+    missing = [key for key in ("kind", "title") if not body.get(key)]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"Missing required field(s): {missing}")
+
+    item_id = await db.curation_upsert(
+        kind=str(body["kind"]),
+        title=str(body["title"]),
+        summary=str(body.get("summary") or ""),
+        source_refs=body.get("source_refs") or [],
+        proposed_actions=body.get("proposed_actions") or [],
+        risk=str(body.get("risk") or "medium"),
+        confidence=float(body.get("confidence", 0.0)),
+        item_id=body.get("id"),
+        status=str(body.get("status") or "pending"),
+        created_at=body.get("created_at"),
+    )
+    item = await db.curation_get(item_id)
+    return {"id": item_id, "item": item}
+
+
+@app.get("/api/curation/{item_id}")
+async def get_curation_item(item_id: str) -> dict[str, Any]:
+    """Get one curation queue item."""
+    _, _, _, _, db = _require_ready()
+    item = await db.curation_get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Curation item '{item_id}' not found")
+    return {"item": item}
+
+
+@app.post("/api/curation/{item_id}/apply")
+async def apply_curation(
+    item_id: str,
+    body: dict[str, Any] | None = OPTIONAL_BODY,
+    _auth: None = WRITE_AUTH,
+):
+    """Apply a reviewed curation item."""
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    result = await apply_curation_item(
+        item_id,
+        confirmation=(body or {}).get("confirmation"),
+        settings=settings,
+        embeddings=embeddings,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@app.post("/api/curation/{item_id}/reject")
+async def reject_curation(item_id: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
+    """Reject a curation queue item without applying it."""
+    _, _, _, _, db = _require_ready()
+    updated = await db.curation_mark_status(item_id, "rejected")
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Curation item '{item_id}' not found")
+    return {"item_id": item_id, "status": "rejected"}
+
+
+@app.post("/api/curation/{item_id}/snooze")
+async def snooze_curation(item_id: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
+    """Snooze a curation queue item."""
+    _, _, _, _, db = _require_ready()
+    updated = await db.curation_mark_status(item_id, "snoozed")
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Curation item '{item_id}' not found")
+    return {"item_id": item_id, "status": "snoozed"}
 
 
 # ---------------------------------------------------------------------------
