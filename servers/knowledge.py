@@ -25,9 +25,13 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
+import os
 import re
+import secrets
 import sys
 import uuid
 from collections import Counter
@@ -39,7 +43,7 @@ import aiosqlite
 import httpx
 import kreuzberg
 from fastmcp import FastMCP
-from kreuzberg import ChunkingConfig, ExtractionConfig
+from kreuzberg import ChunkingConfig, ExtractionConfig, OcrConfig
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from qdrant_client import AsyncQdrantClient
@@ -58,6 +62,14 @@ from qdrant_client.models import (
     SparseVector,
     SparseVectorParams,
     VectorParams,
+)
+
+from servers.knowledge_source_files import (
+    resolve_source_path,
+    sanitize_source_filename,
+    source_chunk_export_bytes,
+    source_media_type,
+    source_relative_path,
 )
 
 # Default port for HTTP transport
@@ -112,6 +124,15 @@ class KnowledgeSettings(BaseSettings):
     chunk_max_chars: int = Field(default=1000, validation_alias="KNOWLEDGE_CHUNK_MAX_CHARS")
     chunk_overlap: int = Field(default=200, validation_alias="KNOWLEDGE_CHUNK_OVERLAP")
 
+    # Local OCR for images and scanned PDFs
+    ocr_enabled: bool = Field(default=True, validation_alias="KNOWLEDGE_OCR_ENABLED")
+    ocr_language: str = Field(default="eng", validation_alias="KNOWLEDGE_OCR_LANGUAGE")
+
+    # Public REST API base used when MCP tools generate clickable download URLs
+    api_base: str = Field(
+        default="https://api-knowledge.jackshome.com",
+        validation_alias="API_BASE",
+    )
 
 # ---------------------------------------------------------------------------
 # Embedding Client
@@ -319,8 +340,37 @@ class KnowledgeDB:
                 ON curation_items(status);
             CREATE INDEX IF NOT EXISTS idx_curation_kind
                 ON curation_items(kind);
+
+            CREATE TABLE IF NOT EXISTS download_tokens (
+                token TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_download_tokens_source
+                ON download_tokens(source_id);
+            CREATE INDEX IF NOT EXISTS idx_download_tokens_expires
+                ON download_tokens(expires_at);
+
         """)
+        await self._ensure_source_metadata_columns()
         await self._conn.commit()
+
+    async def _ensure_source_metadata_columns(self) -> None:
+        """Add raw-file metadata columns to older Knowledge databases."""
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(sources)")
+        existing = {str(row["name"]) for row in await cursor.fetchall()}
+        additions = {
+            "stored_path": "TEXT",
+            "media_type": "TEXT",
+            "size_bytes": "INTEGER",
+        }
+        for column, declaration in additions.items():
+            if column not in existing:
+                await self._conn.execute(
+                    f"ALTER TABLE sources ADD COLUMN {column} {declaration}"  # noqa: S608
+                )
 
     # -- Domains --
 
@@ -513,16 +563,20 @@ class KnowledgeDB:
         filename: str | None,
         content_hash: str,
         chunk_count: int,
+        stored_path: str | None = None,
+        media_type: str | None = None,
+        size_bytes: int | None = None,
     ) -> None:
         assert self._conn is not None
         await self._conn.execute(
             """
             INSERT OR REPLACE INTO sources
-            (id, domain, source_type, filename, content_hash, chunk_count, ingested_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, domain, source_type, filename, content_hash, chunk_count,
+             ingested_at, stored_path, media_type, size_bytes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (source_id, domain, source_type, filename, content_hash,
-             chunk_count, datetime.now(UTC).isoformat()),
+             chunk_count, datetime.now(UTC).isoformat(), stored_path, media_type, size_bytes),
         )
         await self._conn.commit()
 
@@ -537,22 +591,90 @@ class KnowledgeDB:
     async def source_get(self, source_id: str) -> dict[str, Any] | None:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            "SELECT id, domain, source_type, filename, content_hash, chunk_count, ingested_at "
-            "FROM sources WHERE id = ?",
+            """
+            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
+                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
+                   s.size_bytes
+            FROM sources s
+            WHERE s.id = ?
+            """,
             (source_id,),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def source_rename(
+        self,
+        source_id: str,
+        filename: str,
+        stored_path: str | None = None,
+    ) -> bool:
+        assert self._conn is not None
+        if stored_path is None:
+            cursor = await self._conn.execute(
+                "UPDATE sources SET filename = ? WHERE id = ?",
+                (filename, source_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                "UPDATE sources SET filename = ?, stored_path = ? WHERE id = ?",
+                (filename, stored_path, source_id),
+            )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
     async def sources_list(self, domain: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            "SELECT id, source_type, filename, content_hash, chunk_count, ingested_at "
-            "FROM sources WHERE domain = ? ORDER BY ingested_at DESC",
+            """
+            SELECT s.id, s.source_type, s.filename, s.content_hash,
+                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
+                   s.size_bytes
+            FROM sources s
+            WHERE s.domain = ?
+            ORDER BY s.ingested_at DESC
+            """,
             (domain,),
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def download_token_create(self, source_id: str, ttl_seconds: int = 900) -> dict[str, Any]:
+        assert self._conn is not None
+        ttl = max(60, min(int(ttl_seconds or 900), 86400))
+        now = datetime.now(UTC)
+        expires_at = now.timestamp() + ttl
+        token = secrets.token_urlsafe(32)
+        await self._conn.execute(
+            """
+            INSERT INTO download_tokens (token, source_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, source_id, datetime.fromtimestamp(expires_at, UTC).isoformat(), now.isoformat()),
+        )
+        await self._conn.commit()
+        return {
+            "token": token,
+            "source_id": source_id,
+            "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
+            "ttl_seconds": ttl,
+        }
+
+    async def download_token_get(self, token: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        now = datetime.now(UTC).isoformat()
+        await self._conn.execute("DELETE FROM download_tokens WHERE expires_at < ?", (now,))
+        cursor = await self._conn.execute(
+            """
+            SELECT token, source_id, expires_at, created_at
+            FROM download_tokens
+            WHERE token = ? AND expires_at >= ?
+            """,
+            (token, now),
+        )
+        row = await cursor.fetchone()
+        await self._conn.commit()
+        return dict(row) if row else None
 
     # -- Curation Queue --
 
@@ -754,6 +876,38 @@ class KnowledgeVectorStore:
             ),
         )
 
+    async def update_source_name(self, source_id: str, source_name: str) -> None:
+        await self._client.set_payload(
+            collection_name=self._collection,
+            payload={"source_name": source_name},
+            points=Filter(
+                must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
+            ),
+        )
+
+    async def chunks_by_source(self, source_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return stored chunk payloads for one source, ordered by chunk index."""
+        points = []
+        offset = None
+        while True:
+            batch, offset = await self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
+                ),
+                limit=min(limit, 256),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points.extend(batch)
+            if offset is None or len(points) >= limit:
+                break
+
+        payloads = [dict(point.payload or {}) for point in points]
+        payloads.sort(key=lambda p: int(p.get("chunk_index") or 0))
+        return payloads
+
     async def search(
         self,
         query_embedding: list[float],
@@ -839,18 +993,145 @@ def compute_file_hash(path: Path) -> str:
     return hasher.hexdigest()
 
 
+async def source_download_bytes(
+    settings: KnowledgeSettings,
+    db: KnowledgeDB,
+    source_id: str,
+    vectors: KnowledgeVectorStore | None = None,
+) -> dict[str, Any]:
+    """Return original source bytes for a stored source."""
+    source = await db.source_get(source_id)
+    if not source:
+        return {"success": False, "error": f"Source '{source_id}' not found"}
+
+    filename = sanitize_source_filename(str(source.get("filename") or f"{source_id}.bin"))
+    source_path = resolve_source_path(settings.knowledge_path, source)
+    if source_path:
+        data = source_path.read_bytes()
+        media_type = source.get("media_type") or source_media_type(filename)
+        generated = False
+    elif vectors:
+        export = await source_chunk_export_bytes(vectors, source)
+        if not export:
+            return {
+                "success": False,
+                "error": f"Stored source file for '{source_id}' was not found",
+            }
+        filename, data = export
+        media_type = "text/markdown"
+        generated = True
+    else:
+        return {
+            "success": False,
+            "error": f"Stored source file for '{source_id}' was not found",
+        }
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "filename": filename,
+        "domain": source.get("domain"),
+        "media_type": media_type,
+        "size_bytes": len(data),
+        "generated": generated,
+        "data": data,
+    }
+
+
+async def delete_source_record(
+    settings: KnowledgeSettings,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    source_id: str,
+    delete_file: bool = True,
+) -> dict[str, Any]:
+    """Delete one source row, its vector chunks, and optionally its stored file."""
+    source = await db.source_get(source_id)
+    if not source:
+        return {"success": False, "error": f"Source '{source_id}' not found"}
+
+    await vectors.delete_by_source(source_id)
+    deleted_files: list[str] = []
+    if delete_file:
+        candidate = resolve_source_path(settings.knowledge_path, source)
+        if candidate:
+            candidate.unlink()
+            deleted_files.append(source_relative_path(settings.knowledge_path, candidate))
+
+    deleted = await db.source_remove(source_id)
+    return {
+        "success": deleted,
+        "deleted": deleted,
+        "source": source,
+        "deleted_files": deleted_files,
+    }
+
+
+async def rename_source_record(
+    settings: KnowledgeSettings,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    source_id: str,
+    filename: str,
+) -> dict[str, Any]:
+    """Rename a source for display/search and rename raw bytes when present."""
+    source = await db.source_get(source_id)
+    if not source:
+        return {"success": False, "error": f"Source '{source_id}' not found"}
+
+    clean_filename = sanitize_source_filename(filename)
+    if not clean_filename:
+        return {"success": False, "error": "filename is required"}
+
+    old_path = resolve_source_path(settings.knowledge_path, source)
+    renamed_file = False
+    stored_path = source.get("stored_path")
+    if old_path and old_path.exists() and old_path.is_file():
+        new_path = old_path.with_name(clean_filename)
+        if new_path.exists() and new_path != old_path:
+            return {"success": False, "error": f"File already exists: {new_path.name}"}
+        if new_path != old_path:
+            old_path.rename(new_path)
+            renamed_file = True
+            stored_path = source_relative_path(settings.knowledge_path, new_path)
+        else:
+            stored_path = source_relative_path(settings.knowledge_path, old_path)
+
+    await db.source_rename(source_id, clean_filename, stored_path)
+    await vectors.update_source_name(source_id, clean_filename)
+    updated = await db.source_get(source_id)
+    return {
+        "success": True,
+        "source_id": source_id,
+        "old_filename": source.get("filename"),
+        "new_filename": clean_filename,
+        "renamed_file": renamed_file,
+        "source": updated,
+    }
+
+
 def compute_text_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
-    """Extract text from a file and split into chunks."""
-    config = ExtractionConfig(
+IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+OCR_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
+
+
+def _extraction_config(path: Path, settings: KnowledgeSettings) -> ExtractionConfig:
+    should_ocr = settings.ocr_enabled and path.suffix.lower() in OCR_EXTENSIONS
+    return ExtractionConfig(
         chunking=ChunkingConfig(
             max_chars=settings.chunk_max_chars,
             max_overlap=settings.chunk_overlap,
-        )
+        ),
+        ocr=OcrConfig(backend="tesseract", language=settings.ocr_language) if should_ocr else None,
     )
+
+
+async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
+    """Extract text from a file and split into chunks."""
+    config = _extraction_config(path, settings)
     result = await kreuzberg.extract_file(str(path), config=config)
 
     if result.chunks:
@@ -898,6 +1179,143 @@ def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str
         chunks.append(current.strip())
 
     return [c for c in chunks if c]
+
+
+# ---------------------------------------------------------------------------
+# Shared ingestion pipeline
+# ---------------------------------------------------------------------------
+
+# File extensions that imply binary/document uploads. These must never be
+# accepted as a `source_name` for `knowledge_ingest_text` — that path stores
+# only chunks (no `stored_path`, no raw bytes), so a `.pdf` source created via
+# text ingest is silently a fake file. Real binary uploads must go through
+# `knowledge_upload_file_base64` or `POST /api/upload/{domain}`.
+_BINARY_NAME_EXTENSIONS: frozenset[str] = frozenset({
+    ".pdf", ".png", ".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff",
+    ".webp", ".bmp", ".gif", ".svg",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods",
+    ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".mp3", ".m4a", ".wav", ".flac", ".ogg",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm",
+    ".epub", ".mobi",
+})
+
+# `source_type` values that `knowledge_ingest_text` is allowed to record. This
+# blocks an agent from labeling a text source as `identity_document`,
+# `pdf`, etc., which previously hid text-only rows behind binary-looking types.
+_TEXT_SOURCE_TYPE_ALLOWLIST: frozenset[str] = frozenset({
+    "note", "summary", "transcript", "research", "caption",
+    "markdown", "text", "manual", "chat", "memo",
+})
+
+
+def _validate_text_ingest_inputs(
+    source_name: str,
+    source_type: str,
+) -> str | None:
+    """Return an error message if text-ingest inputs look like a binary upload."""
+    name_ext = Path(source_name).suffix.lower()
+    if name_ext in _BINARY_NAME_EXTENSIONS:
+        return (
+            f"source_name '{source_name}' has a binary/document extension "
+            f"({name_ext}). Use knowledge_upload_file_base64 (or "
+            "POST /api/upload/{domain}) so the original bytes are stored. "
+            "knowledge_ingest_text only stores extracted text chunks."
+        )
+    type_lower = source_type.lower().strip()
+    if type_lower not in _TEXT_SOURCE_TYPE_ALLOWLIST:
+        if type_lower.lstrip(".") in {ext.lstrip(".") for ext in _BINARY_NAME_EXTENSIONS}:
+            return (
+                f"source_type '{source_type}' looks like a file extension. "
+                "Use knowledge_upload_file_base64 to upload the actual file."
+            )
+        allowed = ", ".join(sorted(_TEXT_SOURCE_TYPE_ALLOWLIST))
+        return (
+            f"source_type '{source_type}' is not allowed for text ingest. "
+            f"Use one of: {allowed}."
+        )
+    return None
+
+
+async def _ingest_file_at_path(
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    *,
+    dest: Path,
+    domain: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Hash, extract, embed, and persist one file already on disk under `dest`.
+
+    Shared by `POST /api/upload/{domain}`, `knowledge_upload_file_base64`,
+    and `knowledge_ingest_file`. Returns a result dict; never raises for
+    "no content" / "already ingested" — those are normal outcomes.
+    """
+    file_hash = compute_file_hash(dest)
+    if not force and await db.source_exists(file_hash):
+        return {
+            "success": True,
+            "file": dest.name,
+            "domain": domain,
+            "ingested": False,
+            "reason": "unchanged (already ingested)",
+        }
+
+    chunks_text = await extract_and_chunk(dest, settings)
+    if not chunks_text:
+        return {
+            "success": True,
+            "file": dest.name,
+            "domain": domain,
+            "ingested": False,
+            "reason": "no extractable content",
+        }
+
+    sparse_encoder.fit_batch(chunks_text)
+    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
+    dense_vecs = await embeddings.embed_batch(chunks_text)
+
+    source_id = str(uuid.uuid4())
+    source_type = dest.suffix.lstrip(".") or "file"
+    now = datetime.now(UTC).isoformat()
+    chunk_payloads = [
+        {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}")),
+            "domain": domain,
+            "source_id": source_id,
+            "source_type": source_type,
+            "source_name": dest.name,
+            "chunk_index": i,
+            "content": text,
+            "ingested_at": now,
+        }
+        for i, text in enumerate(chunks_text)
+    ]
+
+    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
+    await db.source_add(
+        source_id,
+        domain,
+        source_type,
+        dest.name,
+        file_hash,
+        len(chunks_text),
+        source_relative_path(settings.knowledge_path, dest),
+        source_media_type(dest.name),
+        dest.stat().st_size,
+    )
+
+    return {
+        "success": True,
+        "file": dest.name,
+        "domain": domain,
+        "ingested": True,
+        "source_id": source_id,
+        "chunks_stored": len(chunks_text),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1410,6 +1828,10 @@ async def knowledge_ingest_text(
     if not await db.domain_exists(domain):
         return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
 
+    validation_error = _validate_text_ingest_inputs(source_name, source_type)
+    if validation_error:
+        return {"success": False, "error": validation_error}
+
     content_hash = compute_text_hash(content)
 
     if await db.source_exists(content_hash):
@@ -1504,56 +1926,28 @@ async def knowledge_ingest_file(
     results = []
     for file_path in files:
         try:
-            file_hash = compute_file_hash(file_path)
-
-            if not force and await db.source_exists(file_hash):
-                results.append({"file": file_path.name, "status": "skipped", "reason": "unchanged"})
-                continue
-
-            chunks_text = await extract_and_chunk(file_path, settings)
-            if not chunks_text:
+            outcome = await _ingest_file_at_path(
+                settings, embeddings, sparse_encoder, vectors, db,
+                dest=file_path, domain=domain, force=force,
+            )
+            if outcome.get("ingested"):
+                total_chunks += int(outcome.get("chunks_stored") or 0)
+                results.append({
+                    "file": file_path.name,
+                    "status": "indexed",
+                    "chunks": outcome.get("chunks_stored"),
+                })
+                print(
+                    f"  [KNOWLEDGE] Indexed {file_path.name}: "
+                    f"{outcome.get('chunks_stored')} chunks",
+                    file=sys.stderr,
+                )
+            else:
                 results.append({
                     "file": file_path.name,
                     "status": "skipped",
-                    "reason": "no content",
+                    "reason": outcome.get("reason", "unknown"),
                 })
-                continue
-
-            sparse_encoder.fit_batch(chunks_text)
-            sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
-            dense_vecs = await embeddings.embed_batch(chunks_text)
-
-            source_id = str(uuid.uuid4())
-            chunk_payloads = []
-            for i, text in enumerate(chunks_text):
-                chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}"))
-                chunk_payloads.append({
-                    "id": chunk_id,
-                    "domain": domain,
-                    "source_id": source_id,
-                    "source_type": file_path.suffix.lstrip(".") or "file",
-                    "source_name": file_path.name,
-                    "chunk_index": i,
-                    "content": text,
-                    "ingested_at": datetime.now(UTC).isoformat(),
-                })
-
-            await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
-            await db.source_add(
-                source_id, domain, file_path.suffix.lstrip(".") or "file",
-                file_path.name, file_hash, len(chunks_text)
-            )
-
-            total_chunks += len(chunks_text)
-            results.append({
-                "file": file_path.name,
-                "status": "indexed",
-                "chunks": len(chunks_text),
-            })
-            print(
-                f"  [KNOWLEDGE] Indexed {file_path.name}: {len(chunks_text)} chunks",
-                file=sys.stderr,
-            )
 
         except Exception as exc:
             results.append({"file": file_path.name, "status": "error", "error": str(exc)})
@@ -1565,6 +1959,53 @@ async def knowledge_ingest_file(
         "total_chunks": total_chunks,
         "files": results,
     }
+
+
+@mcp.tool("knowledge_upload_file_base64")
+async def knowledge_upload_file_base64(
+    domain: str,
+    filename: str,
+    content_base64: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Upload and ingest a file from base64 content supplied by the MCP client.
+
+    Use this when the client can expose an attached file's bytes directly to
+    tools.
+    """
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+
+    if not await db.domain_exists(domain):
+        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
+
+    clean_filename = sanitize_source_filename(filename)
+    if not clean_filename:
+        return {"success": False, "error": "Invalid filename"}
+
+    try:
+        data = base64.b64decode(content_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        return {"success": False, "error": f"Invalid base64 content: {exc}"}
+
+    domain_dir = settings.knowledge_path / domain
+    domain_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = domain_dir / clean_filename
+    if dest.exists() and not overwrite:
+        return {
+            "success": False,
+            "error": (
+                f"File '{clean_filename}' already exists in '{domain}'. "
+                "Set overwrite=true to replace."
+            ),
+        }
+
+    dest.write_bytes(data)
+
+    return await _ingest_file_at_path(
+        settings, embeddings, sparse_encoder, vectors, db,
+        dest=dest, domain=domain, force=overwrite,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1653,6 +2094,73 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
 
     sources = await db.sources_list(domain)
     return {"success": True, "domain": domain, "count": len(sources), "sources": sources}
+
+
+@mcp.tool("knowledge_source_download_base64")
+async def knowledge_source_download_base64(
+    source_id: str,
+) -> dict[str, Any]:
+    """Download one stored source as base64 bytes for chat clients.
+
+    Use knowledge_sources(domain) first to find the source_id.
+    """
+    settings, _, _, vectors, db = _require_ready()
+    result = await source_download_bytes(settings, db, source_id, vectors)
+
+    if not result.get("success"):
+        return result
+
+    data = result.pop("data")
+    result["data_base64"] = base64.b64encode(data).decode()
+    return result
+
+
+@mcp.tool("knowledge_source_download_url")
+async def knowledge_source_download_url(
+    source_id: str,
+    ttl_seconds: int = 900,
+) -> dict[str, Any]:
+    """Create a temporary clickable download URL for one stored source.
+
+    Use knowledge_sources(domain) first to find the source_id. The URL can be
+    opened without an Authorization header until it expires.
+    """
+    settings, _, _, _, db = _require_ready()
+    source = await db.source_get(source_id)
+    if not source:
+        return {"success": False, "error": f"Source '{source_id}' not found"}
+    token = await db.download_token_create(source_id, ttl_seconds)
+    base = settings.api_base.rstrip("/")
+    return {
+        "success": True,
+        "source_id": source_id,
+        "filename": source.get("filename"),
+        "url": f"{base}/api/download/{token['token']}",
+        "expires_at": token["expires_at"],
+        "ttl_seconds": token["ttl_seconds"],
+    }
+
+
+@mcp.tool("knowledge_source_delete")
+async def knowledge_source_delete(source_id: str, delete_file: bool = True) -> dict[str, Any]:
+    """Delete one ingested source by source_id, including its vector chunks.
+
+    Use knowledge_sources(domain) first to find the source_id. Set delete_file=false
+    only when you want to remove it from search but keep the stored file.
+    """
+    settings, _, _, vectors, db = _require_ready()
+    return await delete_source_record(settings, vectors, db, source_id, delete_file)
+
+
+@mcp.tool("knowledge_source_rename")
+async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, Any]:
+    """Rename one ingested source by source_id.
+
+    Updates SQLite metadata and Qdrant source_name. For standard file uploads,
+    also renames the stored raw file when it exists.
+    """
+    settings, _, _, vectors, db = _require_ready()
+    return await rename_source_record(settings, vectors, db, source_id, filename)
 
 
 # ---------------------------------------------------------------------------

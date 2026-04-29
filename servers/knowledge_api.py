@@ -11,6 +11,11 @@ Endpoints:
     GET  /api/facts/{domain}           List facts in a domain
     POST /api/facts/{domain}/{key}     Upsert a fact
     DELETE /api/facts/{domain}/{key}   Delete a fact
+    GET  /api/sources/{domain}         List uploaded/ingested sources
+    GET  /api/sources/{source_id}/download Download original source bytes
+    POST /api/sources/{source_id}/download Download original source bytes
+    POST /api/sources/{source_id}/download-link Create temporary direct URL
+    GET  /api/download/{token}         Download via temporary direct URL
     GET  /api/curation                 List curation queue items
     POST /api/curation                 Create/update a curation queue item
     GET  /api/curation/{item_id}       Get one curation queue item
@@ -26,14 +31,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import uvicorn
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
 
 from servers.knowledge import (
     BM25SparseEncoder,
@@ -41,9 +44,14 @@ from servers.knowledge import (
     KnowledgeDB,
     KnowledgeSettings,
     KnowledgeVectorStore,
+    _ingest_file_at_path,
     apply_curation_item,
-    compute_file_hash,
-    extract_and_chunk,
+    delete_source_record,
+    rename_source_record,
+    source_download_bytes,
+)
+from servers.knowledge_source_files import (
+    sanitize_source_filename,
 )
 
 # ---------------------------------------------------------------------------
@@ -112,6 +120,26 @@ def require_write_auth(authorization: str | None = AUTH_HEADER) -> None:
 WRITE_AUTH = Depends(require_write_auth)
 
 
+def require_download_auth(authorization: str | None = AUTH_HEADER) -> None:
+    """Require bearer auth for raw source download routes, failing closed if unset."""
+    token = os.environ.get("KNOWLEDGE_API_TOKEN")
+    if not token:
+        raise HTTPException(status_code=503, detail="Knowledge API token is not configured")
+    if authorization != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Knowledge API token required")
+
+
+DOWNLOAD_AUTH = Depends(require_download_auth)
+
+
+def _content_disposition(filename: str) -> str:
+    fallback = "".join(
+        ch for ch in filename
+        if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
+    ) or "download"
+    return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/upload/{domain}
 # ---------------------------------------------------------------------------
@@ -134,13 +162,13 @@ async def upload_file(
             detail=f"Domain '{domain}' not found. Create it first via the MCP tools.",
         )
 
-    # Sanitise filename — strip any path components supplied by the client
-    raw_name = file.filename or "upload"
-    filename = Path(raw_name).name
+    filename = sanitize_source_filename(file.filename)
     if not filename:
         raise HTTPException(status_code=422, detail="Invalid filename")
 
     dest = settings.knowledge_path / domain / filename
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data = await file.read()
 
     if dest.exists() and not overwrite:
         raise HTTPException(
@@ -151,66 +179,19 @@ async def upload_file(
             ),
         )
 
-    data = await file.read()
     dest.write_bytes(data)
 
     if not ingest:
-        return {"file": filename, "domain": domain, "ingested": False}
-
-    # Check if already ingested (hash match)
-    file_hash = compute_file_hash(dest)
-    if await db.source_exists(file_hash) and not overwrite:
         return {
             "file": filename,
             "domain": domain,
             "ingested": False,
-            "reason": "unchanged (already ingested)",
         }
 
-    chunks_text = await extract_and_chunk(dest, settings)
-    if not chunks_text:
-        return {
-            "file": filename,
-            "domain": domain,
-            "ingested": False,
-            "reason": "no extractable content",
-        }
-
-    sparse_encoder.fit_batch(chunks_text)
-    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
-    dense_vecs = await embeddings.embed_batch(chunks_text)
-
-    source_id = str(uuid.uuid4())
-    chunk_payloads = []
-    for i, text in enumerate(chunks_text):
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}"))
-        chunk_payloads.append({
-            "id": chunk_id,
-            "domain": domain,
-            "source_id": source_id,
-            "source_type": dest.suffix.lstrip(".") or "file",
-            "source_name": filename,
-            "chunk_index": i,
-            "content": text,
-            "ingested_at": datetime.now(UTC).isoformat(),
-        })
-
-    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
-    await db.source_add(
-        source_id,
-        domain,
-        dest.suffix.lstrip(".") or "file",
-        filename,
-        file_hash,
-        len(chunks_text),
+    return await _ingest_file_at_path(
+        settings, embeddings, sparse_encoder, vectors, db,
+        dest=dest, domain=domain, force=overwrite,
     )
-
-    return {
-        "file": filename,
-        "domain": domain,
-        "ingested": True,
-        "chunks_stored": len(chunks_text),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +274,7 @@ async def list_domains() -> dict[str, Any]:
 @app.get("/api/facts/{domain}")
 async def get_facts(domain: str) -> dict[str, Any]:
     """List all structured facts in a domain."""
-    _, _, _, _, db = _require_ready()
+    settings, _, _, _, db = _require_ready()
 
     if not await db.domain_exists(domain):
         raise HTTPException(status_code=404, detail=f"Domain '{domain}' not found")
@@ -319,7 +300,7 @@ async def set_fact(
     _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Upsert a structured fact in a domain."""
-    _, _, _, _, db = _require_ready()
+    settings, _, _, _, db = _require_ready()
 
     if not await db.domain_exists(domain):
         raise HTTPException(status_code=404, detail=f"Domain '{domain}' not found")
@@ -359,6 +340,128 @@ async def delete_fact(domain: str, key: str, _auth: None = WRITE_AUTH) -> dict[s
         )
 
     return {"deleted": True, "domain": domain, "key": key}
+
+
+
+# ---------------------------------------------------------------------------
+# Source management
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/sources/{domain}")
+async def list_sources(domain: str) -> dict[str, Any]:
+    """List ingested sources in a domain."""
+    _, _, _, _, db = _require_ready()
+
+    if not await db.domain_exists(domain):
+        raise HTTPException(status_code=404, detail=f"Domain '{domain}' not found")
+
+    sources = await db.sources_list(domain)
+    return {"domain": domain, "count": len(sources), "sources": sources}
+
+
+async def _download_source_response(source_id: str) -> Response:
+    """Build an inline file response for original source bytes."""
+    settings, _, _, vectors, db = _require_ready()
+    result = await source_download_bytes(settings, db, source_id, vectors)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
+
+    data = result["data"]
+    filename = str(result.get("filename") or f"{source_id}.bin")
+    headers = {
+        "Content-Disposition": _content_disposition(filename),
+        "X-Knowledge-Source-Id": source_id,
+    }
+    if result.get("generated"):
+        headers["X-Knowledge-Generated-Export"] = "true"
+    return Response(content=data, media_type=result["media_type"], headers=headers)
+
+
+@app.get("/api/sources/{source_id}/download")
+async def download_source_get(
+    source_id: str,
+    _auth: None = DOWNLOAD_AUTH,
+) -> Response:
+    """Download original source bytes."""
+    return await _download_source_response(source_id)
+
+
+@app.post("/api/sources/{source_id}/download")
+async def download_source_post(
+    source_id: str,
+    _auth: None = DOWNLOAD_AUTH,
+) -> Response:
+    """Download original source bytes."""
+    return await _download_source_response(source_id)
+
+
+@app.post("/api/sources/{source_id}/download-link")
+async def create_source_download_link(
+    source_id: str,
+    body: dict[str, Any] | None = OPTIONAL_BODY,
+    _auth: None = DOWNLOAD_AUTH,
+) -> dict[str, Any]:
+    """Create a temporary URL that can download a source without auth headers."""
+    settings, _, _, _, db = _require_ready()
+    source = await db.source_get(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+
+    ttl_seconds = int((body or {}).get("ttl_seconds") or 900)
+    token = await db.download_token_create(source_id, ttl_seconds)
+    base = str(settings.api_base).rstrip("/")
+    url = f"{base}/api/download/{token['token']}"
+    return {
+        "source_id": source_id,
+        "filename": source.get("filename"),
+        "url": url,
+        "expires_at": token["expires_at"],
+        "ttl_seconds": token["ttl_seconds"],
+    }
+
+
+@app.get("/api/download/{token}", name="download_source_token")
+async def download_source_token(token: str) -> Response:
+    """Download a source through a temporary token URL."""
+    _, _, _, _, db = _require_ready()
+    item = await db.download_token_get(token)
+    if not item:
+        raise HTTPException(status_code=404, detail="Download link not found or expired")
+    return await _download_source_response(str(item["source_id"]))
+
+
+@app.delete("/api/sources/{source_id}")
+async def delete_source(
+    source_id: str,
+    delete_file: bool = True,
+    _auth: None = WRITE_AUTH,
+) -> dict[str, Any]:
+    """Delete one source, including vector chunks and optionally the stored file."""
+    settings, _, _, vectors, db = _require_ready()
+    result = await delete_source_record(settings, vectors, db, source_id, delete_file)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
+    return result
+
+
+@app.patch("/api/sources/{source_id}")
+async def rename_source(
+    source_id: str,
+    body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = WRITE_AUTH,
+) -> dict[str, Any]:
+    """Rename one source by source_id."""
+    filename = body.get("filename") or body.get("source_name")
+    if not filename:
+        raise HTTPException(status_code=422, detail="'filename' is required")
+
+    settings, _, _, vectors, db = _require_ready()
+    result = await rename_source_record(settings, vectors, db, source_id, str(filename))
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
+    return result
 
 
 # ---------------------------------------------------------------------------
