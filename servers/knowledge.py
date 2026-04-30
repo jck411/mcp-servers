@@ -2323,10 +2323,13 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
     sources = await db.sources_list(domain)
     base = settings.api_base.rstrip("/")
     for src in sources:
-        sid = src.get("source_id")
-        filename = src.get("filename") or sid
+        sid = src.get("id") or src.get("source_id")
         if not sid:
             continue
+        # Skip ingested-text/note rows that have no stored file to download.
+        if not src.get("stored_path"):
+            continue
+        filename = src.get("filename") or sid
         try:
             token = await db.download_token_create(sid, 900)
         except Exception:
