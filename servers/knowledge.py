@@ -1146,11 +1146,12 @@ async def _extract_pdf_text(path: Path, language: str) -> str:
         return text
 
     # Scanned PDF — render pages to PNG via pdftoppm, OCR each.
+    # 400 DPI handles small-physical-size PDFs (e.g. license cards) better than 200.
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "page"
-        rc, _, err = await _run(["pdftoppm", "-r", "200", "-png", str(path), str(prefix)])
+        rc, _, _ = await _run(["pdftoppm", "-r", "400", "-png", str(path), str(prefix)])
         if rc != 0:
             return ""
         pages: list[str] = []
