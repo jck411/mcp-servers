@@ -2347,7 +2347,8 @@ async def knowledge_source_download_url(
     """Create a temporary clickable download URL for one stored source.
 
     Use knowledge_sources(domain) first to find the source_id. The URL can be
-    opened without an Authorization header until it expires.
+    opened without an Authorization header until it expires. The returned
+    `markdown` field is a ready-to-paste link the agent should display verbatim.
     """
     settings, _, _, _, db = _require_ready()
     source = await db.source_get(source_id)
@@ -2355,11 +2356,16 @@ async def knowledge_source_download_url(
         return {"success": False, "error": f"Source '{source_id}' not found"}
     token = await db.download_token_create(source_id, ttl_seconds)
     base = settings.api_base.rstrip("/")
+    url = f"{base}/api/download/{token['token']}"
+    filename = source.get("filename") or source_id
+    # Escape characters that would break a markdown link label.
+    safe_label = str(filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
     return {
         "success": True,
         "source_id": source_id,
-        "filename": source.get("filename"),
-        "url": f"{base}/api/download/{token['token']}",
+        "filename": filename,
+        "url": url,
+        "markdown": f"[{safe_label}]({url})",
         "expires_at": token["expires_at"],
         "ttl_seconds": token["ttl_seconds"],
     }
