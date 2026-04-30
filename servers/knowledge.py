@@ -2311,12 +2311,31 @@ async def knowledge_search(
 async def knowledge_sources(domain: str) -> dict[str, Any]:
     """List all ingested sources in a domain.
 
+    Each source includes a pre-signed `download_url` and a ready-to-paste
+    `download_markdown` link. Display `download_markdown` verbatim when Jack
+    asks to download/view a file. Links expire in 15 minutes.
+
     Args:
         domain: Domain to list sources for.
     """
-    _, _, _, _, db = _require_ready()
+    settings, _, _, _, db = _require_ready()
 
     sources = await db.sources_list(domain)
+    base = settings.api_base.rstrip("/")
+    for src in sources:
+        sid = src.get("source_id")
+        filename = src.get("filename") or sid
+        if not sid:
+            continue
+        try:
+            token = await db.download_token_create(sid, 900)
+        except Exception:
+            continue
+        url = f"{base}/api/download/{token['token']}"
+        safe_label = str(filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        src["download_url"] = url
+        src["download_markdown"] = f"[{safe_label}]({url})"
+        src["download_expires_at"] = token["expires_at"]
     return {"success": True, "domain": domain, "count": len(sources), "sources": sources}
 
 
