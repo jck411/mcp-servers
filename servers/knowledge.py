@@ -122,9 +122,21 @@ class KnowledgeSettings(BaseSettings):
     chunk_max_chars: int = Field(default=1000, validation_alias="KNOWLEDGE_CHUNK_MAX_CHARS")
     chunk_overlap: int = Field(default=200, validation_alias="KNOWLEDGE_CHUNK_OVERLAP")
 
-    # Local OCR for images and scanned PDFs
+    # OCR for images and scanned PDFs
     ocr_enabled: bool = Field(default=True, validation_alias="KNOWLEDGE_OCR_ENABLED")
     ocr_language: str = Field(default="eng", validation_alias="KNOWLEDGE_OCR_LANGUAGE")
+
+    # Vision LLM used for high-accuracy OCR (set to empty to disable and use tesseract).
+    # Any OpenRouter vision-capable model id works, e.g.:
+    #   google/gemini-2.0-flash-001  (cheap, fast, very good)
+    #   anthropic/claude-3.5-sonnet   (best on dense docs/handwriting)
+    #   openai/gpt-4o-mini            (cheap)
+    vision_model: str = Field(
+        default="google/gemini-2.0-flash-001",
+        validation_alias="KNOWLEDGE_VISION_MODEL",
+    )
+    vision_max_pages: int = Field(default=20, validation_alias="KNOWLEDGE_VISION_MAX_PAGES")
+    vision_dpi: int = Field(default=200, validation_alias="KNOWLEDGE_VISION_DPI")
 
     # Public REST API base used when MCP tools generate clickable download URLs
     api_base: str = Field(
@@ -1133,46 +1145,125 @@ async def _run(cmd: list[str], stdin: bytes | None = None, timeout: float = 120.
     return proc.returncode or 0, out, err
 
 
-async def _ocr_image(path: Path, language: str) -> str:
+VISION_OCR_PROMPT = (
+    "You are an OCR engine. Transcribe ALL text visible in this image VERBATIM. "
+    "Preserve spelling, numbers, punctuation, and order. Include every label, field, "
+    "barcode value, and stamp. For tables, output rows as plain text with columns "
+    "separated by ' | '. Do not summarize, do not translate, do not redact, do not "
+    "invent text that is not visible. Output only the transcribed text — no preamble "
+    "or commentary. If the image contains no text, output exactly: [no text]"
+)
+
+
+async def _vision_ocr_bytes(
+    image_bytes: bytes, media_type: str, settings: KnowledgeSettings
+) -> str:
+    """OCR an image via OpenRouter vision LLM. Returns text or empty on failure."""
+    if not settings.vision_model or not settings.openrouter_api_key:
+        return ""
+    import base64 as _b64
+
+    b64 = _b64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{media_type};base64,{b64}"
+    payload = {
+        "model": settings.vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": VISION_OCR_PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "temperature": 0,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            return "" if text == "[no text]" else text
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[knowledge] vision OCR failed ({settings.vision_model}): {exc}",
+            file=sys.stderr,
+        )
+        return ""
+
+
+async def _tesseract_image(path: Path, language: str) -> str:
     rc, out, _ = await _run(["tesseract", str(path), "-", "-l", language])
     return out.decode("utf-8", errors="replace") if rc == 0 else ""
 
 
-async def _extract_pdf_text(path: Path, language: str) -> str:
-    """Native text via pdftotext; fall back to per-page tesseract OCR if empty."""
+_IMAGE_MEDIA = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".tif": "image/tiff", ".tiff": "image/tiff",
+}
+
+
+async def _ocr_image_file(path: Path, settings: KnowledgeSettings) -> str:
+    """Vision LLM first, tesseract fallback."""
+    if settings.vision_model and settings.openrouter_api_key:
+        try:
+            data = path.read_bytes()
+            media = _IMAGE_MEDIA.get(path.suffix.lower(), "image/png")
+            text = await _vision_ocr_bytes(data, media, settings)
+            if text:
+                return text
+        except OSError:
+            pass
+    return await _tesseract_image(path, settings.ocr_language)
+
+
+async def _extract_pdf_text(path: Path, settings: KnowledgeSettings) -> str:
+    """pdftotext for native PDFs; rasterize + vision LLM for scans."""
     rc, out, _ = await _run(["pdftotext", "-layout", str(path), "-"])
     text = out.decode("utf-8", errors="replace").strip() if rc == 0 else ""
     if text:
         return text
 
-    # Scanned PDF — render pages to PNG via pdftoppm, OCR each.
-    # 400 DPI handles small-physical-size PDFs (e.g. license cards) better than 200.
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "page"
-        rc, _, _ = await _run(["pdftoppm", "-r", "400", "-png", str(path), str(prefix)])
+        rc, _, _ = await _run([
+            "pdftoppm", "-r", str(settings.vision_dpi), "-png",
+            str(path), str(prefix),
+        ])
         if rc != 0:
             return ""
+        page_files = sorted(Path(tmp).glob("page-*.png"))[: settings.vision_max_pages]
         pages: list[str] = []
-        for img in sorted(Path(tmp).glob("page-*.png")):
-            pages.append(await _ocr_image(img, language))
+        for img in page_files:
+            pages.append(await _ocr_image_file(img, settings))
         return "\n\n".join(p for p in pages if p.strip())
 
 
 async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
     """Extract text from a file and split into chunks.
 
-    Uses lightweight system tools: pdftotext + pdftoppm + tesseract.
-    No kreuzberg, no torch, no easyocr/paddleocr. Plain bytes-on-disk -> text.
+    Pipeline: pdftotext for native PDFs (free), vision LLM via OpenRouter for
+    scanned PDFs and images (accurate), tesseract as final fallback.
     """
     suffix = path.suffix.lower()
     text = ""
 
     if suffix == ".pdf":
-        text = await _extract_pdf_text(path, settings.ocr_language)
+        text = await _extract_pdf_text(path, settings)
     elif suffix in IMAGE_EXTENSIONS and settings.ocr_enabled:
-        text = await _ocr_image(path, settings.ocr_language)
+        text = await _ocr_image_file(path, settings)
     elif suffix in TEXT_EXTENSIONS or suffix == "":
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
