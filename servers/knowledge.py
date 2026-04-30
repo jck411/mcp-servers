@@ -565,6 +565,53 @@ class KnowledgeDB:
         )
         return await cursor.fetchone() is not None
 
+    async def source_get_by_hash(self, content_hash: str) -> dict[str, Any] | None:
+        """Return the first existing source row matching this content hash, if any."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, domain, source_type, filename, content_hash, chunk_count,
+                   ingested_at, stored_path, media_type, size_bytes
+            FROM sources WHERE content_hash = ?
+            ORDER BY ingested_at ASC LIMIT 1
+            """,
+            (content_hash,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def source_update_storage(
+        self,
+        source_id: str,
+        *,
+        stored_path: str,
+        media_type: str | None,
+        size_bytes: int | None,
+        domain: str | None = None,
+    ) -> bool:
+        """Backfill stored_path / media_type / size_bytes for an existing row."""
+        assert self._conn is not None
+        if domain is not None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE sources
+                SET stored_path = ?, media_type = ?, size_bytes = ?, domain = ?
+                WHERE id = ?
+                """,
+                (stored_path, media_type, size_bytes, domain, source_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE sources
+                SET stored_path = ?, media_type = ?, size_bytes = ?
+                WHERE id = ?
+                """,
+                (stored_path, media_type, size_bytes, source_id),
+            )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
     async def source_add(
         self,
         source_id: str,
@@ -1379,23 +1426,75 @@ async def _ingest_file_at_path(
     "no content" / "already ingested" — those are normal outcomes.
     """
     file_hash = compute_file_hash(dest)
-    if not force and await db.source_exists(file_hash):
+    rel_path = source_relative_path(settings.knowledge_path, dest)
+    media_type = source_media_type(dest.name)
+    size_bytes = dest.stat().st_size
+
+    existing = await db.source_get_by_hash(file_hash)
+    if existing and not force:
+        existing_id = str(existing.get("id") or "")
+        existing_path = existing.get("stored_path")
+        if not existing_path:
+            # Legacy text-only row — backfill the stored bytes onto the same source_id.
+            await db.source_update_storage(
+                existing_id,
+                stored_path=rel_path,
+                media_type=media_type,
+                size_bytes=size_bytes,
+                domain=domain,
+            )
+            return {
+                "success": True,
+                "file": dest.name,
+                "domain": domain,
+                "ingested": False,
+                "source_id": existing_id,
+                "stored_path": rel_path,
+                "reason": "backfilled stored bytes onto existing source",
+            }
+        # Already have bytes for this hash — drop the freshly-written duplicate.
+        try:
+            if rel_path != existing_path and dest.exists():
+                dest.unlink()
+        except OSError:
+            pass
         return {
             "success": True,
             "file": dest.name,
             "domain": domain,
             "ingested": False,
-            "reason": "unchanged (already ingested)",
+            "source_id": existing_id,
+            "stored_path": existing_path,
+            "reason": "already ingested with stored bytes",
         }
 
     chunks_text = await extract_and_chunk(dest, settings)
     if not chunks_text:
+        # No OCR/text content (e.g. plain image). Still register the source
+        # so the bytes are downloadable and can be captioned later via
+        # knowledge_ingest_text. Filename remains searchable via sources list.
+        source_id = str(uuid.uuid4())
+        source_type = dest.suffix.lstrip(".") or "file"
+        await db.source_add(
+            source_id,
+            domain,
+            source_type,
+            dest.name,
+            file_hash,
+            0,
+            rel_path,
+            media_type,
+            size_bytes,
+        )
         return {
             "success": True,
             "file": dest.name,
             "domain": domain,
-            "ingested": False,
-            "reason": "no extractable content",
+            "ingested": True,
+            "source_id": source_id,
+            "chunks_stored": 0,
+            "stored_path": rel_path,
+            "reason": "stored bytes; no extractable text — add a caption via knowledge_ingest_text",
         }
 
     sparse_encoder.fit_batch(chunks_text)
@@ -1427,9 +1526,9 @@ async def _ingest_file_at_path(
         dest.name,
         file_hash,
         len(chunks_text),
-        source_relative_path(settings.knowledge_path, dest),
-        source_media_type(dest.name),
-        dest.stat().st_size,
+        rel_path,
+        media_type,
+        size_bytes,
     )
 
     return {
@@ -1439,6 +1538,7 @@ async def _ingest_file_at_path(
         "ingested": True,
         "source_id": source_id,
         "chunks_stored": len(chunks_text),
+        "stored_path": rel_path,
     }
 
 
