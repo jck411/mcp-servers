@@ -41,9 +41,7 @@ from typing import Any
 
 import aiosqlite
 import httpx
-import kreuzberg
 from fastmcp import FastMCP
-from kreuzberg import ChunkingConfig, ExtractionConfig, OcrConfig
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from qdrant_client import AsyncQdrantClient
@@ -1115,45 +1113,79 @@ def compute_text_hash(text: str) -> str:
 
 
 IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-OCR_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf"}
+TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".xml"}
 
 
-def _extraction_config(path: Path, settings: KnowledgeSettings) -> ExtractionConfig:
-    should_ocr = settings.ocr_enabled and path.suffix.lower() in OCR_EXTENSIONS
-    return ExtractionConfig(
-        chunking=ChunkingConfig(
-            max_chars=settings.chunk_max_chars,
-            max_overlap=settings.chunk_overlap,
-        ),
-        ocr=OcrConfig(backend="tesseract", language=settings.ocr_language) if should_ocr else None,
+async def _run(cmd: list[str], stdin: bytes | None = None, timeout: float = 120.0) -> tuple[int, bytes, bytes]:
+    """Run a subprocess and return (rc, stdout, stderr)."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, b"", b"timeout"
+    return proc.returncode or 0, out, err
+
+
+async def _ocr_image(path: Path, language: str) -> str:
+    rc, out, _ = await _run(["tesseract", str(path), "-", "-l", language])
+    return out.decode("utf-8", errors="replace") if rc == 0 else ""
+
+
+async def _extract_pdf_text(path: Path, language: str) -> str:
+    """Native text via pdftotext; fall back to per-page tesseract OCR if empty."""
+    rc, out, _ = await _run(["pdftotext", "-layout", str(path), "-"])
+    text = out.decode("utf-8", errors="replace").strip() if rc == 0 else ""
+    if text:
+        return text
+
+    # Scanned PDF — render pages to PNG via pdftoppm, OCR each.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = Path(tmp) / "page"
+        rc, _, err = await _run(["pdftoppm", "-r", "200", "-png", str(path), str(prefix)])
+        if rc != 0:
+            return ""
+        pages: list[str] = []
+        for img in sorted(Path(tmp).glob("page-*.png")):
+            pages.append(await _ocr_image(img, language))
+        return "\n\n".join(p for p in pages if p.strip())
 
 
 async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
-    """Extract text from a file and split into chunks."""
-    config = _extraction_config(path, settings)
-    result = await kreuzberg.extract_file(str(path), config=config)
+    """Extract text from a file and split into chunks.
 
-    if result.chunks:
-        return [c.content for c in result.chunks]
+    Uses lightweight system tools: pdftotext + pdftoppm + tesseract.
+    No kreuzberg, no torch, no easyocr/paddleocr. Plain bytes-on-disk -> text.
+    """
+    suffix = path.suffix.lower()
+    text = ""
 
-    content = result.content
-    if not content:
+    if suffix == ".pdf":
+        text = await _extract_pdf_text(path, settings.ocr_language)
+    elif suffix in IMAGE_EXTENSIONS and settings.ocr_enabled:
+        text = await _ocr_image(path, settings.ocr_language)
+    elif suffix in TEXT_EXTENSIONS or suffix == "":
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    else:
+        # Unknown binary type — store the file but skip indexing.
         return []
 
-    chunks = []
-    current = ""
-    for para in content.split("\n\n"):
-        if len(current) + len(para) > settings.chunk_max_chars:
-            if current:
-                chunks.append(current.strip())
-            current = para
-        else:
-            current = current + "\n\n" + para if current else para
-    if current:
-        chunks.append(current.strip())
+    text = text.strip()
+    if not text:
+        return []
 
-    return [c for c in chunks if c]
+    return chunk_text(text, settings.chunk_max_chars, settings.chunk_overlap)
 
 
 def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:

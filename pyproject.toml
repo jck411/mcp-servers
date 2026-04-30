@@ -57,7 +57,7 @@ rag = [
     "pydantic-settings>=2.0",
 ]
 knowledge = [
-    "mcp-servers[pdf]",
+    "httpx>=0.27.0",
     "qdrant-client>=1.9",
     "aiosqlite>=0.20.0",
     "pydantic-settings>=2.0",
