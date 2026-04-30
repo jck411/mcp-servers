@@ -151,9 +151,16 @@ async def upload_file(
     file: UploadFile = UPLOAD_FILE,
     ingest: bool = True,
     overwrite: bool = False,
+    force: bool = False,
     _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
-    """Upload a file to a domain folder and optionally ingest it immediately."""
+    """Upload a file to a domain folder and optionally ingest it immediately.
+
+    `overwrite`: allow replacing an existing file on disk with the same name.
+    `force`: re-extract / re-embed even if the content_hash already exists.
+    Default behavior on a hash hit is now to backfill stored_path onto the
+    existing source row (or skip cleanly if it already has bytes).
+    """
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
 
     if not await db.domain_exists(domain):
@@ -190,7 +197,7 @@ async def upload_file(
 
     return await _ingest_file_at_path(
         settings, embeddings, sparse_encoder, vectors, db,
-        dest=dest, domain=domain, force=overwrite,
+        dest=dest, domain=domain, force=force,
     )
 
 
