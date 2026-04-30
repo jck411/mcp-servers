@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Knowledge Upload</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --panel-2: #1f232c;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #8b93a4;
+    --accent: #4f8cff;
+    --ok: #3fb978;
+    --warn: #d8a32d;
+    --err: #e85d6b;
+    --info: #5fa8ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 16px; }
+  h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 12px; color: var(--muted);
+    margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  input, select, button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; font-family: inherit;
+  }
+  input[type=password], input[type=text], select { width: 100%; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .row { display: flex; gap: 12px; align-items: flex-end; }
+  .row > * { flex: 1; }
+  .row > .small { flex: 0 0 auto; }
+  .checks { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); }
+  .checks label { display: inline-flex; align-items: center; gap: 6px;
+    text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--muted); margin: 0; }
+  .checks input { width: auto; }
+
+  #drop {
+    border: 2px dashed var(--border); border-radius: 8px;
+    padding: 36px 16px; text-align: center; color: var(--muted);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #drop.hover { background: var(--panel-2); border-color: var(--accent); color: var(--text); }
+  #drop strong { color: var(--text); }
+  #file { display: none; }
+  #pick { color: var(--accent); text-decoration: underline; cursor: pointer; }
+
+  #results { display: flex; flex-direction: column; gap: 8px; }
+  .result {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-left-width: 4px; border-radius: 6px; padding: 12px;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 16px;
+    font-size: 13px;
+  }
+  .result.ok { border-left-color: var(--ok); }
+  .result.info { border-left-color: var(--info); }
+  .result.warn { border-left-color: var(--warn); }
+  .result.err { border-left-color: var(--err); }
+  .result .name { font-weight: 600; color: var(--text); word-break: break-all; }
+  .result .meta { color: var(--muted); font-size: 12px; }
+  .result code { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: var(--bg); padding: 1px 6px; border-radius: 3px; }
+  .result button.copy { background: var(--bg); border: 1px solid var(--border);
+    color: var(--muted); padding: 4px 8px; font-size: 12px; }
+  .result button.copy:hover { color: var(--text); border-color: var(--accent); }
+  .result .badge { display: inline-block; padding: 2px 6px; border-radius: 3px;
+    font-size: 11px; font-weight: 600; margin-right: 6px; }
+  .badge.ok { background: rgba(63,185,120,0.15); color: var(--ok); }
+  .badge.info { background: rgba(95,168,255,0.15); color: var(--info); }
+  .badge.warn { background: rgba(216,163,45,0.15); color: var(--warn); }
+  .badge.err { background: rgba(232,93,107,0.15); color: var(--err); }
+
+  #login { max-width: 420px; }
+  #login p { color: var(--muted); margin: 0 0 12px; }
+  #login .err { color: var(--err); font-size: 13px; min-height: 18px; }
+
+  .hidden { display: none !important; }
+  .top { display: flex; justify-content: space-between; align-items: center; }
+  .top a { color: var(--muted); font-size: 12px; text-decoration: none; }
+  .top a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>Knowledge Upload <small>api-knowledge.jackshome.com</small></h1>
+    <a href="#" id="logout" class="hidden">sign out</a>
+  </div>
+
+  <!-- LOGIN -->
+  <section id="login" class="card">
+    <p>Paste your <code>KNOWLEDGE_API_TOKEN</code>. Stored only in this browser tab.</p>
+    <label for="token">API token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="bearer token" />
+    <div style="height:8px"></div>
+    <button id="login-btn" class="primary">Continue</button>
+    <div class="err" id="login-err"></div>
+  </section>
+
+  <!-- UPLOADER -->
+  <section id="uploader" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div>
+          <label for="domain">Domain</label>
+          <select id="domain"></select>
+        </div>
+        <div class="small">
+          <label>&nbsp;</label>
+          <button id="refresh-domains" title="Reload domain list">↻</button>
+        </div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="overwrite" /> overwrite (replace file with same name)</label>
+        <label><input type="checkbox" id="force" /> force (re-extract / re-embed)</label>
+      </div>
+    </div>
+
+    <div class="card" id="drop">
+      <div>Drop files here or <span id="pick">choose files</span></div>
+      <div style="margin-top: 6px; font-size: 12px;">PDF, image, docx, txt, anything. Multiple files OK.</div>
+      <input id="file" type="file" multiple />
+    </div>
+
+    <div id="results"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const TOKEN_KEY = "knowledge_api_token";
+
+  let token = sessionStorage.getItem(TOKEN_KEY) || "";
+
+  // ---------- auth ----------
+  async function validateToken(t) {
+    const r = await fetch("/api/whoami", {
+      headers: { Authorization: "Bearer " + t },
+    });
+    return r.ok;
+  }
+
+  async function tryEnter() {
+    if (!token) return showLogin();
+    if (await validateToken(token)) {
+      showApp();
+    } else {
+      sessionStorage.removeItem(TOKEN_KEY);
+      token = "";
+      showLogin("Token rejected.");
+    }
+  }
+
+  function showLogin(msg) {
+    $("login").classList.remove("hidden");
+    $("uploader").classList.add("hidden");
+    $("logout").classList.add("hidden");
+    $("login-err").textContent = msg || "";
+    $("token").focus();
+  }
+
+  function showApp() {
+    $("login").classList.add("hidden");
+    $("uploader").classList.remove("hidden");
+    $("logout").classList.remove("hidden");
+    loadDomains();
+  }
+
+  $("login-btn").onclick = async () => {
+    const t = $("token").value.trim();
+    if (!t) return;
+    $("login-err").textContent = "checking…";
+    if (await validateToken(t)) {
+      sessionStorage.setItem(TOKEN_KEY, t);
+      token = t;
+      showApp();
+    } else {
+      $("login-err").textContent = "Token rejected.";
+    }
+  };
+  $("token").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("login-btn").click();
+  });
+  $("logout").onclick = (e) => {
+    e.preventDefault();
+    sessionStorage.removeItem(TOKEN_KEY);
+    token = "";
+    showLogin();
+  };
+
+  // ---------- domains ----------
+  async function loadDomains() {
+    const sel = $("domain");
+    sel.innerHTML = "<option>loading…</option>";
+    try {
+      const r = await fetch("/api/domains");
+      const j = await r.json();
+      const names = (j.domains || [])
+        .filter((d) => !d.archived)
+        .map((d) => d.name)
+        .sort();
+      const last = localStorage.getItem("knowledge_last_domain");
+      sel.innerHTML = names
+        .map((n) => `<option value="${n}"${n === last ? " selected" : ""}>${n}</option>`)
+        .join("");
+    } catch (e) {
+      sel.innerHTML = "<option>error loading</option>";
+    }
+  }
+  $("refresh-domains").onclick = loadDomains;
+  $("domain").onchange = () =>
+    localStorage.setItem("knowledge_last_domain", $("domain").value);
+
+  // ---------- drag-drop ----------
+  const drop = $("drop");
+  $("pick").onclick = () => $("file").click();
+  $("file").onchange = (e) => handleFiles(e.target.files);
+  ["dragenter", "dragover"].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.add("hover");
+    })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.remove("hover");
+    })
+  );
+  drop.addEventListener("drop", (e) => {
+    if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
+  });
+
+  // ---------- upload ----------
+  function classify(json, status) {
+    if (status === 409) return { kind: "warn", badge: "EXISTS",
+      msg: "Filename already on disk with different content. Tick overwrite to replace." };
+    if (!json || json.success === false) return { kind: "err", badge: "ERROR",
+      msg: (json && json.detail) || "upload failed" };
+    if (json.ingested === true && (json.chunks_stored || 0) > 0)
+      return { kind: "ok", badge: "INDEXED", msg: `${json.chunks_stored} chunks` };
+    if (json.ingested === true && (json.chunks_stored || 0) === 0)
+      return { kind: "info", badge: "STORED",
+        msg: "bytes saved, no extractable text (image / scan / empty)" };
+    if (json.ingested === false && /backfilled/i.test(json.reason || ""))
+      return { kind: "info", badge: "BACKFILLED",
+        msg: "attached bytes to existing source" };
+    if (json.ingested === false && /already ingested/i.test(json.reason || ""))
+      return { kind: "info", badge: "DUPLICATE", msg: "exact duplicate" };
+    return { kind: "info", badge: "OK", msg: json.reason || "done" };
+  }
+
+  function render(file, domain, classified, json) {
+    const sid = json && json.source_id;
+    const path = json && json.stored_path;
+    const div = document.createElement("div");
+    div.className = "result " + classified.kind;
+    div.innerHTML = `
+      <div>
+        <div class="name">
+          <span class="badge ${classified.kind}">${classified.badge}</span>
+          ${file.name} <span class="meta">→ ${domain}</span>
+        </div>
+        <div class="meta">${classified.msg}</div>
+        ${sid ? `<div class="meta">source_id: <code>${sid}</code>${
+          path ? ` &middot; ${path}` : ""
+        }</div>` : ""}
+      </div>
+      <div>${
+        sid ? `<button class="copy" data-sid="${sid}">copy id</button>` : ""
+      }</div>`;
+    const btn = div.querySelector("button.copy");
+    if (btn) btn.onclick = () => {
+      navigator.clipboard.writeText(btn.dataset.sid);
+      btn.textContent = "copied";
+      setTimeout(() => (btn.textContent = "copy id"), 1200);
+    };
+    $("results").prepend(div);
+  }
+
+  function pending(file, domain) {
+    const div = document.createElement("div");
+    div.className = "result info";
+    div.innerHTML = `
+      <div>
+        <div class="name"><span class="badge info">UPLOADING</span> ${file.name}
+          <span class="meta">→ ${domain}</span></div>
+        <div class="meta">${(file.size/1024).toFixed(0)} KB</div>
+      </div><div></div>`;
+    $("results").prepend(div);
+    return div;
+  }
+
+  async function handleFiles(fileList) {
+    const domain = $("domain").value;
+    const overwrite = $("overwrite").checked;
+    const force = $("force").checked;
+    if (!domain) return;
+
+    for (const file of fileList) {
+      const placeholder = pending(file, domain);
+      try {
+        const fd = new FormData();
+        fd.append("file", file, file.name);
+        const qs = new URLSearchParams();
+        if (overwrite) qs.set("overwrite", "true");
+        if (force) qs.set("force", "true");
+        const url = `/api/upload/${encodeURIComponent(domain)}${
+          qs.toString() ? "?" + qs : ""
+        }`;
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token },
+          body: fd,
+        });
+        const j = await r.json().catch(() => ({}));
+        const cls = classify(j, r.status);
+        placeholder.remove();
+        render(file, domain, cls, j);
+      } catch (e) {
+        placeholder.remove();
+        render(file, domain, { kind: "err", badge: "ERROR", msg: String(e) }, {});
+      }
+    }
+    $("file").value = "";
+  }
+
+  tryEnter();
+})();
+</script>
+</body>
+</html>

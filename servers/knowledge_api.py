@@ -32,11 +32,13 @@ from __future__ import annotations
 import argparse
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import uvicorn
 from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi.staticfiles import StaticFiles
 
 from servers.knowledge import (
     BM25SparseEncoder,
@@ -102,6 +104,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Knowledge REST API", version="1.0.0", lifespan=lifespan)
 
+# Static upload UI (drag-drop browser page).
+# Served at /ui/  — bearer token entered by the user is held in browser sessionStorage.
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+if _WEB_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")
+
 UPLOAD_FILE = File(...)
 REQUIRED_BODY = Body(...)
 OPTIONAL_BODY = Body(None)
@@ -138,6 +146,21 @@ def _content_disposition(filename: str) -> str:
         if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
     ) or "download"
     return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/whoami  —  bearer-token sanity check for the upload UI
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/whoami")
+async def whoami(_auth: None = WRITE_AUTH) -> dict[str, Any]:
+    """Return 200 if the supplied bearer token matches KNOWLEDGE_API_TOKEN.
+
+    Used by the static upload page to validate a token before showing the form.
+    Returns 401 otherwise (handled by WRITE_AUTH).
+    """
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
