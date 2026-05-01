@@ -580,6 +580,21 @@ class KnowledgeDB:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def source_get_by_filename(self, domain: str, filename: str) -> dict[str, Any] | None:
+        """Return the most-recent source row matching domain + filename, if any."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, domain, source_type, filename, content_hash, chunk_count,
+                   ingested_at, stored_path, media_type, size_bytes
+            FROM sources WHERE domain = ? AND filename = ?
+            ORDER BY ingested_at DESC LIMIT 1
+            """,
+            (domain, filename),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def source_update_storage(
         self,
         source_id: str,
@@ -1010,6 +1025,23 @@ class KnowledgeVectorStore:
         payloads.sort(key=lambda p: int(p.get("chunk_index") or 0))
         return payloads
 
+    async def chunks_all(self, limit: int = 50_000) -> list[dict[str, Any]]:
+        """Scroll all chunk payloads — used for BM25 warm-up on startup."""
+        points = []
+        offset = None
+        while True:
+            batch, offset = await self._client.scroll(
+                collection_name=self._collection,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points.extend(batch)
+            if offset is None or len(points) >= limit:
+                break
+        return [dict(point.payload or {}) for point in points]
+
     async def search(
         self,
         query_embedding: list[float],
@@ -1045,6 +1077,7 @@ class KnowledgeVectorStore:
                         using=self.DENSE_VECTOR_NAME,
                         filter=query_filter,
                         limit=prefetch_limit,
+                        score_threshold=min_score,
                     ),
                     Prefetch(
                         query=SparseVector(indices=indices, values=values),
@@ -1563,7 +1596,7 @@ async def _ingest_file_at_path(
     now = datetime.now(UTC).isoformat()
     chunk_payloads = [
         {
-            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_hash}_{i}")),
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_{i}")),
             "domain": domain,
             "source_id": source_id,
             "source_type": source_type,
@@ -1677,7 +1710,7 @@ async def _ingest_curation_text(
     source_id = str(uuid.uuid4())
     chunk_payloads = []
     for i, text in enumerate(chunks_text):
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{content_hash}_{i}"))
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_{i}"))
         chunk_payloads.append({
             "id": chunk_id,
             "domain": domain,
@@ -1771,18 +1804,14 @@ async def execute_curation_action(
         source_id = str(action.get("target_id") or action.get("source_id") or "")
         if not source_id:
             raise ValueError("delete_source action requires target_id or source_id")
-        source = await db.source_get(source_id)
-        if not source:
-            raise ValueError(f"Source '{source_id}' not found")
-        await vectors.delete_by_source(source_id)
-        deleted = await db.source_remove(source_id)
-        if not deleted:
-            raise ValueError(f"Source '{source_id}' disappeared before delete")
+        result = await delete_source_record(settings, vectors, db, source_id)
+        if not result["success"]:
+            raise ValueError(result["error"])
         return {
             "action": action_type,
             "status": "applied",
             "source_id": source_id,
-            "source": source,
+            "source": result["source"],
         }
 
     if action_type in {"archive_domain", "domain_archive"}:
@@ -2134,7 +2163,7 @@ async def knowledge_ingest_text(
     source_id = str(uuid.uuid4())
     chunk_payloads = []
     for i, text in enumerate(chunks_text):
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{content_hash}_{i}"))
+        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_{i}"))
         chunk_payloads.append({
             "id": chunk_id,
             "domain": domain,
@@ -2190,7 +2219,10 @@ async def knowledge_ingest_file(
 
     # Collect files to process
     if filename:
-        target = domain_dir / filename
+        safe_name = sanitize_source_filename(filename)
+        target = domain_dir / safe_name
+        if not target.is_relative_to(domain_dir):
+            return {"success": False, "error": "Invalid filename"}
         if not target.exists():
             return {"success": False, "error": f"File not found: {target}"}
         files = [target]
@@ -2280,6 +2312,12 @@ async def knowledge_upload_file_base64(
                 "Set overwrite=true to replace."
             ),
         }
+
+    if overwrite:
+        existing = await db.source_get_by_filename(domain, clean_filename)
+        if existing:
+            await vectors.delete_by_source(existing["id"])
+            await db.source_remove(existing["id"])
 
     dest.write_bytes(data)
 
@@ -2584,6 +2622,17 @@ async def _startup() -> None:
         return
 
     await _db.initialize()
+
+    # Warm up BM25 sparse encoder from existing chunks so hybrid search
+    # has meaningful IDF scores on startup rather than a cold zero state.
+    try:
+        all_chunks = await _vectors.chunks_all()
+        texts = [p["content"] for p in all_chunks if p.get("content")]
+        if texts:
+            _sparse_encoder.fit_batch(texts)
+            print(f"[KNOWLEDGE] BM25 warmed up on {len(texts)} existing chunks", file=sys.stderr)
+    except Exception as exc:
+        print(f"[KNOWLEDGE] BM25 warm-up skipped: {exc}", file=sys.stderr)
 
     # Ensure 'core' domain exists
     await _db.domain_create(

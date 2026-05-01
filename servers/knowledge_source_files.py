@@ -23,7 +23,9 @@ class ChunkReader(Protocol):
 def sanitize_source_filename(filename: str | None) -> str:
     """Return a safe display/storage filename with path components removed."""
     clean = Path(filename or "upload").name
-    return clean or "upload"
+    if not clean or clean in (".", ".."):
+        clean = "upload"
+    return clean
 
 
 def source_media_type(filename: str | None) -> str:
