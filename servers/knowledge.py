@@ -696,6 +696,51 @@ class KnowledgeDB:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def sources_referencing_file(
+        self,
+        *,
+        stored_paths: list[str],
+        domain: str | None,
+        filename: str | None,
+        exclude_source_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return source rows that would resolve to the same raw file."""
+        assert self._conn is not None
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        unique_paths = [path for path in dict.fromkeys(stored_paths) if path]
+        if unique_paths:
+            placeholders = ",".join("?" for _ in unique_paths)
+            conditions.append(f"s.stored_path IN ({placeholders})")
+            params.extend(unique_paths)
+
+        if domain and filename:
+            conditions.append("(s.stored_path IS NULL AND s.domain = ? AND s.filename = ?)")
+            params.extend([domain, filename])
+
+        if not conditions:
+            return []
+
+        where = f"({' OR '.join(conditions)})"
+        if exclude_source_id:
+            where += " AND s.id != ?"
+            params.append(exclude_source_id)
+
+        cursor = await self._conn.execute(
+            f"""
+            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
+                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
+                   s.size_bytes
+            FROM sources s
+            WHERE {where}
+            ORDER BY s.ingested_at DESC
+            """,  # noqa: S608
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def download_token_create(self, source_id: str, ttl_seconds: int = 900) -> dict[str, Any]:
         assert self._conn is not None
         ttl = max(60, min(int(ttl_seconds or 900), 86400))
@@ -1109,11 +1154,22 @@ async def delete_source_record(
 
     await vectors.delete_by_source(source_id)
     deleted_files: list[str] = []
+    preserved_files: list[str] = []
     if delete_file:
         candidate = resolve_source_path(settings.knowledge_path, source)
         if candidate:
-            candidate.unlink()
-            deleted_files.append(source_relative_path(settings.knowledge_path, candidate))
+            rel_path = source_relative_path(settings.knowledge_path, candidate)
+            references = await db.sources_referencing_file(
+                stored_paths=[rel_path, str(candidate)],
+                domain=source.get("domain"),
+                filename=source.get("filename"),
+                exclude_source_id=source_id,
+            )
+            if references:
+                preserved_files.append(rel_path)
+            else:
+                candidate.unlink()
+                deleted_files.append(rel_path)
 
     deleted = await db.source_remove(source_id)
     return {
@@ -1121,6 +1177,7 @@ async def delete_source_record(
         "deleted": deleted,
         "source": source,
         "deleted_files": deleted_files,
+        "preserved_files": preserved_files,
     }
 
 
@@ -2328,6 +2385,10 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
             continue
         # Skip ingested-text/note rows that have no stored file to download.
         if not src.get("stored_path"):
+            continue
+        if not resolve_source_path(settings.knowledge_path, src):
+            src["download_missing"] = True
+            src["download_error"] = "stored source file is missing on disk"
             continue
         filename = src.get("filename") or sid
         try:

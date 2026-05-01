@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,6 +7,7 @@ from servers.knowledge import (
     KnowledgeDB,
     apply_curation_item,
     curation_item_has_destructive_actions,
+    delete_source_record,
 )
 
 
@@ -103,3 +105,55 @@ async def test_destructive_curation_requires_exact_confirmation(knowledge_db: Kn
     assert result["success"] is False
     assert result["requires_confirmation"] == "destructive-test"
     assert (await knowledge_db.domain_get("core"))["archived"] is False
+
+
+async def test_delete_source_preserves_file_referenced_by_another_source(
+    knowledge_db: KnowledgeDB,
+    tmp_path: Path,
+):
+    await knowledge_db.domain_create("pets", "Pets test domain", [])
+    image_path = tmp_path / "pets" / "benji.jpg"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"new benji bytes")
+
+    await knowledge_db.source_add(
+        "old-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "old-hash",
+        0,
+        "pets/benji.jpg",
+        "image/jpeg",
+        18_883,
+    )
+    await knowledge_db.source_add(
+        "new-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "new-hash",
+        0,
+        "pets/benji.jpg",
+        "image/jpeg",
+        114_044,
+    )
+
+    class FakeVectors:
+        async def delete_by_source(self, source_id: str) -> None:
+            self.deleted_source_id = source_id
+
+    result = await delete_source_record(
+        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
+        FakeVectors(),  # type: ignore[arg-type]
+        knowledge_db,
+        "old-source",
+        delete_file=True,
+    )
+
+    assert result["success"] is True
+    assert result["deleted_files"] == []
+    assert result["preserved_files"] == ["pets/benji.jpg"]
+    assert image_path.exists()
+    assert await knowledge_db.source_get("old-source") is None
+    assert await knowledge_db.source_get("new-source") is not None
