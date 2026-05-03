@@ -18,6 +18,7 @@ class ChunkReader(Protocol):
 
     async def chunks_by_source(self, source_id: str, limit: int = 1000) -> list[dict[str, Any]]:
         """Return chunk payloads for a source ordered by chunk index."""
+        ...
 
 
 def sanitize_source_filename(filename: str | None) -> str:

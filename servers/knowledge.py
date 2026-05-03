@@ -45,6 +45,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
+    Condition,
     Distance,
     FieldCondition,
     Filter,
@@ -1078,7 +1079,7 @@ class KnowledgeVectorStore:
         min_score: float = 0.25,
     ) -> list[ScoredPoint]:
         """Hybrid search filtered by domain(s)."""
-        must_conditions: list[FieldCondition] = []
+        must_conditions: list[Condition] = []
         if domains and len(domains) == 1:
             must_conditions.append(
                 FieldCondition(key="domain", match=MatchValue(value=domains[0]))
@@ -1088,7 +1089,7 @@ class KnowledgeVectorStore:
 
         # Multi-domain filter uses should with min_count
         if domains and len(domains) > 1:
-            should_conditions = [
+            should_conditions: list[Condition] = [
                 FieldCondition(key="domain", match=MatchValue(value=d)) for d in domains
             ]
             query_filter = Filter(should=should_conditions, must=must_conditions or None)
