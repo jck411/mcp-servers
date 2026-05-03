@@ -1,4 +1,3 @@
-```json
 {
   "chat.tools.terminal.autoApprove": {
     "cd": true,
@@ -124,4 +123,3 @@
     "iex": true
   }
 }
-```
