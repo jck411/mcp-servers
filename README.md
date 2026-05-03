@@ -1,8 +1,6 @@
 # mcp-servers
 
-Standalone MCP servers deployed to Proxmox via systemd. Zero imports from Backend\_FastAPI.
-
-The backend (`jck411/Backend_FastAPI`) is a pure MCP client — it connects to these servers over HTTP, discovers tools via the MCP protocol, and routes tool calls from the LLM.
+Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd. Any MCP-compatible client can connect to these servers over HTTP.
 
 ## Architecture
 
@@ -19,7 +17,6 @@ Each server:
 - Is a standalone Python module using [FastMCP](https://github.com/jlowin/fastmcp)
 - Runs via: `python -m servers.<name> --transport streamable-http --host 0.0.0.0 --port <PORT>`
 - Self-describes via the MCP protocol (`list_tools()`)
-- Has zero imports from Backend\_FastAPI
 
 ## Port Assignments
 
@@ -47,10 +44,7 @@ All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
 ### Knowledge Curation Queue
 
-The `knowledge` server owns a reviewed curation queue in SQLite. LibreChat and
-maintenance jobs can draft queue items for durable memory extraction, source
-consolidation, temporal fact cleanup, and pending maintenance review. The MCP
-tools are:
+The `knowledge` server owns a reviewed curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Tools:
 
 - `knowledge_curation_list`
 - `knowledge_curation_get`
@@ -62,9 +56,9 @@ Destructive actions require `confirmation` equal to the queue item id.
 
 ## Related Repos
 
-- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — auto-discovers servers on ports 9001–9017.
-- [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — register a new server in OpenCode after deploying it here.
-- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure. See [`docs/infrastructure-map.md`](https://github.com/jck411/PROXMOX/blob/master/docs/infrastructure-map.md).
+- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; connect it to any server at `http://192.168.1.110:<port>/mcp`
+- [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — OpenCode config; see that repo's `add-mcp-server.sh` to register servers
+- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure
 
 ## Quick Start
 
@@ -102,19 +96,23 @@ uv sync --extra spotify
 python -m servers.spotify --transport streamable-http --host 127.0.0.1 --port 9010
 ```
 
-### 2. Connect from the backend
+### 2. Test the server
 
-Start the Backend_FastAPI locally (`./startdev.sh`), open the frontend, and go to **Settings → Server status**. Enter the server URL and click **Connect**:
+Smoke-test any running server:
 
+```bash
+curl -s http://127.0.0.1:<port>/mcp \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
-http://127.0.0.1:9010/mcp
-```
 
-The backend discovers tools via MCP protocol and makes them available to the LLM immediately.
+Or point any MCP client at `http://127.0.0.1:<port>/mcp`.
 
 ### 3. Iterate
 
-Edit server code → restart (or let watchfiles reload) → tools update on next refresh. No deploy needed during development.
+Edit server code → watchfiles reloads automatically → retest. No deploy needed during development.
 
 ### 4. Deploy to Proxmox
 
@@ -138,8 +136,7 @@ git clone https://github.com/jck411/mcp-servers.git /opt/mcp-servers
 cd /opt/mcp-servers
 uv sync --extra all
 
-# Copy shared env and install systemd units
-cp .env.example .env
+# .env is already symlinked on the LXC — no copy needed
 sudo ./deploy/setup-systemd.sh
 
 # Check status
@@ -165,11 +162,90 @@ sudo systemctl restart mcp-server@calculator
 ./deploy/deploy.sh calculator
 ```
 
-## Connecting from Backend
+## Security
 
-```bash
-# Tell Backend_FastAPI to connect to a running server
-curl -X POST http://localhost:8000/api/mcp/servers/connect \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "http://192.168.1.110:9003/mcp"}'
+Servers bind `0.0.0.0` with **no built-in HTTP authentication**. Security is enforced at the network level.
+
+### LAN access
+
+Direct IP is safe as-is. Ensure your router/Proxmox firewall does **not** expose ports `9001–9017` to the internet — only your LAN subnet should reach them.
+
+### Remote access (Cloudflare Tunnel)
+
+Use a **Cloudflare Tunnel** — never port-forward `9001–9017` through your router. The tunnel gives each server a public HTTPS endpoint without opening firewall holes.
+
+### Locking down the public tunnel (for ChatGPT, etc.)
+
+Add a **Cloudflare Zero Trust Access policy** to the tunnel hostname — zero server code changes required:
+
+1. Cloudflare Zero Trust → Access → Service Auth → **Create Service Token**
+2. Attach an Access policy to the tunnel hostname requiring that token
+3. Clients pass two headers with every request:
+   ```
+   CF-Access-Client-Id: <client-id>
+   CF-Access-Client-Secret: <client-secret>
+   ```
+4. All enforcement happens at the Cloudflare edge — the servers themselves are unchanged
+
+For clients on your local network, skip Zero Trust and use the direct LAN URL.
+
+## Client Integration
+
+Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextprotocol.io). Any MCP client that supports HTTP can connect.
+
+| Access | Base URL |
+|--------|----------|
+| LAN | `http://192.168.1.110:<port>/mcp` |
+| Remote (Cloudflare Tunnel) | `https://<tunnel-hostname>/mcp` |
+
+### VS Code Copilot
+
+`.vscode/mcp.json` (or user-level `settings.json`):
+
+```json
+{
+  "servers": {
+    "calculator": { "type": "http", "url": "http://192.168.1.110:9003/mcp" },
+    "spotify":    { "type": "http", "url": "http://192.168.1.110:9010/mcp" }
+  }
+}
 ```
+
+### OpenCode
+
+`~/.config/opencode/config.json`:
+
+```json
+{
+  "mcp": {
+    "calculator": { "type": "http", "url": "http://192.168.1.110:9003/mcp" }
+  }
+}
+```
+
+### LibreChat
+
+`librechat.yaml`:
+
+```yaml
+mcpServers:
+  calculator:
+    url: http://192.168.1.110:9003/mcp
+  spotify:
+    url: http://192.168.1.110:9010/mcp
+```
+
+### ChatGPT
+
+ChatGPT → Settings → Connected Apps → Add custom MCP server. Use the Cloudflare Tunnel URL:
+
+```
+https://<tunnel-hostname>/mcp
+```
+
+If the tunnel is protected by Zero Trust, add the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers in the custom action’s auth settings.
+
+### Generic (any MCP client)
+
+Point any MCP client at `http://192.168.1.110:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
+

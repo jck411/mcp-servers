@@ -123,13 +123,7 @@ su - mcp -c "/opt/mcp-servers/.venv/bin/python -m playwright install chromium --
 
 ## 5. Configure Environment
 
-```bash
-# Copy the shared env file
-cp /opt/mcp-servers/.env.example /opt/mcp-servers/.env
-
-# Edit shared settings (uncomment HOST_PROFILE_ID if using shell_control inventory)
-# nano /opt/mcp-servers/.env
-```
+`.env` is already symlinked on the LXC — no manual copy needed. Per-instance port files (`.env.<name>`) are created automatically by `setup-systemd.sh` in the next step.
 
 Per-instance port files are created automatically by the setup script in step 6.
 
