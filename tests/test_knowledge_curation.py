@@ -157,3 +157,37 @@ async def test_delete_source_preserves_file_referenced_by_another_source(
     assert image_path.exists()
     assert await knowledge_db.source_get("old-source") is None
     assert await knowledge_db.source_get("new-source") is not None
+
+
+async def test_source_get_by_domain_filename_returns_newest_match(
+    knowledge_db: KnowledgeDB,
+):
+    await knowledge_db.domain_create("pets", "Pets test domain", [])
+    await knowledge_db.source_add(
+        "older-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "older-hash",
+        0,
+        "pets/benji.jpg",
+        "image/jpeg",
+        18_883,
+    )
+    await knowledge_db.source_add(
+        "newer-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "newer-hash",
+        0,
+        "pets/.sources/newer-source/benji.jpg",
+        "image/jpeg",
+        114_044,
+    )
+
+    source = await knowledge_db.source_get_by_domain_filename("pets", "benji.jpg")
+
+    assert source is not None
+    assert source["id"] == "newer-source"
+    assert source["stored_path"] == "pets/.sources/newer-source/benji.jpg"

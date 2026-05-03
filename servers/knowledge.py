@@ -29,7 +29,6 @@ import base64
 import binascii
 import hashlib
 import json
-import os
 import re
 import secrets
 import sys
@@ -675,6 +674,25 @@ class KnowledgeDB:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def source_get_by_domain_filename(
+        self, domain: str, filename: str
+    ) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
+                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
+                   s.size_bytes
+            FROM sources s
+            WHERE s.domain = ? AND s.filename = ?
+            ORDER BY s.ingested_at DESC
+            LIMIT 1
+            """,
+            (domain, filename),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def source_rename(
         self,
         source_id: str,
@@ -767,7 +785,12 @@ class KnowledgeDB:
             INSERT INTO download_tokens (token, source_id, expires_at, created_at)
             VALUES (?, ?, ?, ?)
             """,
-            (token, source_id, datetime.fromtimestamp(expires_at, UTC).isoformat(), now.isoformat()),
+            (
+                token,
+                source_id,
+                datetime.fromtimestamp(expires_at, UTC).isoformat(),
+                now.isoformat(),
+            ),
         )
         await self._conn.commit()
         return {
@@ -1261,11 +1284,20 @@ def compute_text_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-IMAGE_EXTENSIONS = {".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".json", ".yaml", ".yml", ".html", ".htm", ".xml"}
+IMAGE_EXTENSIONS = {
+    ".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
+}
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".json", ".yaml", ".yml",
+    ".html", ".htm", ".xml",
+}
 
 
-async def _run(cmd: list[str], stdin: bytes | None = None, timeout: float = 120.0) -> tuple[int, bytes, bytes]:
+async def _run(
+    cmd: list[str],
+    stdin: bytes | None = None,
+    timeout: float = 120.0,
+) -> tuple[int, bytes, bytes]:
     """Run a subprocess and return (rc, stdout, stderr)."""
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1275,7 +1307,7 @@ async def _run(cmd: list[str], stdin: bytes | None = None, timeout: float = 120.
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         return 124, b"", b"timeout"

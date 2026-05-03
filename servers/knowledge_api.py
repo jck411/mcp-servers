@@ -201,12 +201,21 @@ async def upload_file(
     data = await file.read()
 
     if dest.exists() and not overwrite:
-        raise HTTPException(
-            status_code=409,
-            detail=(
+        existing_source = await db.source_get_by_domain_filename(domain, filename)
+        detail: dict[str, Any] = {
+            "message": (
                 f"File '{filename}' already exists in '{domain}'. "
                 "Use ?overwrite=true to replace."
             ),
+            "file": filename,
+            "domain": domain,
+        }
+        if existing_source:
+            detail["source_id"] = existing_source["id"]
+            detail["source"] = existing_source
+        raise HTTPException(
+            status_code=409,
+            detail=detail,
         )
 
     dest.write_bytes(data)

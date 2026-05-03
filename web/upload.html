@@ -243,11 +243,69 @@
   });
 
   // ---------- upload ----------
+  function nested(obj, keys) {
+    let cur = obj;
+    for (const key of keys) {
+      if (!cur || typeof cur !== "object") return "";
+      cur = cur[key];
+    }
+    return cur || "";
+  }
+
+  function sourceIdFrom(json) {
+    return (
+      nested(json, ["source_id"]) ||
+      nested(json, ["id"]) ||
+      nested(json, ["source", "id"]) ||
+      nested(json, ["source", "source_id"]) ||
+      nested(json, ["detail", "source_id"]) ||
+      nested(json, ["detail", "id"]) ||
+      nested(json, ["detail", "source", "id"]) ||
+      nested(json, ["detail", "source", "source_id"])
+    );
+  }
+
+  function storedPathFrom(json) {
+    return (
+      nested(json, ["stored_path"]) ||
+      nested(json, ["source", "stored_path"]) ||
+      nested(json, ["detail", "stored_path"]) ||
+      nested(json, ["detail", "source", "stored_path"])
+    );
+  }
+
+  function messageFrom(json, fallback) {
+    const detail = json && json.detail;
+    if (typeof detail === "string") return detail;
+    return (
+      nested(json, ["message"]) ||
+      nested(json, ["reason"]) ||
+      nested(json, ["error"]) ||
+      nested(json, ["detail", "message"]) ||
+      nested(json, ["detail", "reason"]) ||
+      nested(json, ["detail", "error"]) ||
+      fallback
+    );
+  }
+
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[ch]));
+  }
+
   function classify(json, status) {
     if (status === 409) return { kind: "warn", badge: "EXISTS",
-      msg: "Filename already on disk with different content. Tick overwrite to replace." };
+      msg: messageFrom(
+        json,
+        "Filename already on disk. Tick overwrite to replace."
+      ) };
     if (!json || json.success === false) return { kind: "err", badge: "ERROR",
-      msg: (json && json.detail) || "upload failed" };
+      msg: messageFrom(json, "upload failed") };
     if (json.ingested === true && (json.chunks_stored || 0) > 0)
       return { kind: "ok", badge: "INDEXED", msg: `${json.chunks_stored} chunks` };
     if (json.ingested === true && (json.chunks_stored || 0) === 0)
@@ -262,23 +320,23 @@
   }
 
   function render(file, domain, classified, json) {
-    const sid = json && json.source_id;
-    const path = json && json.stored_path;
+    const sid = sourceIdFrom(json);
+    const path = storedPathFrom(json);
     const div = document.createElement("div");
     div.className = "result " + classified.kind;
     div.innerHTML = `
       <div>
         <div class="name">
-          <span class="badge ${classified.kind}">${classified.badge}</span>
-          ${file.name} <span class="meta">→ ${domain}</span>
+          <span class="badge ${classified.kind}">${escapeHtml(classified.badge)}</span>
+          ${escapeHtml(file.name)} <span class="meta">→ ${escapeHtml(domain)}</span>
         </div>
-        <div class="meta">${classified.msg}</div>
-        ${sid ? `<div class="meta">source_id: <code>${sid}</code>${
-          path ? ` &middot; ${path}` : ""
+        <div class="meta">${escapeHtml(classified.msg)}</div>
+        ${sid ? `<div class="meta">source_id: <code>${escapeHtml(sid)}</code>${
+          path ? ` &middot; ${escapeHtml(path)}` : ""
         }</div>` : ""}
       </div>
       <div>${
-        sid ? `<button class="copy" data-sid="${sid}">copy id</button>` : ""
+        sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""
       }</div>`;
     const btn = div.querySelector("button.copy");
     if (btn) btn.onclick = () => {
