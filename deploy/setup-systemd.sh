@@ -30,7 +30,6 @@ declare -A PORT_MAP=(
     [notes]=9009
     [spotify]=9010
     [playwright]=9011
-    [kiosk_clock_tools]=9012
     [tv]=9013
     [rag]=9014
     [hue]=9015

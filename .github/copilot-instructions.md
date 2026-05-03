@@ -4,9 +4,7 @@ Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via syste
 
 ## Related Repos
 
-- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; see its own repo to connect it to these servers
-- [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — OpenCode config; see its own repo's `add-mcp-server.sh` to register servers
-- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure
+- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure (CT 110, 192.168.1.110)
 
 Knowledge server uses Qdrant at `192.168.1.110:6333` for vector search.
 
@@ -35,7 +33,7 @@ When adding new tools to an existing server during local dev:
 
 - Each server is a single file in `servers/<name>.py` using FastMCP
 - Shared helpers live in `shared/` (auth modules, normalizers, etc.)
-- Zero imports from Backend_FastAPI — every server must be fully standalone
+- Zero imports from other projects — servers may only import from `shared/` and third-party packages
 - `mcp = FastMCP("<name>")` — every server exposes `run()`, `main()`, `DEFAULT_HTTP_PORT`
 - All tool names prefixed: `@mcp.tool("<name>_do_thing")`
 
@@ -56,10 +54,11 @@ When the user asks to add/port a server, execute every step below without asking
 - Add `[project.optional-dependencies]` entry for the server if it needs extra packages
 - Add the new extra to the `all` group
 
-### 3. Update deploy scripts
+### 3. Update deploy scripts and instructions
 
 - Add port to `PORT_MAP` in `deploy/setup-systemd.sh` (pick next available)
-- Add server name to `DEFAULT_SERVERS` in both `deploy/setup-systemd.sh` and `deploy/deploy.sh`
+- Add server name to `DEFAULT_SERVERS` in `deploy/setup-systemd.sh` and `ALL_SERVERS` in `deploy/deploy.sh`
+- Update the Port Assignments table in this file
 
 ### 4. Install and verify locally
 
@@ -98,6 +97,12 @@ sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11 "pct exec 110 -- chown -R m
 
 Report: server name, port, tool count reachable. One-liner, no summary doc.
 
+---
+
+## Process Improvement
+
+If any step in this workflow is awkward, slow, or error-prone, propose a concrete edit to these instructions. Keep it short — one bullet per suggestion, no preamble.
+
 ## Port Assignments
 
 Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
@@ -120,7 +125,7 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | web_search | 9016 |
 | knowledge | 9017 |
 
-Note: Port 9012 was previously used by `kiosk_clock_tools` (removed). Do not reuse it.
+Retired ports — do not reuse: 9002, 9012
 
 Next available: 9018
 
