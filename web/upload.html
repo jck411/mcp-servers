@@ -80,35 +80,16 @@
   .badge.warn { background: rgba(216,163,45,0.15); color: var(--warn); }
   .badge.err { background: rgba(232,93,107,0.15); color: var(--err); }
 
-  #login { max-width: 420px; }
-  #login p { color: var(--muted); margin: 0 0 12px; }
-  #login .err { color: var(--err); font-size: 13px; min-height: 18px; }
-
-  .hidden { display: none !important; }
   .top { display: flex; justify-content: space-between; align-items: center; }
-  .top a { color: var(--muted); font-size: 12px; text-decoration: none; }
-  .top a:hover { color: var(--text); }
 </style>
 </head>
 <body>
 <main>
   <div class="top">
     <h1>Knowledge Upload <small>api-knowledge.jackshome.com</small></h1>
-    <a href="#" id="logout" class="hidden">sign out</a>
   </div>
 
-  <!-- LOGIN -->
-  <section id="login" class="card">
-    <p>Paste your <code>KNOWLEDGE_API_TOKEN</code>. Stored only in this browser tab.</p>
-    <label for="token">API token</label>
-    <input id="token" type="password" autocomplete="off" placeholder="bearer token" />
-    <div style="height:8px"></div>
-    <button id="login-btn" class="primary">Continue</button>
-    <div class="err" id="login-err"></div>
-  </section>
-
-  <!-- UPLOADER -->
-  <section id="uploader" class="hidden">
+  <section id="uploader">
     <div class="card">
       <div class="row">
         <div>
@@ -139,65 +120,6 @@
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
-  const TOKEN_KEY = "knowledge_api_token";
-
-  let token = sessionStorage.getItem(TOKEN_KEY) || "";
-
-  // ---------- auth ----------
-  async function validateToken(t) {
-    const r = await fetch("/api/whoami", {
-      headers: { Authorization: "Bearer " + t },
-    });
-    return r.ok;
-  }
-
-  async function tryEnter() {
-    if (!token) return showLogin();
-    if (await validateToken(token)) {
-      showApp();
-    } else {
-      sessionStorage.removeItem(TOKEN_KEY);
-      token = "";
-      showLogin("Token rejected.");
-    }
-  }
-
-  function showLogin(msg) {
-    $("login").classList.remove("hidden");
-    $("uploader").classList.add("hidden");
-    $("logout").classList.add("hidden");
-    $("login-err").textContent = msg || "";
-    $("token").focus();
-  }
-
-  function showApp() {
-    $("login").classList.add("hidden");
-    $("uploader").classList.remove("hidden");
-    $("logout").classList.remove("hidden");
-    loadDomains();
-  }
-
-  $("login-btn").onclick = async () => {
-    const t = $("token").value.trim();
-    if (!t) return;
-    $("login-err").textContent = "checking…";
-    if (await validateToken(t)) {
-      sessionStorage.setItem(TOKEN_KEY, t);
-      token = t;
-      showApp();
-    } else {
-      $("login-err").textContent = "Token rejected.";
-    }
-  };
-  $("token").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") $("login-btn").click();
-  });
-  $("logout").onclick = (e) => {
-    e.preventDefault();
-    sessionStorage.removeItem(TOKEN_KEY);
-    token = "";
-    showLogin();
-  };
 
   // ---------- domains ----------
   async function loadDomains() {
@@ -377,11 +299,7 @@
         const url = `/api/upload/${encodeURIComponent(domain)}${
           qs.toString() ? "?" + qs : ""
         }`;
-        const r = await fetch(url, {
-          method: "POST",
-          headers: { Authorization: "Bearer " + token },
-          body: fd,
-        });
+        const r = await fetch(url, { method: "POST", body: fd });
         const j = await r.json().catch(() => ({}));
         const cls = classify(j, r.status);
         placeholder.remove();
@@ -394,7 +312,7 @@
     $("file").value = "";
   }
 
-  tryEnter();
+  loadDomains();
 })();
 </script>
 </body>

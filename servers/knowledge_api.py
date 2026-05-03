@@ -30,14 +30,13 @@ Run:
 from __future__ import annotations
 
 import argparse
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from servers.knowledge import (
@@ -113,31 +112,6 @@ if _WEB_DIR.is_dir():
 UPLOAD_FILE = File(...)
 REQUIRED_BODY = Body(...)
 OPTIONAL_BODY = Body(None)
-AUTH_HEADER = Header(None)
-
-
-def require_write_auth(authorization: str | None = AUTH_HEADER) -> None:
-    """Require bearer auth for mutating routes when KNOWLEDGE_API_TOKEN is configured."""
-    token = os.environ.get("KNOWLEDGE_API_TOKEN")
-    if not token:
-        return
-    if authorization != f"Bearer {token}":
-        raise HTTPException(status_code=401, detail="Knowledge write token required")
-
-
-WRITE_AUTH = Depends(require_write_auth)
-
-
-def require_download_auth(authorization: str | None = AUTH_HEADER) -> None:
-    """Require bearer auth for raw source download routes, failing closed if unset."""
-    token = os.environ.get("KNOWLEDGE_API_TOKEN")
-    if not token:
-        raise HTTPException(status_code=503, detail="Knowledge API token is not configured")
-    if authorization != f"Bearer {token}":
-        raise HTTPException(status_code=401, detail="Knowledge API token required")
-
-
-DOWNLOAD_AUTH = Depends(require_download_auth)
 
 
 def _content_disposition(filename: str) -> str:
@@ -146,21 +120,6 @@ def _content_disposition(filename: str) -> str:
         if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
     ) or "download"
     return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
-
-
-# ---------------------------------------------------------------------------
-# GET /api/whoami  —  bearer-token sanity check for the upload UI
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/whoami")
-async def whoami(_auth: None = WRITE_AUTH) -> dict[str, Any]:
-    """Return 200 if the supplied bearer token matches KNOWLEDGE_API_TOKEN.
-
-    Used by the static upload page to validate a token before showing the form.
-    Returns 401 otherwise (handled by WRITE_AUTH).
-    """
-    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +134,6 @@ async def upload_file(
     ingest: bool = True,
     overwrite: bool = False,
     force: bool = False,
-    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Upload a file to a domain folder and optionally ingest it immediately.
 
@@ -347,7 +305,6 @@ async def set_fact(
     domain: str,
     key: str,
     body: dict[str, Any] = REQUIRED_BODY,
-    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Upsert a structured fact in a domain."""
     settings, _, _, _, db = _require_ready()
@@ -378,7 +335,7 @@ async def set_fact(
 
 
 @app.delete("/api/facts/{domain}/{key}")
-async def delete_fact(domain: str, key: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
+async def delete_fact(domain: str, key: str) -> dict[str, Any]:
     """Delete a structured fact from a domain."""
     _, _, _, _, db = _require_ready()
 
@@ -430,19 +387,13 @@ async def _download_source_response(source_id: str) -> Response:
 
 
 @app.get("/api/sources/{source_id}/download")
-async def download_source_get(
-    source_id: str,
-    _auth: None = DOWNLOAD_AUTH,
-) -> Response:
+async def download_source_get(source_id: str) -> Response:
     """Download original source bytes."""
     return await _download_source_response(source_id)
 
 
 @app.post("/api/sources/{source_id}/download")
-async def download_source_post(
-    source_id: str,
-    _auth: None = DOWNLOAD_AUTH,
-) -> Response:
+async def download_source_post(source_id: str) -> Response:
     """Download original source bytes."""
     return await _download_source_response(source_id)
 
@@ -451,7 +402,6 @@ async def download_source_post(
 async def create_source_download_link(
     source_id: str,
     body: dict[str, Any] | None = OPTIONAL_BODY,
-    _auth: None = DOWNLOAD_AUTH,
 ) -> dict[str, Any]:
     """Create a temporary URL that can download a source without auth headers."""
     settings, _, _, _, db = _require_ready()
@@ -486,7 +436,6 @@ async def download_source_token(token: str) -> Response:
 async def delete_source(
     source_id: str,
     delete_file: bool = True,
-    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Delete one source, including vector chunks and optionally the stored file."""
     settings, _, _, vectors, db = _require_ready()
@@ -500,7 +449,6 @@ async def delete_source(
 async def rename_source(
     source_id: str,
     body: dict[str, Any] = REQUIRED_BODY,
-    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Rename one source by source_id."""
     filename = body.get("filename") or body.get("source_name")
@@ -534,7 +482,6 @@ async def list_curation(
 @app.post("/api/curation")
 async def create_curation_item(
     body: dict[str, Any] = REQUIRED_BODY,
-    _auth: None = WRITE_AUTH,
 ) -> dict[str, Any]:
     """Create or replace a curation queue item."""
     _, _, _, _, db = _require_ready()
@@ -572,7 +519,6 @@ async def get_curation_item(item_id: str) -> dict[str, Any]:
 async def apply_curation(
     item_id: str,
     body: dict[str, Any] | None = OPTIONAL_BODY,
-    _auth: None = WRITE_AUTH,
 ):
     """Apply a reviewed curation item."""
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
@@ -591,7 +537,7 @@ async def apply_curation(
 
 
 @app.post("/api/curation/{item_id}/reject")
-async def reject_curation(item_id: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
+async def reject_curation(item_id: str) -> dict[str, Any]:
     """Reject a curation queue item without applying it."""
     _, _, _, _, db = _require_ready()
     updated = await db.curation_mark_status(item_id, "rejected")
@@ -601,7 +547,7 @@ async def reject_curation(item_id: str, _auth: None = WRITE_AUTH) -> dict[str, A
 
 
 @app.post("/api/curation/{item_id}/snooze")
-async def snooze_curation(item_id: str, _auth: None = WRITE_AUTH) -> dict[str, Any]:
+async def snooze_curation(item_id: str) -> dict[str, Any]:
     """Snooze a curation queue item."""
     _, _, _, _, db = _require_ready()
     updated = await db.curation_mark_status(item_id, "snoozed")
