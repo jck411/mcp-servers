@@ -196,6 +196,17 @@ async def upload_file(
     if not filename:
         raise HTTPException(status_code=422, detail="Invalid filename")
 
+    from pathlib import Path as _Path
+    if not _Path(filename).suffix:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"File '{filename}' has no extension. "
+                "Rename it with the correct extension before uploading "
+                "(e.g. photo.jpg, scan.png, report.pdf)."
+            ),
+        )
+
     dest = settings.knowledge_path / domain / filename
     dest.parent.mkdir(parents=True, exist_ok=True)
     data = await file.read()
