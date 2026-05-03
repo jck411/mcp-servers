@@ -189,9 +189,13 @@ class EmbeddingClient:
                 response = await client.post(self._url, json=payload)
                 response.raise_for_status()
                 data = response.json()
+                if "data" not in data:
+                    err = data.get("error", data)
+                    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"Embedding API error: {msg}")
                 sorted_data = sorted(data["data"], key=lambda x: x["index"])
                 return [item["embedding"] for item in sorted_data]
-            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as exc:
                 last_error = exc
                 if attempt < 2:
                     await asyncio.sleep(2**attempt)
@@ -1287,6 +1291,41 @@ def compute_text_hash(text: str) -> str:
 IMAGE_EXTENSIONS = {
     ".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
 }
+
+# Common binary file magic byte prefixes used to detect binary files with no extension.
+_BINARY_MAGIC_PREFIXES: tuple[bytes, ...] = (
+    b"\x89PNG",          # PNG
+    b"\xff\xd8",        # JPEG
+    b"GIF8",            # GIF
+    b"BM",              # BMP
+    b"RIFF",            # WebP / WAV
+    b"\x49\x49\x2a\x00",  # TIFF little-endian
+    b"\x4d\x4d\x00\x2a",  # TIFF big-endian
+    b"PK\x03\x04",     # ZIP / DOCX / XLSX
+    b"\x1f\x8b",       # GZIP
+    b"\x7fELF",        # ELF binary
+    b"ID3",            # MP3 ID3 tag
+    b"\xff\xfb",       # MP3 frame sync
+    b"\x4f\x67\x67\x53",  # OGG
+)
+
+
+def _is_likely_binary(raw: bytes) -> bool:
+    """Return True when raw bytes look like a binary/non-text file."""
+    head = raw[:16]
+    for magic in _BINARY_MAGIC_PREFIXES:
+        if head.startswith(magic):
+            return True
+    # ISO base media file format (HEIC, HEIF, MP4): 'ftyp' at bytes 4-8
+    if len(raw) >= 8 and raw[4:8] == b"ftyp":
+        return True
+    # Null byte: almost never appears in UTF-8 text
+    if b"\x00" in raw[:512]:
+        return True
+    # High ratio of control characters
+    sample = raw[:512]
+    control = sum(1 for b in sample if b < 0x09 or b in (0x0b, 0x0c) or 0x0E <= b <= 0x1F)
+    return bool(sample) and control / len(sample) > 0.10
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".json", ".yaml", ".yml",
     ".html", ".htm", ".xml",
@@ -1435,7 +1474,12 @@ async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str
         text = await _ocr_image_file(path, settings)
     elif suffix in TEXT_EXTENSIONS or suffix == "":
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            raw = path.read_bytes()
+            if suffix == "" and _is_likely_binary(raw):
+                # Extensionless binary file (e.g. image uploaded without extension).
+                # Store the bytes but skip text indexing; caption via knowledge_ingest_text.
+                return []
+            text = raw.decode("utf-8", errors="replace")
         except OSError:
             text = ""
     else:
