@@ -43,7 +43,7 @@ SyslogIdentifier=mcp-%i
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data /opt/mcp-servers/knowledge
 PrivateTmp=true
 
 [Install]
