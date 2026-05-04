@@ -2094,22 +2094,27 @@ async def extract_source_facts_single_shot(
         )
 
     # --- Step 2: call extraction model ---
-    # json_object forces valid JSON output. The system prompt defines the exact structure.
-    # Response Healing plugin fixes any remaining markdown/syntax issues before we parse.
     is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
+    messages: list[dict[str, Any]] = [{
+        "role": "user",
+        "content": (
+            user_content if isinstance(user_content, list)
+            else [{"type": "text", "text": user_content}]
+        ),
+    }]
+    # Assistant prefill: forces Claude to start its response with `{`, making
+    # markdown output structurally impossible. Officially supported by OpenRouter.
+    # For non-Claude models we rely on response_format + response-healing instead.
+    if is_claude:
+        messages.append({"role": "assistant", "content": "{"})
+
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
-        "messages": [{
-            "role": "user",
-            "content": (
-                user_content if isinstance(user_content, list)
-                else [{"type": "text", "text": user_content}]
-            ),
-        }],
+        "messages": messages,
         "temperature": 0,
         "max_tokens": 4096,
         "response_format": {"type": "json_object"},
-        # Response Healing: fixes markdown wrappers, mixed text+JSON, syntax errors
+        # Response Healing: fixes any remaining markdown/syntax issues before we parse.
         "plugins": [{"id": "response-healing"}],
     }
 
@@ -2148,6 +2153,11 @@ async def extract_source_facts_single_shot(
             r.raise_for_status()
             data = r.json()
             raw_output = (data["choices"][0]["message"]["content"] or "").strip()
+            # When assistant prefill `{` is used, OpenRouter may return only the
+            # completion (the part after `{`). Prepend `{` if needed so we always
+            # have a valid JSON start.
+            if is_claude and not raw_output.startswith("{"):
+                raw_output = "{" + raw_output
             usage = data.get("usage") or {}
             llm_step["tokens_in"] = usage.get("prompt_tokens", 0)
             llm_step["tokens_out"] = usage.get("completion_tokens", 0)
