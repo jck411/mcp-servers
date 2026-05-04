@@ -17,12 +17,13 @@ LXC_MCP=110
 LXC_BACKEND=111
 MCP_SSH="root@192.168.1.110"
 BACKEND_SSH="root@192.168.1.111"
+TUNNEL_SSH="proxmox-tunnel"  # Cloudflare tunnel alias (works from anywhere)
 MCP_REPO="/opt/mcp-servers"
 BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
 ALL_SERVERS=(
     calculator shell_control playwright spotify
-    gdrive gmail calendar notes pdf monarch tv rag hue web_search knowledge
+    gdrive gmail calendar notes pdf monarch tv rag hue web_search knowledge knowledge_api
 )
 
 # ── Parse args ────────────────────────────────────────────────────────────────
@@ -65,10 +66,13 @@ detect_mode() {
     banner "Detecting connectivity"
     if ssh -o ConnectTimeout=3 -o BatchMode=yes "$MCP_SSH" "true" &>/dev/null; then
         MODE="local"
-        info "  SSH reachable → automatic deploy"
+        info "  Direct SSH reachable → local deploy"
+    elif ssh -o ConnectTimeout=8 -o BatchMode=yes "$TUNNEL_SSH" "true" &>/dev/null 2>&1; then
+        MODE="tunnel"
+        info "  Cloudflare tunnel reachable → tunnel deploy"
     else
         MODE="remote"
-        info "  SSH unreachable → Proxmox console mode"
+        info "  SSH unreachable → Proxmox console mode (paste commands manually)"
     fi
 }
 
@@ -90,33 +94,56 @@ push_local() {
 
 # ── Status ────────────────────────────────────────────────────────────────────
 show_status() {
+    local pct_cmd="pct exec ${LXC_MCP} -- bash -c 'for s in ${SERVERS[*]}; do printf \"%-20s \" \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done'"
     if [[ "$MODE" == "local" ]]; then
         banner "Server status (via SSH)"
         ssh "$MCP_SSH" "for s in ${SERVERS[*]}; do printf '%-20s ' \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done"
+    elif [[ "$MODE" == "tunnel" ]]; then
+        banner "Server status (via tunnel)"
+        ssh "$TUNNEL_SSH" "$pct_cmd"
     else
         echo ""
         echo -e "${BOLD}Paste into Proxmox console (root@pve):${RESET}"
         echo ""
-        echo "pct exec ${LXC_MCP} -- bash -c 'for s in ${SERVERS[*]}; do printf \"%-20s \" \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done'"
+        echo "$pct_cmd"
     fi
 }
 
 # ── Local mode: SSH everything ────────────────────────────────────────────────
+# Build restart+status command string (shared by local and tunnel modes)
+_build_run_cmd() {
+    local cmds="export PATH=/root/.local/bin:/home/mcp/.local/bin:\$PATH && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all"
+    for server in "${SERVERS[@]}"; do
+        cmds+=" && systemctl restart mcp-server@${server}"
+    done
+    cmds+=" && sleep 4"  # give services time to reach 'active' state
+    for server in "${SERVERS[@]}"; do
+        cmds+=" && echo '--- ${server} ---' && systemctl is-active mcp-server@${server} 2>&1"
+    done
+    echo "$cmds"
+}
+
 deploy_local() {
-    local restart_cmds=""
-    for server in "${SERVERS[@]}"; do
-        restart_cmds+="systemctl restart mcp-server@${server} && "
-    done
-    restart_cmds="${restart_cmds% && } ; "
-    for server in "${SERVERS[@]}"; do
-        restart_cmds+="echo '--- ${server} ---' && systemctl status mcp-server@${server} --no-pager -l 2>&1 | head -5 ; "
-    done
+    local run_cmd; run_cmd="$(_build_run_cmd)"
 
     banner "Deploying to LXC ${LXC_MCP} via SSH"
-    ssh "$MCP_SSH" "export PATH=\"/root/.local/bin:/home/mcp/.local/bin:\$PATH\" && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all && ${restart_cmds}"
+    ssh "$MCP_SSH" "$run_cmd"
 
     banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
     ssh "$BACKEND_SSH" "curl -sk -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" | python3 -m json.tool 2>/dev/null || true
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
+}
+
+deploy_tunnel() {
+    local run_cmd; run_cmd="$(_build_run_cmd)"
+
+    banner "Deploying to LXC ${LXC_MCP} via Cloudflare tunnel"
+    ssh "$TUNNEL_SSH" "pct exec ${LXC_MCP} -- bash -c \"$run_cmd\""
+
+    banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
+    ssh "$TUNNEL_SSH" "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'" | python3 -m json.tool 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
@@ -171,6 +198,8 @@ fi
 
 if [[ "$MODE" == "local" ]]; then
     deploy_local
+elif [[ "$MODE" == "tunnel" ]]; then
+    deploy_tunnel
 else
     deploy_remote
 fi

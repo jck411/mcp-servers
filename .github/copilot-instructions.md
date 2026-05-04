@@ -75,22 +75,18 @@ When the user asks to add/port a server, execute every step below without asking
 
 ### 6. Deploy to LXC
 
-Use the deploy script (handles SSH detection, fallback to PVE console commands, and backend refresh):
+Just run the deploy script — it auto-detects connectivity in order: direct SSH → Cloudflare tunnel → prints manual commands:
 ```
 ./deploy/deploy.sh <name>
 ```
 
-If direct SSH to 192.168.1.110 is unavailable (common), the script prints `pct exec` commands to paste into the Proxmox host console. Alternatively, deploy manually via PVE:
-```
-sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11 "pct exec 110 -- bash -c 'cd /opt/mcp-servers && git pull --ff-only && uv sync --extra all'"
-sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11 "pct exec 110 -- bash /opt/mcp-servers/deploy/setup-systemd.sh <name>"
-```
+The script tries `ssh proxmox-tunnel` (Cloudflare) automatically if direct SSH fails, so it works from anywhere without manual steps. Only falls back to printing `pct exec` commands if both SSH paths are unreachable.
 
-If the server needs credential files (e.g., Google OAuth), copy via the PVE host:
+If the server needs credential files (e.g., Google OAuth), copy via the tunnel:
 ```
-sshpass -p "$PROXMOX_PASSWORD" scp <local_cred_files> root@192.168.1.11:/tmp/
-sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11 "pct push 110 /tmp/<file> /opt/mcp-servers/credentials/<file>"
-sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11 "pct exec 110 -- chown -R mcp:mcp /opt/mcp-servers/credentials/ /opt/mcp-servers/data/"
+ssh proxmox-tunnel 'pct exec 110 -- bash -c "mkdir -p /opt/mcp-servers/credentials"'
+scp <local_cred_file> proxmox-tunnel:/tmp/
+ssh proxmox-tunnel 'pct push 110 /tmp/<file> /opt/mcp-servers/credentials/<file> && pct exec 110 -- chown -R mcp:mcp /opt/mcp-servers/credentials/ /opt/mcp-servers/data/'
 ```
 
 ### 7. Confirm done
@@ -124,10 +120,11 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | hue | 9015 |
 | web_search | 9016 |
 | knowledge | 9017 |
+| knowledge_api | 9018 |
 
 Retired ports — do not reuse: 9002, 9012
 
-Next available: 9018
+Next available: 9019
 
 ## Credential Sources
 
@@ -147,8 +144,8 @@ Next available: 9018
 ## Deployment Target
 
 - LXC CT 110 at 192.168.1.110, repo at `/opt/mcp-servers`
-- **Direct SSH to 192.168.1.110 does NOT work** — always go via PVE host (192.168.1.11) using `pct exec 110 -- bash -c '...'`
-- SSH to PVE host: `sshpass -p "$PROXMOX_PASSWORD" ssh root@192.168.1.11`
+- **Direct SSH to 192.168.1.110 does NOT work** — use `ssh proxmox-tunnel` (Cloudflare) to reach PVE host, then `pct exec 110 -- bash -c '...'`
+- `deploy.sh` auto-detects: tries direct SSH first, then `proxmox-tunnel`, then prints manual commands
 - Service user: `mcp` — all runtime files owned by `mcp:mcp`
 - Package manager: `uv` — never pip
 - Systemd template: `mcp-server@.service`
