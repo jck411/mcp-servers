@@ -2075,13 +2075,8 @@ async def extract_source_facts_single_shot(
         b64 = _b64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{image_media_type};base64,{b64}"
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
-        _json_reminder = (
-            "\n\nIMPORTANT: Respond with ONLY a JSON object. "
-            'Format: {"facts": {"key": "value"}, "caption": null} — '
-            "No markdown, no explanations, no code fences."
-        )
         user_content = [
-            {"type": "text", "text": f"Extract all information from this document.{hint_text}{_json_reminder}"},
+            {"type": "text", "text": f"Extract all information from this document.{hint_text}"},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]
     else:
@@ -2094,42 +2089,27 @@ async def extract_source_facts_single_shot(
             "note": f"{len(chunks)} chunks, {len(text_body)} chars total",
         })
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
-        _json_reminder = (
-            "\n\nIMPORTANT: Respond with ONLY a JSON object. "
-            'Format: {"facts": {"key": "value"}, "caption": null} — '
-            "No markdown, no explanations, no code fences."
-        )
         user_content = (
-            f"Extract all information from this document.{hint_text}{_json_reminder}"
-            f"\n\n---\n\n{text_body}"
+            f"Extract all information from this document.{hint_text}\n\n---\n\n{text_body}"
         )
 
     # --- Step 2: call extraction model ---
-    user_msg: dict[str, Any] = {
-        "role": "user",
-        "content": (
-            user_content if isinstance(user_content, list)
-            else [{"type": "text", "text": user_content}]
-        ),
-    }
-    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
-    # For Claude: add an assistant prefill of '{"facts":' to force JSON output.
-    # The model must continue from this prefix — it cannot produce markdown.
-    # We prepend that prefix back when parsing the response.
-    PREFILL = '{"facts":'
-    messages: list[dict[str, Any]] = [user_msg]
-    if is_claude:
-        messages.append({"role": "assistant", "content": PREFILL})
-
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
-        "messages": messages,
+        "messages": [{
+            "role": "user",
+            "content": (
+                user_content if isinstance(user_content, list)
+                else [{"type": "text", "text": user_content}]
+            ),
+        }],
         "temperature": 0,
         "max_tokens": 4096,
     }
 
     # Anthropic prompt caching: wrap system prompt in a content block with
     # cache_control so repeated calls within 5 min read from cache at 90% discount.
+    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
     if is_claude:
         payload["system"] = [{
             "type": "text",
@@ -2163,10 +2143,6 @@ async def extract_source_facts_single_shot(
             r.raise_for_status()
             data = r.json()
             raw_output = (data["choices"][0]["message"]["content"] or "").strip()
-            # When assistant prefill was used, the API returns only the completion
-            # (everything after the prefill). Prepend the prefill so we have valid JSON.
-            if is_claude and not raw_output.startswith("{"):
-                raw_output = PREFILL + raw_output
             usage = data.get("usage") or {}
             llm_step["tokens_in"] = usage.get("prompt_tokens", 0)
             llm_step["tokens_out"] = usage.get("completion_tokens", 0)
@@ -2184,30 +2160,37 @@ async def extract_source_facts_single_shot(
 
     # --- Step 3: parse JSON ---
     clean = raw_output.strip()
-    # Strip markdown code fences (```json ... ```)
     if clean.startswith("```"):
-        clean = re.sub(r"^```[a-z]*\n?", "", clean)
+        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
         clean = re.sub(r"\n?```$", "", clean.rstrip())
-    # If still no leading `{`, find first JSON object in prose/markdown
     if not clean.startswith("{"):
-        m = re.search(r"\{[\s\S]*\}", clean)
-        if m:
-            clean = m.group(0)
+        match = re.search(r"\{[\s\S]*\}", clean)
+        if match:
+            clean = match.group(0)
     parse_step: dict[str, Any] = {"step": "parse_json", "model": None}
     try:
-        # raw_decode reads the first complete JSON value, ignoring trailing data
         extracted, _ = json.JSONDecoder().raw_decode(clean)
-        # Model may return {"facts": {...}, "caption": ...} OR a flat {key: val, ...} dict.
+        if not isinstance(extracted, dict):
+            raise ValueError("JSON root must be an object")
+
+        raw_caption = extracted.get("caption")
+        caption: str | None = str(raw_caption) if raw_caption not in (None, "") else None
         if "facts" in extracted:
-            facts: dict[str, str] = extracted.get("facts") or {}
-            caption: str | None = extracted.get("caption") or None
+            raw_facts = extracted.get("facts") or {}
+            if not isinstance(raw_facts, dict):
+                raise ValueError("'facts' must be an object")
+            facts: dict[str, str] = {
+                str(k): str(v) for k, v in raw_facts.items()
+                if v is not None and v != ""
+            }
         else:
-            # Flat dict — treat everything except "caption" as facts
-            caption = extracted.pop("caption", None) or None
-            facts = {k: str(v) for k, v in extracted.items() if v is not None and v != ""}
+            facts = {
+                str(k): str(v) for k, v in extracted.items()
+                if k != "caption" and v is not None and v != ""
+            }
         parse_step["status"] = "ok"
         parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}"
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         parse_step["status"] = "failed"
         parse_step["note"] = f"JSON parse error: {exc} | raw[:200]: {raw_output[:200]}"
         pipeline.append(parse_step)
