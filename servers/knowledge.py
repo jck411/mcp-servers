@@ -2102,20 +2102,47 @@ async def extract_source_facts_single_shot(
             else [{"type": "text", "text": user_content}]
         ),
     }]
-    # Assistant prefill: forces Claude to start its response with `{`, making
-    # markdown output structurally impossible. Officially supported by OpenRouter.
-    # For non-Claude models we rely on response_format + response-healing instead.
-    if is_claude:
-        messages.append({"role": "assistant", "content": "{"})
+
+    # Forced tool use: the model MUST call store_extracted_facts, so it returns
+    # structured JSON regardless of whether it would otherwise output markdown.
+    # This is the only reliable way to get structured output from Claude via OpenRouter.
+    _extract_tool: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": "store_extracted_facts",
+            "description": "Store all facts extracted from the document",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "facts": {
+                        "type": "object",
+                        "description": (
+                            "All extracted key-value pairs using stable snake_case keys "
+                            "with meaningful prefixes (e.g. w2_2025_box1_wages). "
+                            "Dates in ISO format YYYY-MM-DD. Currency as numbers only."
+                        ),
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "caption": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "2-3 sentence description for photos/images with no document "
+                            "structure. null for documents."
+                        ),
+                    },
+                },
+                "required": ["facts", "caption"],
+            },
+        },
+    }
 
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
         "messages": messages,
         "temperature": 0,
         "max_tokens": 4096,
-        "response_format": {"type": "json_object"},
-        # Response Healing: fixes any remaining markdown/syntax issues before we parse.
-        "plugins": [{"id": "response-healing"}],
+        "tools": [_extract_tool],
+        "tool_choice": {"type": "function", "function": {"name": "store_extracted_facts"}},
     }
 
     # Anthropic prompt caching: wrap system prompt in a content block with
@@ -2152,19 +2179,22 @@ async def extract_source_facts_single_shot(
             )
             r.raise_for_status()
             data = r.json()
-            raw_output = (data["choices"][0]["message"]["content"] or "").strip()
-            # When assistant prefill `{` is used, OpenRouter may return only the
-            # completion (the part after `{`). Prepend `{` if needed so we always
-            # have a valid JSON start.
-            if is_claude and not raw_output.startswith("{"):
-                raw_output = "{" + raw_output
+            msg = data["choices"][0]["message"]
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                # Forced tool call — arguments are already structured JSON
+                raw_output = tool_calls[0]["function"]["arguments"]
+            else:
+                # Fallback: model returned text content instead of a tool call
+                raw_output = (msg.get("content") or "").strip()
             usage = data.get("usage") or {}
             llm_step["tokens_in"] = usage.get("prompt_tokens", 0)
             llm_step["tokens_out"] = usage.get("completion_tokens", 0)
             llm_step["cache_read_tokens"] = usage.get("cache_read_input_tokens", 0)
             llm_step["status"] = "ok"
+            output_type = "tool_call" if tool_calls else "text"
             llm_step["note"] = (
-                f"{len(raw_output)} chars output"
+                f"{output_type}, {len(raw_output)} chars"
                 + (f", {llm_step['cache_read_tokens']} cached tokens" if llm_step["cache_read_tokens"] else "")
             )
     except Exception as exc:  # noqa: BLE001
