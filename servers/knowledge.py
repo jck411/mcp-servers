@@ -2105,6 +2105,8 @@ async def extract_source_facts_single_shot(
         }],
         "temperature": 0,
         "max_tokens": 4096,
+        # Force JSON-only output (supported by Claude and GPT-4o via OpenRouter)
+        "response_format": {"type": "json_object"},
     }
 
     # Anthropic prompt caching: wrap system prompt in a content block with
@@ -2160,9 +2162,15 @@ async def extract_source_facts_single_shot(
 
     # --- Step 3: parse JSON ---
     clean = raw_output.strip()
+    # Strip markdown code fences (```json ... ```)
     if clean.startswith("```"):
         clean = re.sub(r"^```[a-z]*\n?", "", clean)
         clean = re.sub(r"\n?```$", "", clean.rstrip())
+    # Fallback: if response is markdown prose, find the first {...} JSON object
+    if not clean.startswith("{"):
+        m = re.search(r"\{[\s\S]*\}", clean)
+        if m:
+            clean = m.group(0)
     parse_step: dict[str, Any] = {"step": "parse_json", "model": None}
     try:
         extracted = json.loads(clean)

@@ -441,7 +441,12 @@
           btn.after(cap);
         }
       } else {
-        const errMsg = j.error || (j.detail && (j.detail.error || JSON.stringify(j.detail))) || "extraction failed";
+        // j.detail may be a string (route-level 404) or an object (app-level error)
+        const detail = j.detail;
+        const errMsg = j.error
+          || (detail && typeof detail === "object" && (detail.error || detail.message))
+          || (typeof detail === "string" ? detail : null)
+          || "extraction failed";
         btn.textContent = `✗ ${errMsg}`;
         btn.style.color = "var(--err)";
         btn.style.borderColor = "var(--err)";
