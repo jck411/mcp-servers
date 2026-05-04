@@ -2198,7 +2198,14 @@ async def extract_source_facts_single_shot(
                 + (f", {llm_step['cache_read_tokens']} cached tokens" if llm_step["cache_read_tokens"] else "")
             )
     except Exception as exc:  # noqa: BLE001
-        llm_step["note"] = str(exc)
+        # Capture response body for HTTP errors to expose the provider's error message
+        body = ""
+        if hasattr(exc, "response") and exc.response is not None:  # type: ignore[union-attr]
+            try:
+                body = exc.response.text[:500]  # type: ignore[union-attr]
+            except Exception:
+                pass
+        llm_step["note"] = f"{exc}" + (f" | body: {body}" if body else "")
         pipeline.append(llm_step)
         return {"success": False, "error": f"LLM call failed: {exc}", "pipeline": pipeline}
     pipeline.append(llm_step)
