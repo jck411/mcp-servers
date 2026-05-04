@@ -2094,27 +2094,8 @@ async def extract_source_facts_single_shot(
         )
 
     # --- Step 2: call extraction model ---
-    # json_schema structured output — enforces the exact response shape at the API level.
+    # json_object forces valid JSON output. The system prompt defines the exact structure.
     # Response Healing plugin fixes any remaining markdown/syntax issues before we parse.
-    _extraction_schema = {
-        "type": "object",
-        "properties": {
-            "facts": {
-                "type": "object",
-                "description": "Extracted key-value pairs. Keys are snake_case, values are strings.",
-                "additionalProperties": {"type": "string"},
-            },
-            "caption": {
-                "type": ["string", "null"],
-                "description": (
-                    "2-3 sentence description for photos/images with no document structure. "
-                    "Null for documents."
-                ),
-            },
-        },
-        "required": ["facts", "caption"],
-        "additionalProperties": False,
-    }
     is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
@@ -2127,13 +2108,7 @@ async def extract_source_facts_single_shot(
         }],
         "temperature": 0,
         "max_tokens": 4096,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "document_extraction",
-                "schema": _extraction_schema,
-            },
-        },
+        "response_format": {"type": "json_object"},
         # Response Healing: fixes markdown wrappers, mixed text+JSON, syntax errors
         "plugins": [{"id": "response-healing"}],
     }
