@@ -253,81 +253,11 @@ Missing `knowledge` from this list causes `OSError: [Errno 30] Read-only file sy
 
 ## Deployment
 
-### How `deploy.sh` works
-
-`./deploy/deploy.sh [--no-push] [server …]` auto-detects which path to use:
-
-1. **Local** — tries `ssh root@192.168.1.110` (3 s timeout). Succeeds when on the home LAN.
-2. **Tunnel** — tries `ssh proxmox-tunnel` (Cloudflare tunnel, 8 s timeout). Works from anywhere with internet.
-3. **Remote/console** — both SSH paths unreachable; prints `pct exec` commands to paste into the Proxmox web console manually.
-
-### Deploying from home (local LAN)
-
-You are talking directly to LXC 110 at `192.168.1.110`. This is the fastest path.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for how to deploy this (and any other server) from home, remotely via tunnel, or via the Proxmox console.
 
 ```bash
-# Deploy one server
-./deploy/deploy.sh knowledge_api
-
-# Deploy multiple
-./deploy/deploy.sh knowledge knowledge_api
-
-# Skip the git commit/push step (code already pushed)
-./deploy/deploy.sh --no-push knowledge_api
-
-# Force local mode explicitly
-./deploy/deploy.sh --local knowledge_api
-```
-
-What it does:
-1. Commits any uncommitted local changes and `git push origin master`
-2. `ssh root@192.168.1.110` → `git pull` + `uv sync --extra all`
-3. Writes `.env.<server>` port file, kills any orphan on that port (`fuser -k`)
-4. `systemctl restart mcp-server@<server>`, polls until active
-5. Hits LXC 111 to refresh backend discovery
-
-### Deploying from remote (away from home)
-
-The `ssh proxmox-tunnel` alias must be configured in `~/.ssh/config` (Cloudflare Access tunnel). Same commands, no extra flags needed — auto-detect picks the tunnel automatically.
-
-```bash
-./deploy/deploy.sh knowledge_api
-```
-
-Internally it runs: `ssh proxmox-tunnel 'pct exec 110 -- bash -c "…"'`
-
-### When both SSH paths fail (Proxmox console)
-
-```bash
-./deploy/deploy.sh --remote knowledge_api
-```
-
-Prints the three `pct exec` commands to paste into the Proxmox web console at `https://proxmox.jackshome.com`.
-
-### Check service status
-
-```bash
-./deploy/deploy.sh --status
-# or for a specific server:
-./deploy/deploy.sh --status knowledge_api
-```
-
-### Deploy the systemd unit file itself
-
-The service template (`deploy/mcp-server@.service`) is **not** deployed by `deploy.sh` — you must copy it manually after changing it:
-
-```bash
-# From home (local)
-ssh root@192.168.1.110 'cd /opt/mcp-servers && git pull && \
-  cp deploy/mcp-server@.service /etc/systemd/system/ && \
-  systemctl daemon-reload && systemctl restart mcp-server@knowledge_api'
-
-# From remote (tunnel)
-ssh proxmox-tunnel 'pct exec 110 -- bash -c "
-  cd /opt/mcp-servers && git pull &&
-  cp deploy/mcp-server@.service /etc/systemd/system/ &&
-  systemctl daemon-reload && systemctl restart mcp-server@knowledge_api
-"'
+./deploy/deploy.sh knowledge_api          # auto-detects local vs tunnel
+./deploy/deploy.sh --no-push knowledge_api  # skip git push
 ```
 
 ---
