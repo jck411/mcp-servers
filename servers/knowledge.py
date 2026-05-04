@@ -141,7 +141,7 @@ class KnowledgeSettings(BaseSettings):
     # Model for single-shot fact extraction via POST /api/sources/{id}/extract.
     # Must be a vision-capable model; Sonnet gives best accuracy on documents.
     extraction_model: str = Field(
-        default="anthropic/claude-sonnet-4-5",
+        default="anthropic/claude-sonnet-4-6",
         validation_alias="KNOWLEDGE_EXTRACTION_MODEL",
     )
 
@@ -2094,6 +2094,28 @@ async def extract_source_facts_single_shot(
         )
 
     # --- Step 2: call extraction model ---
+    # json_schema structured output — enforces the exact response shape at the API level.
+    # Response Healing plugin fixes any remaining markdown/syntax issues before we parse.
+    _extraction_schema = {
+        "type": "object",
+        "properties": {
+            "facts": {
+                "type": "object",
+                "description": "Extracted key-value pairs. Keys are snake_case, values are strings.",
+                "additionalProperties": {"type": "string"},
+            },
+            "caption": {
+                "type": ["string", "null"],
+                "description": (
+                    "2-3 sentence description for photos/images with no document structure. "
+                    "Null for documents."
+                ),
+            },
+        },
+        "required": ["facts", "caption"],
+        "additionalProperties": False,
+    }
+    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
         "messages": [{
@@ -2105,11 +2127,19 @@ async def extract_source_facts_single_shot(
         }],
         "temperature": 0,
         "max_tokens": 4096,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "document_extraction",
+                "schema": _extraction_schema,
+            },
+        },
+        # Response Healing: fixes markdown wrappers, mixed text+JSON, syntax errors
+        "plugins": [{"id": "response-healing"}],
     }
 
     # Anthropic prompt caching: wrap system prompt in a content block with
     # cache_control so repeated calls within 5 min read from cache at 90% discount.
-    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
     if is_claude:
         payload["system"] = [{
             "type": "text",
