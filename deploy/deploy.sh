@@ -21,6 +21,16 @@ TUNNEL_SSH="proxmox-tunnel"  # Cloudflare tunnel alias (works from anywhere)
 MCP_REPO="/opt/mcp-servers"
 BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
+# Port map — must stay in sync with deploy/setup-systemd.sh
+declare -A PORT_MAP=(
+    [shell_control]=9001   [calculator]=9003  [calendar]=9004
+    [gmail]=9005           [gdrive]=9006      [pdf]=9007
+    [monarch]=9008         [notes]=9009       [spotify]=9010
+    [playwright]=9011      [tv]=9013          [rag]=9014
+    [hue]=9015             [web_search]=9016  [knowledge]=9017
+    [knowledge_api]=9018
+)
+
 ALL_SERVERS=(
     calculator shell_control playwright spotify
     gdrive gmail calendar notes pdf monarch tv rag hue web_search knowledge knowledge_api
@@ -113,6 +123,13 @@ show_status() {
 # Build restart+status command string (shared by local and tunnel modes)
 _build_run_cmd() {
     local cmds="export PATH=/root/.local/bin:/home/mcp/.local/bin:\$PATH && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all"
+    # Ensure per-server env files (port) exist before restarting
+    for server in "${SERVERS[@]}"; do
+        local port="${PORT_MAP[$server]:-}"
+        if [[ -n "$port" ]]; then
+            cmds+=" && echo MCP_PORT=${port} > ${MCP_REPO}/.env.${server}"
+        fi
+    done
     for server in "${SERVERS[@]}"; do
         cmds+=" && systemctl restart mcp-server@${server}"
     done
