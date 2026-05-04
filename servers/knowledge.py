@@ -2094,24 +2094,31 @@ async def extract_source_facts_single_shot(
         )
 
     # --- Step 2: call extraction model ---
+    user_msg: dict[str, Any] = {
+        "role": "user",
+        "content": (
+            user_content if isinstance(user_content, list)
+            else [{"type": "text", "text": user_content}]
+        ),
+    }
+    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
+    # For Claude: add an assistant prefill of '{"facts":' to force JSON output.
+    # The model must continue from this prefix — it cannot produce markdown.
+    # We prepend that prefix back when parsing the response.
+    PREFILL = '{"facts":'
+    messages: list[dict[str, Any]] = [user_msg]
+    if is_claude:
+        messages.append({"role": "assistant", "content": PREFILL})
+
     payload: dict[str, Any] = {
         "model": settings.extraction_model,
-        "messages": [{
-            "role": "user",
-            "content": (
-                user_content if isinstance(user_content, list)
-                else [{"type": "text", "text": user_content}]
-            ),
-        }],
+        "messages": messages,
         "temperature": 0,
         "max_tokens": 4096,
-        # Force JSON-only output (supported by Claude and GPT-4o via OpenRouter)
-        "response_format": {"type": "json_object"},
     }
 
     # Anthropic prompt caching: wrap system prompt in a content block with
     # cache_control so repeated calls within 5 min read from cache at 90% discount.
-    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
     if is_claude:
         payload["system"] = [{
             "type": "text",
@@ -2145,6 +2152,10 @@ async def extract_source_facts_single_shot(
             r.raise_for_status()
             data = r.json()
             raw_output = (data["choices"][0]["message"]["content"] or "").strip()
+            # When assistant prefill was used, the API returns only the completion
+            # (everything after the prefill). Prepend the prefill so we have valid JSON.
+            if is_claude and not raw_output.startswith("{"):
+                raw_output = PREFILL + raw_output
             usage = data.get("usage") or {}
             llm_step["tokens_in"] = usage.get("prompt_tokens", 0)
             llm_step["tokens_out"] = usage.get("completion_tokens", 0)
