@@ -96,6 +96,11 @@
   .step-body strong { color: var(--text); }
   .step-model { color: var(--muted); font-size: 11px; font-style: italic; }
   .step-tokens { color: var(--muted); font-size: 11px; }
+  .step-mode-badge {
+    display: inline-block; border: 1px solid; border-radius: 3px;
+    padding: 0 4px; font-size: 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    vertical-align: baseline; margin-right: 4px; letter-spacing: 0.02em; opacity: 0.85;
+  }
 
   /* Extract Facts button */
   button.extract { background: var(--panel); border: 1px solid var(--border);
@@ -248,6 +253,32 @@
   }
 
   // ---------- pipeline log renderer ----------
+  const STEP_MODE_LABELS = {
+    pdftotext:         { label: "native-pdf",  color: "var(--ok)" },
+    rasterize:         { label: "rasterize",   color: "var(--info)" },
+    vision_ocr:        { label: "vision-LLM",  color: "var(--accent)" },
+    tesseract:         { label: "tesseract",   color: "var(--warn)" },
+    image_description: { label: "vision-LLM",  color: "var(--accent)" },
+    text_read:         { label: "plain-text",  color: "var(--ok)" },
+    chunking:          { label: "chunker",     color: "var(--muted)" },
+    confidence_check:  { label: "check",       color: "var(--warn)" },
+    extraction_llm:    { label: "LLM",         color: "var(--accent)" },
+    classify:          { label: "classify",    color: "var(--muted)" },
+  };
+
+  function ocrSummaryFrom(pipeline) {
+    if (!pipeline || !pipeline.length) return "";
+    const imageDesc = pipeline.find((s) => s.step === "image_description" && s.status === "ok");
+    if (imageDesc) return `vision-LLM · ${imageDesc.model || "unknown"}`;
+    const nativePdf = pipeline.find((s) => s.step === "pdftotext" && s.status === "ok" && (s.note || "").includes("native"));
+    if (nativePdf) return "native-PDF";
+    const vision = pipeline.find((s) => s.step === "vision_ocr" && s.status === "ok");
+    if (vision) return `vision-LLM · ${vision.model || "unknown"}`;
+    const tess = pipeline.find((s) => s.step === "tesseract" && s.status === "ok");
+    if (tess) return "tesseract (fallback)";
+    return "";
+  }
+
   const STEP_ICONS = {
     ok: "✓", failed: "✗", skipped: "·", warn: "⚠", running: "…",
   };
@@ -261,6 +292,10 @@
     const rows = steps.map((s) => {
       const icon = STEP_ICONS[s.status] || "?";
       const color = STEP_COLORS[s.status] || "var(--muted)";
+      const mode = STEP_MODE_LABELS[s.step];
+      const modePart = mode
+        ? `<span class="step-mode-badge" style="color:${mode.color};border-color:${mode.color}">${mode.label}</span> `
+        : "";
       const modelPart = s.model ? `<span class="step-model">${escapeHtml(s.model)}</span> ` : "";
       const tokenPart = (s.tokens_in || s.tokens_out)
         ? `<span class="step-tokens"> · ${s.tokens_in}in/${s.tokens_out}out tok${s.cache_read_tokens ? ` · ${s.cache_read_tokens} cached` : ""}</span>`
@@ -268,7 +303,7 @@
       const pagePart = s.page ? `<span class="step-tokens"> [${escapeHtml(s.page)}]</span>` : "";
       return `<div class="pipeline-step">
         <span class="step-icon" style="color:${color}">${icon}</span>
-        <span class="step-body">${modelPart}<strong>${escapeHtml(s.step)}</strong>${pagePart} — ${escapeHtml(s.note || "")}${tokenPart}</span>
+        <span class="step-body">${modePart}${modelPart}<strong>${escapeHtml(s.step)}</strong>${pagePart} — ${escapeHtml(s.note || "")}${tokenPart}</span>
       </div>`;
     }).join("");
     return `<div class="pipeline-log">${rows}</div>`;
@@ -315,6 +350,7 @@
     const ptype = json.pipeline_type || "";
     const chunks = json.chunks_stored || 0;
     const canExtract = !!sid;
+    const ocrMethod = ocrSummaryFrom(json.pipeline || []);
 
     const div = document.createElement("div");
     div.className = "result " + classified.kind;
@@ -330,7 +366,7 @@
         </div>
         <div class="meta">${escapeHtml(classified.msg)}</div>
         ${sid ? `<div class="meta">source_id: <code>${escapeHtml(sid)}</code>${path ? ` · ${escapeHtml(path)}` : ""}</div>` : ""}
-        ${ptype ? `<div class="meta" style="color:var(--muted);font-size:11px;">pipeline: ${escapeHtml(ptype)}</div>` : ""}
+        ${ptype ? `<div class="meta" style="color:var(--muted);font-size:11px;">pipeline: ${escapeHtml(ptype)}${ocrMethod ? ` · <span style="color:var(--text)">ocr: ${escapeHtml(ocrMethod)}</span>` : ""}</div>` : ""}
         ${hasPipeline ? `<button class="pipeline-toggle">▶ show pipeline log (${(json.pipeline||[]).length} steps)</button>` : ""}
         ${pipelineHtml}
         <div class="card-actions">
