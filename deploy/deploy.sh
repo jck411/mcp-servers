@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# deploy.sh — Deploy MCP servers: auto via SSH or print Proxmox console commands
+# deploy.sh — Deploy MCP servers to LXC CT 110 via Proxmox (auto-detects home vs remote)
+#
+# Both local (LAN) and tunnel (remote) modes go through the PVE host using
+# `pct exec` so the execution path is identical regardless of location.
 #
 # Usage:
-#   ./deploy/deploy.sh                      # Deploy all servers (auto-detect SSH)
+#   ./deploy/deploy.sh                      # Deploy all servers (auto-detect)
 #   ./deploy/deploy.sh calendar             # Deploy specific server(s)
 #   ./deploy/deploy.sh calendar spotify     # Deploy multiple
-#   ./deploy/deploy.sh --remote calendar    # Force Proxmox console mode
-#   ./deploy/deploy.sh --local calendar     # Force SSH mode
+#   ./deploy/deploy.sh --local calendar     # Force home LAN mode (ssh root@192.168.1.11)
+#   ./deploy/deploy.sh --tunnel calendar    # Force Cloudflare tunnel mode
+#   ./deploy/deploy.sh --remote calendar    # No SSH — print pct exec commands to paste
 #   ./deploy/deploy.sh --status             # Show server status
 #   ./deploy/deploy.sh --no-push calendar   # Skip git commit/push
 
@@ -15,9 +19,8 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 LXC_MCP=110
 LXC_BACKEND=111
-MCP_SSH="root@192.168.1.110"
-BACKEND_SSH="root@192.168.1.111"
-TUNNEL_SSH="proxmox-tunnel"  # Cloudflare tunnel alias (works from anywhere)
+PVE_SSH="root@192.168.1.11"    # Proxmox host — reachable on home LAN
+TUNNEL_SSH="proxmox-tunnel"    # Cloudflare tunnel alias — reachable from anywhere
 MCP_REPO="/opt/mcp-servers"
 BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
@@ -44,12 +47,13 @@ SERVERS=()
 
 for arg in "$@"; do
     case "$arg" in
-        --remote)  MODE="remote" ;;
         --local)   MODE="local" ;;
+        --tunnel)  MODE="tunnel" ;;
+        --remote)  MODE="remote" ;;
         --status)  SHOW_STATUS=1 ;;
         --no-push) SKIP_PUSH=1 ;;
         --help|-h)
-            head -12 "$0" | tail -10
+            head -18 "$0" | tail -16
             exit 0
             ;;
         *)         SERVERS+=("$arg") ;;
@@ -71,12 +75,30 @@ RESET='\033[0m'
 banner() { echo -e "\n${BOLD}${CYAN}=== $1 ===${RESET}"; }
 info()   { echo -e "${DIM}$1${RESET}"; }
 
+# Run a command inside CT 110 via pct exec on the given PVE SSH host.
+# Both local and tunnel use this — only the SSH host differs.
+_pct_exec() {
+    local host="$1" cmd="$2"
+    local quoted; printf -v quoted '%q' "$cmd"
+    ssh "$host" "pct exec ${LXC_MCP} -- bash -c ${quoted}"
+}
+
+# Run a command inside CT 111 (backend) via pct exec.
+_pct_exec_backend() {
+    local host="$1" cmd="$2"
+    local quoted; printf -v quoted '%q' "$cmd"
+    ssh "$host" "pct exec ${LXC_BACKEND} -- bash -c ${quoted}"
+}
+
+# ── Auto-detect ───────────────────────────────────────────────────────────────
 detect_mode() {
     [[ -n "$MODE" ]] && return
     banner "Detecting connectivity"
-    if ssh -o ConnectTimeout=3 -o BatchMode=yes "$MCP_SSH" "true" &>/dev/null; then
+    # Try PVE host directly on home LAN (fast, 3s timeout)
+    if ssh -o ConnectTimeout=3 -o BatchMode=yes "$PVE_SSH" "true" &>/dev/null; then
         MODE="local"
-        info "  Direct SSH reachable → local deploy"
+        info "  PVE reachable at ${PVE_SSH} → local deploy"
+    # Try Cloudflare tunnel (works from anywhere with internet)
     elif ssh -o ConnectTimeout=8 -o BatchMode=yes "$TUNNEL_SSH" "true" &>/dev/null 2>&1; then
         MODE="tunnel"
         info "  Cloudflare tunnel reachable → tunnel deploy"
@@ -104,13 +126,15 @@ push_local() {
 
 # ── Status ────────────────────────────────────────────────────────────────────
 show_status() {
+    local status_cmd="for s in ${SERVERS[*]}; do printf '%-20s ' \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done"
     local pct_cmd="pct exec ${LXC_MCP} -- bash -c 'for s in ${SERVERS[*]}; do printf \"%-20s \" \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done'"
+
     if [[ "$MODE" == "local" ]]; then
-        banner "Server status (via SSH)"
-        ssh "$MCP_SSH" "for s in ${SERVERS[*]}; do printf '%-20s ' \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done"
+        banner "Server status (via PVE ${PVE_SSH} → CT ${LXC_MCP})"
+        _pct_exec "$PVE_SSH" "$status_cmd"
     elif [[ "$MODE" == "tunnel" ]]; then
-        banner "Server status (via tunnel)"
-        ssh "$TUNNEL_SSH" "$pct_cmd"
+        banner "Server status (via tunnel → CT ${LXC_MCP})"
+        _pct_exec "$TUNNEL_SSH" "$status_cmd"
     else
         echo ""
         echo -e "${BOLD}Paste into Proxmox console (root@pve):${RESET}"
@@ -119,59 +143,53 @@ show_status() {
     fi
 }
 
-# ── Local mode: SSH everything ────────────────────────────────────────────────
-# Build restart+status command string (shared by local and tunnel modes)
+# ── Build the remote command string ──────────────────────────────────────────
 _build_run_cmd() {
     local cmds="export PATH=/root/.local/bin:/home/mcp/.local/bin:\$PATH && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all"
-    # Ensure per-server env files (port) exist before restarting
+
+    # Write per-server port env files
     for server in "${SERVERS[@]}"; do
         local port="${PORT_MAP[$server]:-}"
         if [[ -n "$port" ]]; then
             cmds+=" && echo MCP_PORT=${port} > ${MCP_REPO}/.env.${server}"
         fi
     done
-    # Kill any orphan process holding the port BEFORE restarting the service
+
+    # Kill any orphan process holding the port before restarting
     for server in "${SERVERS[@]}"; do
         local port="${PORT_MAP[$server]:-}"
         if [[ -n "$port" ]]; then
             cmds+=" && if command -v fuser >/dev/null 2>&1; then fuser -k ${port}/tcp 2>/dev/null || true; else pids=\$(ss -ltnp 'sport = :${port}' 2>/dev/null | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p'); [ -z \"\$pids\" ] || kill \$pids 2>/dev/null || true; fi"
         fi
     done
+
+    # Restart services
     for server in "${SERVERS[@]}"; do
         cmds+=" && systemctl restart mcp-server@${server}"
     done
-    # Poll each service up to 20s for it to leave 'activating' state
+
+    # Poll each service up to 20s for it to become active
     for server in "${SERVERS[@]}"; do
         cmds+=" && echo '--- ${server} ---'"
         cmds+=" && for _poll in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do state=\$(systemctl is-active mcp-server@${server} 2>/dev/null || true); [ \"\$state\" = 'activating' ] || break; sleep 1; done"
         cmds+=" && systemctl is-active mcp-server@${server} 2>/dev/null"
     done
+
     echo "$cmds"
 }
 
-deploy_local() {
+# ── Deploy (local and tunnel use the same pct exec path) ─────────────────────
+deploy_via() {
+    local ssh_host="$1" label="$2"
     local run_cmd; run_cmd="$(_build_run_cmd)"
 
-    banner "Deploying to LXC ${LXC_MCP} via SSH"
-    ssh "$MCP_SSH" "$run_cmd"
+    banner "Deploying to CT ${LXC_MCP} via ${label}"
+    _pct_exec "$ssh_host" "$run_cmd"
 
-    banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
-    ssh "$BACKEND_SSH" "curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" | python3 -m json.tool 2>/dev/null || true
-
-    echo ""
-    echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
-}
-
-deploy_tunnel() {
-    local run_cmd; run_cmd="$(_build_run_cmd)"
-    local quoted_run_cmd
-    printf -v quoted_run_cmd '%q' "$run_cmd"
-
-    banner "Deploying to LXC ${LXC_MCP} via Cloudflare tunnel"
-    ssh "$TUNNEL_SSH" "pct exec ${LXC_MCP} -- bash -c ${quoted_run_cmd}"
-
-    banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
-    ssh "$TUNNEL_SSH" "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'" | python3 -m json.tool 2>/dev/null || true
+    banner "Refreshing backend discovery (CT ${LXC_BACKEND})"
+    _pct_exec_backend "$ssh_host" \
+        "curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" \
+        | python3 -m json.tool 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
@@ -189,7 +207,7 @@ deploy_remote() {
     restart_cmds="${restart_cmds% && }"
 
     for server in "${SERVERS[@]}"; do
-        status_cmds+="systemctl status mcp-server@${server} --no-pager -l 2>&1 | head -5 ; "
+        status_cmds+="systemctl is-active mcp-server@${server} 2>/dev/null; "
     done
 
     echo ""
@@ -225,9 +243,9 @@ if [[ $SKIP_PUSH -eq 0 ]]; then
 fi
 
 if [[ "$MODE" == "local" ]]; then
-    deploy_local
+    deploy_via "$PVE_SSH" "PVE ${PVE_SSH}"
 elif [[ "$MODE" == "tunnel" ]]; then
-    deploy_tunnel
+    deploy_via "$TUNNEL_SSH" "Cloudflare tunnel"
 else
     deploy_remote
 fi

@@ -27,13 +27,13 @@ How to deploy any MCP server in this repo to LXC CT 110 (`192.168.1.110`).
 
 ## How auto-detection works
 
-`deploy.sh` tests connectivity in order and uses the first path that succeeds:
+Both local and tunnel modes go through the **PVE host** using `pct exec 110`, so the execution path inside the LXC is identical regardless of where you run the script from. Only the SSH hop differs.
 
-| Priority | Mode | How | When it works |
-|----------|------|-----|---------------|
-| 1 | **local** | `ssh root@192.168.1.110` (3 s timeout) | On the home LAN |
-| 2 | **tunnel** | `ssh proxmox-tunnel` (8 s timeout) | Away from home, Cloudflare tunnel active |
-| 3 | **remote/console** | Prints `pct exec` commands | No SSH available at all |
+| Priority | Mode | SSH target | How |
+|----------|------|------------|-----|
+| 1 | **local** | `root@192.168.1.11` (PVE, 3 s timeout) | Direct SSH on home LAN |
+| 2 | **tunnel** | `proxmox-tunnel` (8 s timeout) | Cloudflare tunnel from anywhere |
+| 3 | **remote/console** | — | Prints `pct exec` commands to paste manually |
 
 Force a specific mode with `--local`, `--tunnel`, or `--remote`.
 
@@ -52,7 +52,7 @@ Force a specific mode with `--local`, `--tunnel`, or `--remote`.
 
 ## Deploying from home (local LAN)
 
-Direct SSH to `root@192.168.1.110` — fastest path, no tunnel overhead.
+SSHes to PVE at `root@192.168.1.11`, then `pct exec 110` into the LXC.
 
 ```bash
 ./deploy/deploy.sh spotify
@@ -65,13 +65,23 @@ Direct SSH to `root@192.168.1.110` — fastest path, no tunnel overhead.
 
 ## Deploying from remote (away from home)
 
-Requires `proxmox-tunnel` configured in `~/.ssh/config` (Cloudflare Access). No flags needed — auto-detected automatically.
+Requires `proxmox-tunnel` in `~/.ssh/config` and `cloudflared` installed. Auto-detected — no flags needed.
+
+```
+# ~/.ssh/config entry required:
+Host proxmox-tunnel
+    HostName ssh.jackshome.com
+    User root
+    ProxyCommand cloudflared access ssh --hostname %h
+    StrictHostKeyChecking no
+```
+
+Check: `which cloudflared && cloudflared version`
 
 ```bash
 ./deploy/deploy.sh spotify
+# Internally: ssh proxmox-tunnel 'pct exec 110 -- bash -c "…"'
 ```
-
-Internally runs `ssh proxmox-tunnel 'pct exec 110 -- bash -c "…"'`.
 
 ---
 
@@ -158,34 +168,40 @@ Retired (do not reuse): 9002, 9012. Next available: 9019.
 
 ## Debugging
 
-**Check if a server is running:**
+**Check all server statuses:**
 ```bash
-# From home
-ssh root@192.168.1.110 'systemctl is-active mcp-server@spotify'
+./deploy/deploy.sh --status
+```
 
-# From tunnel
+**Check a single server:**
+```bash
+# From home (via PVE)
+ssh root@192.168.1.11 'pct exec 110 -- systemctl is-active mcp-server@spotify'
+
+# From remote (via tunnel)
 ssh proxmox-tunnel 'pct exec 110 -- systemctl is-active mcp-server@spotify'
 ```
 
-**View live logs:**
+**View logs:**
 ```bash
 # From home
-ssh root@192.168.1.110 'journalctl -u mcp-server@spotify -f'
+ssh root@192.168.1.11 'pct exec 110 -- journalctl -u mcp-server@spotify -n 50 --no-pager'
 
-# From tunnel
+# From remote
 ssh proxmox-tunnel 'pct exec 110 -- journalctl -u mcp-server@spotify -n 50 --no-pager'
 ```
 
 **Smoke-test a server's tool list:**
 ```bash
-# From home (replace port as needed)
-ssh root@192.168.1.110 'curl -s http://127.0.0.1:9010/mcp \
+# Replace port as needed (see port table above)
+ssh root@192.168.1.11 'pct exec 110 -- curl -s http://127.0.0.1:9010/mcp \
   -X POST -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}" | python3 -m json.tool'
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"'
 ```
 
-**Check all server statuses at once:**
-```bash
-./deploy/deploy.sh --status
-```
+**Shell escaping rules for manual `pct exec` commands:**
+- Outer `ssh` uses single quotes `'...'`
+- Inside `pct exec -- bash -c "..."`, use double quotes
+- Variable expansion inside remote bash: escape `$` as `\$`
+- If SSH isn't available: use `root@pve → Shell` in the Proxmox web console at `https://proxmox.jackshome.com`
