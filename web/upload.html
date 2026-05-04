@@ -492,7 +492,13 @@
         if (force) qs.set("force", "true");
         const url = `/api/upload/${encodeURIComponent(domain)}${qs.toString() ? "?" + qs : ""}`;
         const r = await fetch(url, { method: "POST", body: fd });
-        const j = await r.json().catch(() => ({}));
+        let j = {};
+        let parseOk = false;
+        try { j = await r.json(); parseOk = true; } catch (_) {}
+        // Non-JSON body (e.g. 500 plain-text) — treat as error
+        if (!parseOk && !r.ok) {
+          j = { success: false, error: `HTTP ${r.status} — server returned non-JSON response` };
+        }
         const cls = classify(j, r.status);
         placeholder.remove();
         render(file, domain, cls, j);
