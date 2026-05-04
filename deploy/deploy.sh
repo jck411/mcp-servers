@@ -116,9 +116,11 @@ _build_run_cmd() {
     for server in "${SERVERS[@]}"; do
         cmds+=" && systemctl restart mcp-server@${server}"
     done
-    cmds+=" && sleep 4"  # give services time to reach 'active' state
+    # Poll each service up to 20s for it to leave 'activating' state
     for server in "${SERVERS[@]}"; do
-        cmds+=" && echo '--- ${server} ---' && systemctl is-active mcp-server@${server} 2>&1"
+        cmds+=" && echo '--- ${server} ---'"
+        cmds+=" && i=0; while [ \$i -lt 20 ] && [ \"\$(systemctl is-active mcp-server@${server} 2>/dev/null)\" = 'activating' ]; do sleep 1; i=\$((i+1)); done"
+        cmds+=" && systemctl is-active mcp-server@${server} 2>/dev/null"
     done
     echo "$cmds"
 }
