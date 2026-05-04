@@ -2075,8 +2075,13 @@ async def extract_source_facts_single_shot(
         b64 = _b64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{image_media_type};base64,{b64}"
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
+        _json_reminder = (
+            "\n\nIMPORTANT: Respond with ONLY a JSON object. "
+            'Format: {"facts": {"key": "value"}, "caption": null} — '
+            "No markdown, no explanations, no code fences."
+        )
         user_content = [
-            {"type": "text", "text": f"Extract all information from this document.{hint_text}"},
+            {"type": "text", "text": f"Extract all information from this document.{hint_text}{_json_reminder}"},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]
     else:
@@ -2089,8 +2094,14 @@ async def extract_source_facts_single_shot(
             "note": f"{len(chunks)} chunks, {len(text_body)} chars total",
         })
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
+        _json_reminder = (
+            "\n\nIMPORTANT: Respond with ONLY a JSON object. "
+            'Format: {"facts": {"key": "value"}, "caption": null} — '
+            "No markdown, no explanations, no code fences."
+        )
         user_content = (
-            f"Extract all information from this document.{hint_text}\n\n---\n\n{text_body}"
+            f"Extract all information from this document.{hint_text}{_json_reminder}"
+            f"\n\n---\n\n{text_body}"
         )
 
     # --- Step 2: call extraction model ---
