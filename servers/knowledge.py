@@ -2188,16 +2188,23 @@ async def extract_source_facts_single_shot(
     if clean.startswith("```"):
         clean = re.sub(r"^```[a-z]*\n?", "", clean)
         clean = re.sub(r"\n?```$", "", clean.rstrip())
-    # Fallback: if response is markdown prose, find the first {...} JSON object
+    # If still no leading `{`, find first JSON object in prose/markdown
     if not clean.startswith("{"):
         m = re.search(r"\{[\s\S]*\}", clean)
         if m:
             clean = m.group(0)
     parse_step: dict[str, Any] = {"step": "parse_json", "model": None}
     try:
-        extracted = json.loads(clean)
-        facts: dict[str, str] = extracted.get("facts") or {}
-        caption: str | None = extracted.get("caption") or None
+        # raw_decode reads the first complete JSON value, ignoring trailing data
+        extracted, _ = json.JSONDecoder().raw_decode(clean)
+        # Model may return {"facts": {...}, "caption": ...} OR a flat {key: val, ...} dict.
+        if "facts" in extracted:
+            facts: dict[str, str] = extracted.get("facts") or {}
+            caption: str | None = extracted.get("caption") or None
+        else:
+            # Flat dict — treat everything except "caption" as facts
+            caption = extracted.pop("caption", None) or None
+            facts = {k: str(v) for k, v in extracted.items() if v is not None and v != ""}
         parse_step["status"] = "ok"
         parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}"
     except json.JSONDecodeError as exc:

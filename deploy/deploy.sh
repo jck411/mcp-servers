@@ -130,6 +130,13 @@ _build_run_cmd() {
             cmds+=" && echo MCP_PORT=${port} > ${MCP_REPO}/.env.${server}"
         fi
     done
+    # Kill any orphan process holding the port BEFORE restarting the service
+    for server in "${SERVERS[@]}"; do
+        local port="${PORT_MAP[$server]:-}"
+        if [[ -n "$port" ]]; then
+            cmds+=" && (fuser -k ${port}/tcp 2>/dev/null || true)"
+        fi
+    done
     for server in "${SERVERS[@]}"; do
         cmds+=" && systemctl restart mcp-server@${server}"
     done
