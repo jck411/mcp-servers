@@ -164,9 +164,11 @@ deploy_local() {
 
 deploy_tunnel() {
     local run_cmd; run_cmd="$(_build_run_cmd)"
+    local quoted_run_cmd
+    printf -v quoted_run_cmd '%q' "$run_cmd"
 
     banner "Deploying to LXC ${LXC_MCP} via Cloudflare tunnel"
-    ssh "$TUNNEL_SSH" "pct exec ${LXC_MCP} -- bash -c \"$run_cmd\""
+    ssh "$TUNNEL_SSH" "pct exec ${LXC_MCP} -- bash -c ${quoted_run_cmd}"
 
     banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
     ssh "$TUNNEL_SSH" "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'" | python3 -m json.tool 2>/dev/null || true
