@@ -134,7 +134,7 @@ _build_run_cmd() {
     for server in "${SERVERS[@]}"; do
         local port="${PORT_MAP[$server]:-}"
         if [[ -n "$port" ]]; then
-            cmds+=" && (fuser -k ${port}/tcp 2>/dev/null || true)"
+            cmds+=" && if command -v fuser >/dev/null 2>&1; then fuser -k ${port}/tcp 2>/dev/null || true; else pids=\$(ss -ltnp 'sport = :${port}' 2>/dev/null | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p'); [ -z \"\$pids\" ] || kill \$pids 2>/dev/null || true; fi"
         fi
     done
     for server in "${SERVERS[@]}"; do
@@ -143,7 +143,7 @@ _build_run_cmd() {
     # Poll each service up to 20s for it to leave 'activating' state
     for server in "${SERVERS[@]}"; do
         cmds+=" && echo '--- ${server} ---'"
-        cmds+=" && i=0; while [ \$i -lt 20 ] && [ \"\$(systemctl is-active mcp-server@${server} 2>/dev/null)\" = 'activating' ]; do sleep 1; i=\$((i+1)); done"
+        cmds+=" && for _poll in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do state=\$(systemctl is-active mcp-server@${server} 2>/dev/null || true); [ \"\$state\" = 'activating' ] || break; sleep 1; done"
         cmds+=" && systemctl is-active mcp-server@${server} 2>/dev/null"
     done
     echo "$cmds"
@@ -156,7 +156,7 @@ deploy_local() {
     ssh "$MCP_SSH" "$run_cmd"
 
     banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
-    ssh "$BACKEND_SSH" "curl -sk -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" | python3 -m json.tool 2>/dev/null || true
+    ssh "$BACKEND_SSH" "curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" | python3 -m json.tool 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
@@ -169,7 +169,7 @@ deploy_tunnel() {
     ssh "$TUNNEL_SSH" "pct exec ${LXC_MCP} -- bash -c \"$run_cmd\""
 
     banner "Refreshing backend discovery (LXC ${LXC_BACKEND})"
-    ssh "$TUNNEL_SSH" "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'" | python3 -m json.tool 2>/dev/null || true
+    ssh "$TUNNEL_SSH" "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'" | python3 -m json.tool 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
@@ -205,7 +205,7 @@ deploy_remote() {
     echo "pct exec ${LXC_MCP} -- bash -c '${status_cmds}'"
     echo ""
     echo -e "${DIM}# Step 4: Refresh backend discovery${RESET}"
-    echo "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'"
+    echo "pct exec ${LXC_BACKEND} -- bash -c 'curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H \"Content-Type: application/json\" -H \"Accept: application/json\"'"
     echo ""
     echo -e "${BOLD}════════════════════════════════════════════════════════════════${RESET}"
 }
