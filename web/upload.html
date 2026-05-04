@@ -104,6 +104,14 @@
   button.extract:hover { border-color: var(--accent); color: var(--accent); }
   button.extract:disabled { opacity: 0.5; cursor: not-allowed; }
   button.extract.running { opacity: 0.6; }
+
+  /* Remove (delete source) button */
+  button.remove { background: var(--panel); border: 1px solid var(--border);
+    color: var(--muted); padding: 5px 10px; font-size: 12px; margin-top: 6px;
+    border-radius: 5px; cursor: pointer; }
+  button.remove:hover { border-color: var(--err); color: var(--err); }
+  button.remove:disabled { opacity: 0.5; cursor: not-allowed; }
+  .card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -325,7 +333,10 @@
         ${ptype ? `<div class="meta" style="color:var(--muted);font-size:11px;">pipeline: ${escapeHtml(ptype)}</div>` : ""}
         ${hasPipeline ? `<button class="pipeline-toggle">▶ show pipeline log (${(json.pipeline||[]).length} steps)</button>` : ""}
         ${pipelineHtml}
-        ${canExtract ? `<button class="extract" data-sid="${escapeHtml(sid)}" data-name="${escapeHtml(file.name)}">⚡ Extract Facts</button>` : ""}
+        <div class="card-actions">
+          ${canExtract ? `<button class="extract" data-sid="${escapeHtml(sid)}" data-name="${escapeHtml(file.name)}">⚡ Extract Facts</button>` : ""}
+          ${canExtract ? `<button class="remove" data-sid="${escapeHtml(sid)}">🗑 Remove</button>` : ""}
+        </div>
       </div>
       <div>${sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""}</div>`;
 
@@ -351,7 +362,36 @@
     const extBtn = div.querySelector("button.extract");
     if (extBtn) extBtn.onclick = () => runExtract(extBtn, div, sid, file.name);
 
+    // Remove source
+    const removeBtn = div.querySelector("button.remove");
+    if (removeBtn) removeBtn.onclick = () => runRemove(removeBtn, div, sid);
+
     $("results").prepend(div);
+  }
+
+  // ---------- Remove source ----------
+  async function runRemove(btn, card, sid) {
+    if (!confirm(`Delete source ${sid} and its file?\n\nThis cannot be undone.`)) return;
+    btn.disabled = true;
+    btn.textContent = "🗑 Removing…";
+    try {
+      const r = await fetch(`/api/sources/${encodeURIComponent(sid)}`, { method: "DELETE" });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.success) {
+        card.style.opacity = "0.4";
+        card.style.transition = "opacity 0.3s";
+        setTimeout(() => card.remove(), 350);
+      } else {
+        const msg = j.error || j.detail || `HTTP ${r.status}`;
+        btn.textContent = `✗ ${msg}`;
+        btn.style.color = "var(--err)";
+        btn.disabled = false;
+      }
+    } catch (e) {
+      btn.textContent = `✗ network error`;
+      btn.style.color = "var(--err)";
+      btn.disabled = false;
+    }
   }
 
   // ---------- Extract Facts ----------
