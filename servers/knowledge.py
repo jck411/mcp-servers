@@ -138,6 +138,13 @@ class KnowledgeSettings(BaseSettings):
     vision_max_pages: int = Field(default=20, validation_alias="KNOWLEDGE_VISION_MAX_PAGES")
     vision_dpi: int = Field(default=200, validation_alias="KNOWLEDGE_VISION_DPI")
 
+    # Model for single-shot fact extraction via POST /api/sources/{id}/extract.
+    # Must be a vision-capable model; Sonnet gives best accuracy on documents.
+    extraction_model: str = Field(
+        default="anthropic/claude-sonnet-4-5",
+        validation_alias="KNOWLEDGE_EXTRACTION_MODEL",
+    )
+
     # Public REST API base used when MCP tools generate clickable download URLs
     api_base: str = Field(
         default="https://api-knowledge.jackshome.com",
@@ -598,6 +605,16 @@ class KnowledgeDB:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def source_update_chunk_count(self, source_id: str, chunk_count: int) -> bool:
+        """Update chunk_count for an existing source row."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "UPDATE sources SET chunk_count = ? WHERE id = ?",
+            (chunk_count, source_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
 
     async def source_update_storage(
         self,
@@ -1363,6 +1380,30 @@ VISION_OCR_PROMPT = (
     "or commentary. If the image contains no text, output exactly: [no text]"
 )
 
+IMAGE_DESCRIPTION_PROMPT = (
+    "Describe this image in 2-4 sentences for a personal knowledge base. "
+    "Cover the main subject, setting, notable objects or people (no names needed), "
+    "colors, any visible text, and specific details that would help someone find this "
+    "image when searching. Be concrete and factual. Output only the description."
+)
+
+EXTRACTION_SYSTEM_PROMPT = (
+    "You are a document extraction engine for a personal knowledge base.\n"
+    "Your job: read the provided document content and return a JSON object.\n\n"
+    "Rules:\n"
+    "- Extract every value you can see. Do not fabricate, guess, or paraphrase values.\n"
+    "- Use stable snake_case keys with meaningful prefixes, e.g. w2_2025_box1_wages, "
+    "passport_us_number, lab_ldl_2024_12.\n"
+    "- For dates use ISO format: YYYY-MM-DD.\n"
+    "- For currency include the number only (no $ sign): 94200.00\n"
+    "- For images with no document structure (photos, pets, scenery): set 'caption' "
+    "to a 2-3 sentence description, set 'facts' to {}.\n"
+    "- For documents: set 'facts' to all extracted key/value pairs, set 'caption' to null.\n"
+    "- Omit fields that are not legible or not present — do not set null or 'unknown'.\n"
+    "- Output only valid JSON. No markdown fences, no commentary.\n"
+    "Output format: {\"facts\": {\"key\": \"value\", ...}, \"caption\": null}"
+)
+
 
 async def _vision_ocr_bytes(
     image_bytes: bytes, media_type: str, settings: KnowledgeSettings
@@ -1458,6 +1499,266 @@ async def _extract_pdf_text(path: Path, settings: KnowledgeSettings) -> str:
         for img in page_files:
             pages.append(await _ocr_image_file(img, settings))
         return "\n\n".join(p for p in pages if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-logging extraction functions
+# Each returns (text_or_chunks, pipeline_steps) so callers can report exactly
+# what ran, which model was called, whether it succeeded or fell back.
+# ---------------------------------------------------------------------------
+
+
+async def _vision_call(
+    image_bytes: bytes,
+    media_type: str,
+    prompt: str,
+    model: str,
+    api_key: str,
+    step_name: str,
+) -> tuple[str, dict[str, Any]]:
+    """Single OpenRouter vision LLM call. Returns (text, pipeline_step)."""
+    step: dict[str, Any] = {
+        "step": step_name,
+        "model": model,
+        "status": "failed",
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "note": "",
+    }
+    if not model or not api_key:
+        step["status"] = "skipped"
+        step["note"] = "no model or api_key configured"
+        return "", step
+
+    import base64 as _b64
+    b64 = _b64.b64encode(image_bytes).decode("ascii")
+    data_url = f"data:{media_type};base64,{b64}"
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }],
+        "temperature": 0,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            text = (data["choices"][0]["message"]["content"] or "").strip()
+            usage = data.get("usage") or {}
+            step["tokens_in"] = usage.get("prompt_tokens", 0)
+            step["tokens_out"] = usage.get("completion_tokens", 0)
+            if text == "[no text]":
+                text = ""
+                step["status"] = "ok"
+                step["note"] = "model reported: no text in image"
+            else:
+                step["status"] = "ok"
+                step["note"] = f"{len(text)} chars"
+            return text, step
+    except Exception as exc:  # noqa: BLE001
+        step["status"] = "failed"
+        step["note"] = str(exc)
+        print(f"[knowledge] _vision_call failed ({model}/{step_name}): {exc}", file=sys.stderr)
+        return "", step
+
+
+async def _describe_image_file(
+    path: Path, settings: KnowledgeSettings
+) -> tuple[str, list[dict[str, Any]]]:
+    """Describe a photo/image using the vision model. Returns (description, steps)."""
+    steps: list[dict[str, Any]] = []
+    if not settings.vision_model or not settings.openrouter_api_key:
+        steps.append({
+            "step": "image_description", "model": None, "status": "skipped",
+            "note": "KNOWLEDGE_VISION_MODEL not configured",
+        })
+        return "", steps
+    try:
+        data = path.read_bytes()
+        media = _IMAGE_MEDIA.get(path.suffix.lower(), "image/png")
+    except OSError as exc:
+        steps.append({
+            "step": "image_description", "model": settings.vision_model,
+            "status": "failed", "note": f"read error: {exc}",
+        })
+        return "", steps
+    text, step = await _vision_call(
+        data, media, IMAGE_DESCRIPTION_PROMPT,
+        settings.vision_model, settings.openrouter_api_key, "image_description",
+    )
+    steps.append(step)
+    return text, steps
+
+
+async def _ocr_image_file_with_log(
+    path: Path, settings: KnowledgeSettings
+) -> tuple[str, list[dict[str, Any]]]:
+    """Vision LLM OCR, tesseract fallback. Returns (text, steps)."""
+    steps: list[dict[str, Any]] = []
+    if settings.vision_model and settings.openrouter_api_key:
+        try:
+            data = path.read_bytes()
+            media = _IMAGE_MEDIA.get(path.suffix.lower(), "image/png")
+            text, step = await _vision_call(
+                data, media, VISION_OCR_PROMPT,
+                settings.vision_model, settings.openrouter_api_key, "vision_ocr",
+            )
+            steps.append(step)
+            if text:
+                return text, steps
+        except OSError as exc:
+            steps.append({
+                "step": "vision_ocr", "model": settings.vision_model,
+                "status": "failed", "note": f"read error: {exc}",
+            })
+    # Tesseract fallback
+    tess_step: dict[str, Any] = {"step": "tesseract", "model": "tesseract"}
+    rc, out, _ = await _run(["tesseract", str(path), "-", "-l", settings.ocr_language])
+    if rc == 0:
+        text = out.decode("utf-8", errors="replace")
+        tess_step["status"] = "ok"
+        tess_step["note"] = f"{len(text)} chars (fallback)"
+    else:
+        text = ""
+        tess_step["status"] = "failed"
+        tess_step["note"] = "tesseract returned non-zero exit code"
+    steps.append(tess_step)
+    return text, steps
+
+
+async def _extract_pdf_text_with_log(
+    path: Path, settings: KnowledgeSettings
+) -> tuple[str, list[dict[str, Any]]]:
+    """pdftotext for native PDFs; rasterize + OCR for scans. Returns (text, steps)."""
+    steps: list[dict[str, Any]] = []
+    pdf_step: dict[str, Any] = {"step": "pdftotext", "model": None}
+    rc, out, _ = await _run(["pdftotext", "-layout", str(path), "-"])
+    text = out.decode("utf-8", errors="replace").strip() if rc == 0 else ""
+    if text:
+        pdf_step["status"] = "ok"
+        pdf_step["note"] = f"{len(text)} chars (native PDF text)"
+        steps.append(pdf_step)
+        return text, steps
+    pdf_step["status"] = "ok" if rc == 0 else "failed"
+    pdf_step["note"] = "no embedded text — scanned PDF" if rc == 0 else "pdftotext failed"
+    steps.append(pdf_step)
+
+    import tempfile
+    raster_step: dict[str, Any] = {"step": "rasterize", "model": None}
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = Path(tmp) / "page"
+        rc, _, _ = await _run([
+            "pdftoppm", "-r", str(settings.vision_dpi), "-png", str(path), str(prefix),
+        ])
+        if rc != 0:
+            raster_step["status"] = "failed"
+            raster_step["note"] = "pdftoppm failed"
+            steps.append(raster_step)
+            return "", steps
+        page_files = sorted(Path(tmp).glob("page-*.png"))[: settings.vision_max_pages]
+        raster_step["status"] = "ok"
+        raster_step["note"] = (
+            f"{len(page_files)} page(s) rasterized at {settings.vision_dpi} dpi"
+        )
+        steps.append(raster_step)
+
+        pages: list[str] = []
+        for img in page_files:
+            page_text, page_steps = await _ocr_image_file_with_log(img, settings)
+            for s in page_steps:
+                s["page"] = img.name
+            steps.extend(page_steps)
+            if page_text.strip():
+                pages.append(page_text)
+
+    text = "\n\n".join(p for p in pages if p.strip())
+    if page_files and len(text) < 100:
+        steps.append({
+            "step": "confidence_check",
+            "model": None,
+            "status": "warn",
+            "note": (
+                f"low OCR output ({len(text)} chars across {len(page_files)} page(s)) "
+                "— consider using Extract Facts with Sonnet for better accuracy"
+            ),
+        })
+    return text, steps
+
+
+async def _extract_and_chunk_with_log(
+    path: Path, settings: KnowledgeSettings
+) -> tuple[list[str], list[dict[str, Any]], str]:
+    """Extract text and split into chunks with a full pipeline log.
+
+    Returns (chunks, pipeline_steps, pipeline_type) where pipeline_type is one of:
+    'image_description' | 'document_ocr' | 'text_read' | 'unsupported'
+    """
+    suffix = path.suffix.lower()
+    steps: list[dict[str, Any]] = []
+    text = ""
+
+    if suffix == ".pdf":
+        pipeline_type = "document_ocr"
+        text, steps = await _extract_pdf_text_with_log(path, settings)
+    elif suffix in IMAGE_EXTENSIONS and settings.ocr_enabled:
+        # Photos/images: generate a semantic description, not verbatim OCR.
+        # OCR is reserved for PDFs where text layout matters.
+        pipeline_type = "image_description"
+        text, steps = await _describe_image_file(path, settings)
+    elif suffix in TEXT_EXTENSIONS or suffix == "":
+        pipeline_type = "text_read"
+        read_step: dict[str, Any] = {"step": "text_read", "model": None}
+        try:
+            raw = path.read_bytes()
+            if suffix == "" and _is_likely_binary(raw):
+                read_step["status"] = "skipped"
+                read_step["note"] = "binary file with no extension — no text indexing"
+                steps.append(read_step)
+                return [], steps, "unsupported"
+            text = raw.decode("utf-8", errors="replace")
+            read_step["status"] = "ok"
+            read_step["note"] = f"{len(text)} chars read"
+        except OSError as exc:
+            read_step["status"] = "failed"
+            read_step["note"] = str(exc)
+            text = ""
+        steps.append(read_step)
+    else:
+        steps.append({
+            "step": "classify", "model": None, "status": "skipped",
+            "note": f"unsupported file type: {suffix}",
+        })
+        return [], steps, "unsupported"
+
+    text = text.strip()
+    if not text:
+        if not any(s.get("status") in ("failed", "warn") for s in steps):
+            steps.append({
+                "step": "chunking", "model": None, "status": "skipped",
+                "note": "no text extracted — nothing to chunk",
+            })
+        return [], steps, pipeline_type
+
+    chunks = chunk_text(text, settings.chunk_max_chars, settings.chunk_overlap)
+    steps.append({
+        "step": "chunking", "model": None, "status": "ok",
+        "note": f"{len(chunks)} chunk(s) from {len(text)} chars",
+    })
+    return chunks, steps, pipeline_type
 
 
 async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str]:
@@ -1635,24 +1936,28 @@ async def _ingest_file_at_path(
             "reason": "already ingested with stored bytes",
         }
 
-    chunks_text = await extract_and_chunk(dest, settings)
+    chunks_text, pipeline_log, pipeline_type = await _extract_and_chunk_with_log(dest, settings)
+
     if not chunks_text:
-        # No OCR/text content (e.g. plain image). Still register the source
-        # so the bytes are downloadable and can be captioned later via
-        # knowledge_ingest_text. Filename remains searchable via sources list.
+        # No text extracted (e.g. photo with description model skipped/failed, or
+        # unsupported binary). Register the source so bytes are downloadable.
         source_id = str(uuid.uuid4())
         source_type = dest.suffix.lstrip(".") or "file"
         await db.source_add(
-            source_id,
-            domain,
-            source_type,
-            dest.name,
-            file_hash,
-            0,
-            rel_path,
-            media_type,
-            size_bytes,
+            source_id, domain, source_type, dest.name,
+            file_hash, 0, rel_path, media_type, size_bytes,
         )
+        # Determine a helpful reason from the pipeline log
+        failed = [s for s in pipeline_log if s.get("status") == "failed"]
+        warn = [s for s in pipeline_log if s.get("status") == "warn"]
+        if failed:
+            reason = f"pipeline step '{failed[0]['step']}' failed: {failed[0].get('note', '')}"
+        elif pipeline_type == "image_description":
+            reason = "image stored — use Extract Facts to generate a searchable description"
+        elif pipeline_type == "unsupported":
+            reason = "unsupported file type — bytes stored only"
+        else:
+            reason = "no extractable text — bytes stored"
         return {
             "success": True,
             "file": dest.name,
@@ -1661,7 +1966,10 @@ async def _ingest_file_at_path(
             "source_id": source_id,
             "chunks_stored": 0,
             "stored_path": rel_path,
-            "reason": "stored bytes; no extractable text — add a caption via knowledge_ingest_text",
+            "pipeline_type": pipeline_type,
+            "pipeline": pipeline_log,
+            "needs_extraction": pipeline_type in ("image_description", "document_ocr"),
+            "reason": reason,
         }
 
     sparse_encoder.fit_batch(chunks_text)
@@ -1687,17 +1995,11 @@ async def _ingest_file_at_path(
 
     await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
     await db.source_add(
-        source_id,
-        domain,
-        source_type,
-        dest.name,
-        file_hash,
-        len(chunks_text),
-        rel_path,
-        media_type,
-        size_bytes,
+        source_id, domain, source_type, dest.name,
+        file_hash, len(chunks_text), rel_path, media_type, size_bytes,
     )
 
+    warn_steps = [s for s in pipeline_log if s.get("status") == "warn"]
     return {
         "success": True,
         "file": dest.name,
@@ -1706,6 +2008,231 @@ async def _ingest_file_at_path(
         "source_id": source_id,
         "chunks_stored": len(chunks_text),
         "stored_path": rel_path,
+        "pipeline_type": pipeline_type,
+        "pipeline": pipeline_log,
+        "needs_extraction": bool(warn_steps),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Single-shot fact extraction (POST /api/sources/{id}/extract)
+# ---------------------------------------------------------------------------
+
+
+async def extract_source_facts_single_shot(
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    source_id: str,
+    hint: str | None = None,
+) -> dict[str, Any]:
+    """Single-shot Sonnet extraction: one LLM call → structured facts + optional caption.
+
+    For images and sources with no chunks: loads raw bytes directly.
+    For text documents: uses existing Qdrant chunks (much cheaper — no image token cost).
+    Uses Anthropic prompt caching on the system prompt when using Claude models.
+    """
+    source = await db.source_get(source_id)
+    if not source:
+        return {"success": False, "error": f"Source '{source_id}' not found"}
+
+    if not settings.extraction_model:
+        return {"success": False, "error": "KNOWLEDGE_EXTRACTION_MODEL not configured"}
+
+    pipeline: list[dict[str, Any]] = []
+    suffix = Path(str(source.get("filename") or "")).suffix.lower()
+    is_image = suffix in IMAGE_EXTENSIONS
+    chunk_count = int(source.get("chunk_count") or 0)
+    domain = str(source.get("domain") or "")
+
+    # --- Step 1: gather content ---
+    user_content: str | list[dict[str, Any]]
+
+    if is_image or chunk_count == 0:
+        source_path = resolve_source_path(settings.knowledge_path, source)
+        if not source_path:
+            pipeline.append({
+                "step": "load_source", "status": "failed",
+                "note": "file not found on disk",
+            })
+            return {"success": False, "error": "Source file not found on disk", "pipeline": pipeline}
+        try:
+            image_bytes = source_path.read_bytes()
+            image_media_type = _IMAGE_MEDIA.get(suffix, "image/png")
+            pipeline.append({
+                "step": "load_source", "status": "ok",
+                "note": f"{len(image_bytes)} bytes read from disk",
+            })
+        except OSError as exc:
+            pipeline.append({
+                "step": "load_source", "status": "failed", "note": str(exc),
+            })
+            return {"success": False, "error": f"Could not read source file: {exc}", "pipeline": pipeline}
+
+        import base64 as _b64
+        b64 = _b64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{image_media_type};base64,{b64}"
+        hint_text = f"\nDocument type hint: {hint}" if hint else ""
+        user_content = [
+            {"type": "text", "text": f"Extract all information from this document.{hint_text}"},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]
+    else:
+        chunks = await vectors.chunks_by_source(source_id)
+        text_body = "\n\n".join(
+            str(c.get("content") or "").strip() for c in chunks if c.get("content")
+        )
+        pipeline.append({
+            "step": "load_chunks", "status": "ok",
+            "note": f"{len(chunks)} chunks, {len(text_body)} chars total",
+        })
+        hint_text = f"\nDocument type hint: {hint}" if hint else ""
+        user_content = (
+            f"Extract all information from this document.{hint_text}\n\n---\n\n{text_body}"
+        )
+
+    # --- Step 2: call extraction model ---
+    payload: dict[str, Any] = {
+        "model": settings.extraction_model,
+        "messages": [{
+            "role": "user",
+            "content": (
+                user_content if isinstance(user_content, list)
+                else [{"type": "text", "text": user_content}]
+            ),
+        }],
+        "temperature": 0,
+        "max_tokens": 4096,
+    }
+
+    # Anthropic prompt caching: wrap system prompt in a content block with
+    # cache_control so repeated calls within 5 min read from cache at 90% discount.
+    is_claude = "anthropic" in settings.extraction_model or "claude" in settings.extraction_model
+    if is_claude:
+        payload["system"] = [{
+            "type": "text",
+            "text": EXTRACTION_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    else:
+        payload["system"] = EXTRACTION_SYSTEM_PROMPT
+
+    llm_step: dict[str, Any] = {
+        "step": "extraction_llm",
+        "model": settings.extraction_model,
+        "status": "failed",
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cache_read_tokens": 0,
+        "note": "",
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
+    raw_output = ""
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            raw_output = (data["choices"][0]["message"]["content"] or "").strip()
+            usage = data.get("usage") or {}
+            llm_step["tokens_in"] = usage.get("prompt_tokens", 0)
+            llm_step["tokens_out"] = usage.get("completion_tokens", 0)
+            llm_step["cache_read_tokens"] = usage.get("cache_read_input_tokens", 0)
+            llm_step["status"] = "ok"
+            llm_step["note"] = (
+                f"{len(raw_output)} chars output"
+                + (f", {llm_step['cache_read_tokens']} cached tokens" if llm_step["cache_read_tokens"] else "")
+            )
+    except Exception as exc:  # noqa: BLE001
+        llm_step["note"] = str(exc)
+        pipeline.append(llm_step)
+        return {"success": False, "error": f"LLM call failed: {exc}", "pipeline": pipeline}
+    pipeline.append(llm_step)
+
+    # --- Step 3: parse JSON ---
+    clean = raw_output.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```[a-z]*\n?", "", clean)
+        clean = re.sub(r"\n?```$", "", clean.rstrip())
+    parse_step: dict[str, Any] = {"step": "parse_json", "model": None}
+    try:
+        extracted = json.loads(clean)
+        facts: dict[str, str] = extracted.get("facts") or {}
+        caption: str | None = extracted.get("caption") or None
+        parse_step["status"] = "ok"
+        parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}"
+    except json.JSONDecodeError as exc:
+        parse_step["status"] = "failed"
+        parse_step["note"] = f"JSON parse error: {exc} | raw[:200]: {raw_output[:200]}"
+        pipeline.append(parse_step)
+        return {
+            "success": False, "error": "LLM returned invalid JSON",
+            "raw_output": raw_output, "pipeline": pipeline,
+        }
+    pipeline.append(parse_step)
+
+    # --- Step 4: write facts ---
+    written_facts: list[str] = []
+    write_step: dict[str, Any] = {"step": "write_facts", "model": None}
+    try:
+        for key, value in facts.items():
+            await db.fact_set(domain, key, str(value), source=f"extracted:{source_id}", confidence=0.9)
+            written_facts.append(key)
+        write_step["status"] = "ok"
+        write_step["note"] = f"{len(written_facts)} fact(s) written to '{domain}'"
+    except Exception as exc:  # noqa: BLE001
+        write_step["status"] = "failed"
+        write_step["note"] = str(exc)
+        pipeline.append(write_step)
+        return {"success": False, "error": f"Failed writing facts: {exc}", "pipeline": pipeline}
+    pipeline.append(write_step)
+
+    # --- Step 5: embed and store caption as a searchable chunk ---
+    if caption:
+        cap_step: dict[str, Any] = {"step": "write_caption_chunk", "model": None}
+        try:
+            cap_embedding = await embeddings.embed(caption)
+            cap_sparse = sparse_encoder.encode(caption)
+            now = datetime.now(UTC).isoformat()
+            # Upsert a single caption chunk linked to the original source_id.
+            # Use a deterministic chunk id so re-running extract overwrites it.
+            cap_chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_caption"))
+            await vectors.upsert_chunks(
+                [{"id": cap_chunk_id, "domain": domain, "source_id": source_id,
+                  "source_type": "caption", "source_name": str(source.get("filename") or source_id),
+                  "chunk_index": 0, "content": caption, "ingested_at": now}],
+                [cap_embedding],
+                [cap_sparse],
+            )
+            # Ensure chunk_count reflects the caption chunk
+            if chunk_count == 0:
+                await db.source_update_chunk_count(source_id, 1)
+            cap_step["status"] = "ok"
+            cap_step["note"] = f"{len(caption)} chars embedded and stored"
+        except Exception as exc:  # noqa: BLE001
+            cap_step["status"] = "failed"
+            cap_step["note"] = str(exc)
+        pipeline.append(cap_step)
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "filename": source.get("filename"),
+        "domain": domain,
+        "model": settings.extraction_model,
+        "facts_written": len(written_facts),
+        "facts": facts,
+        "caption": caption,
+        "pipeline": pipeline,
     }
 
 

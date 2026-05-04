@@ -81,6 +81,29 @@
   .badge.err { background: rgba(232,93,107,0.15); color: var(--err); }
 
   .top { display: flex; justify-content: space-between; align-items: center; }
+
+  /* Pipeline log toggle */
+  .pipeline-toggle { font-size: 11px; color: var(--accent); cursor: pointer;
+    border: none; background: none; padding: 2px 0; margin-top: 4px; }
+  .pipeline-toggle:hover { text-decoration: underline; }
+  .pipeline-log { display: none; margin-top: 8px; border-top: 1px solid var(--border);
+    padding-top: 8px; }
+  .pipeline-log.open { display: block; }
+  .pipeline-step { display: flex; gap: 8px; align-items: baseline;
+    font-size: 12px; padding: 2px 0; }
+  .step-icon { width: 14px; text-align: center; flex-shrink: 0; }
+  .step-body { flex: 1; color: var(--muted); }
+  .step-body strong { color: var(--text); }
+  .step-model { color: var(--muted); font-size: 11px; font-style: italic; }
+  .step-tokens { color: var(--muted); font-size: 11px; }
+
+  /* Extract Facts button */
+  button.extract { background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); padding: 5px 10px; font-size: 12px; margin-top: 6px;
+    border-radius: 5px; cursor: pointer; }
+  button.extract:hover { border-color: var(--accent); color: var(--accent); }
+  button.extract:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.extract.running { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -164,7 +187,7 @@
     if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
   });
 
-  // ---------- upload ----------
+  // ---------- helpers ----------
   function nested(obj, keys) {
     let cur = obj;
     for (const key of keys) {
@@ -212,40 +235,85 @@
 
   function escapeHtml(value) {
     return String(value || "").replace(/[&<>"']/g, (ch) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[ch]));
   }
 
+  // ---------- pipeline log renderer ----------
+  const STEP_ICONS = {
+    ok: "✓", failed: "✗", skipped: "·", warn: "⚠", running: "…",
+  };
+  const STEP_COLORS = {
+    ok: "var(--ok)", failed: "var(--err)", skipped: "var(--muted)",
+    warn: "var(--warn)", running: "var(--info)",
+  };
+
+  function renderPipelineLog(steps) {
+    if (!steps || !steps.length) return "";
+    const rows = steps.map((s) => {
+      const icon = STEP_ICONS[s.status] || "?";
+      const color = STEP_COLORS[s.status] || "var(--muted)";
+      const modelPart = s.model ? `<span class="step-model">${escapeHtml(s.model)}</span> ` : "";
+      const tokenPart = (s.tokens_in || s.tokens_out)
+        ? `<span class="step-tokens"> · ${s.tokens_in}in/${s.tokens_out}out tok${s.cache_read_tokens ? ` · ${s.cache_read_tokens} cached` : ""}</span>`
+        : "";
+      const pagePart = s.page ? `<span class="step-tokens"> [${escapeHtml(s.page)}]</span>` : "";
+      return `<div class="pipeline-step">
+        <span class="step-icon" style="color:${color}">${icon}</span>
+        <span class="step-body">${modelPart}<strong>${escapeHtml(s.step)}</strong>${pagePart} — ${escapeHtml(s.note || "")}${tokenPart}</span>
+      </div>`;
+    }).join("");
+    return `<div class="pipeline-log">${rows}</div>`;
+  }
+
+  // ---------- classify upload result ----------
   function classify(json, status) {
-    if (status === 409) return { kind: "warn", badge: "EXISTS",
-      msg: messageFrom(
-        json,
-        "Filename already on disk. Tick overwrite to replace."
-      ) };
-    if (!json || json.success === false) return { kind: "err", badge: "ERROR",
-      msg: messageFrom(json, "upload failed") };
-    if (json.ingested === true && (json.chunks_stored || 0) > 0)
-      return { kind: "ok", badge: "INDEXED", msg: `${json.chunks_stored} chunks` };
-    if (json.ingested === true && (json.chunks_stored || 0) === 0)
-      return { kind: "info", badge: "STORED",
-        msg: "bytes saved, no extractable text (image / scan / empty)" };
+    if (status === 409) return {
+      kind: "warn", badge: "EXISTS",
+      msg: messageFrom(json, "Filename already on disk. Tick overwrite to replace."),
+    };
+    if (!json || json.success === false) return {
+      kind: "err", badge: "ERROR", msg: messageFrom(json, "upload failed"),
+    };
+    const chunks = json.chunks_stored || 0;
+    const ptype = json.pipeline_type || "";
+    const needsExtract = json.needs_extraction === true;
+
+    if (json.ingested === true && chunks > 0 && ptype === "image_description")
+      return { kind: "ok", badge: "DESCRIBED", msg: `image described · ${chunks} chunk` };
+    if (json.ingested === true && chunks > 0)
+      return {
+        kind: needsExtract ? "warn" : "ok",
+        badge: needsExtract ? "INDEXED·REVIEW" : "INDEXED",
+        msg: `${chunks} chunk(s) indexed${needsExtract ? " · low confidence — review recommended" : ""}`,
+      };
+    if (json.ingested === true && chunks === 0)
+      return {
+        kind: ptype === "image_description" ? "warn" : "info",
+        badge: ptype === "image_description" ? "STORED·NO DESC" : "STORED",
+        msg: json.reason || "bytes saved, no text extracted",
+      };
     if (json.ingested === false && /backfilled/i.test(json.reason || ""))
-      return { kind: "info", badge: "BACKFILLED",
-        msg: "attached bytes to existing source" };
+      return { kind: "info", badge: "BACKFILLED", msg: "attached bytes to existing source" };
     if (json.ingested === false && /already ingested/i.test(json.reason || ""))
       return { kind: "info", badge: "DUPLICATE", msg: "exact duplicate" };
     return { kind: "info", badge: "OK", msg: json.reason || "done" };
   }
 
+  // ---------- render upload result ----------
   function render(file, domain, classified, json) {
     const sid = sourceIdFrom(json);
     const path = storedPathFrom(json);
+    const ptype = json.pipeline_type || "";
+    const chunks = json.chunks_stored || 0;
+    const canExtract = !!sid;
+
     const div = document.createElement("div");
     div.className = "result " + classified.kind;
+
+    const pipelineHtml = renderPipelineLog(json.pipeline || []);
+    const hasPipeline = !!(json.pipeline && json.pipeline.length);
+
     div.innerHTML = `
       <div>
         <div class="name">
@@ -253,35 +321,116 @@
           ${escapeHtml(file.name)} <span class="meta">→ ${escapeHtml(domain)}</span>
         </div>
         <div class="meta">${escapeHtml(classified.msg)}</div>
-        ${sid ? `<div class="meta">source_id: <code>${escapeHtml(sid)}</code>${
-          path ? ` &middot; ${escapeHtml(path)}` : ""
-        }</div>` : ""}
+        ${sid ? `<div class="meta">source_id: <code>${escapeHtml(sid)}</code>${path ? ` · ${escapeHtml(path)}` : ""}</div>` : ""}
+        ${ptype ? `<div class="meta" style="color:var(--muted);font-size:11px;">pipeline: ${escapeHtml(ptype)}</div>` : ""}
+        ${hasPipeline ? `<button class="pipeline-toggle">▶ show pipeline log (${(json.pipeline||[]).length} steps)</button>` : ""}
+        ${pipelineHtml}
+        ${canExtract ? `<button class="extract" data-sid="${escapeHtml(sid)}" data-name="${escapeHtml(file.name)}">⚡ Extract Facts</button>` : ""}
       </div>
-      <div>${
-        sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""
-      }</div>`;
-    const btn = div.querySelector("button.copy");
-    if (btn) btn.onclick = () => {
-      navigator.clipboard.writeText(btn.dataset.sid);
-      btn.textContent = "copied";
-      setTimeout(() => (btn.textContent = "copy id"), 1200);
+      <div>${sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""}</div>`;
+
+    // copy id
+    const copyBtn = div.querySelector("button.copy");
+    if (copyBtn) copyBtn.onclick = () => {
+      navigator.clipboard.writeText(copyBtn.dataset.sid);
+      copyBtn.textContent = "copied";
+      setTimeout(() => (copyBtn.textContent = "copy id"), 1200);
     };
+
+    // pipeline toggle
+    const toggle = div.querySelector(".pipeline-toggle");
+    const log = div.querySelector(".pipeline-log");
+    if (toggle && log) toggle.onclick = () => {
+      log.classList.toggle("open");
+      toggle.textContent = log.classList.contains("open")
+        ? `▼ hide pipeline log (${(json.pipeline||[]).length} steps)`
+        : `▶ show pipeline log (${(json.pipeline||[]).length} steps)`;
+    };
+
+    // Extract Facts
+    const extBtn = div.querySelector("button.extract");
+    if (extBtn) extBtn.onclick = () => runExtract(extBtn, div, sid, file.name);
+
     $("results").prepend(div);
   }
 
+  // ---------- Extract Facts ----------
+  async function runExtract(btn, card, sid, filename) {
+    btn.disabled = true;
+    btn.classList.add("running");
+    btn.textContent = "⚡ Extracting…";
+
+    // Inject a live "running" pipeline step
+    let liveLog = card.querySelector(".pipeline-log");
+    if (!liveLog) {
+      liveLog = document.createElement("div");
+      liveLog.className = "pipeline-log open";
+      btn.before(liveLog);
+    }
+    liveLog.classList.add("open");
+    const runningRow = document.createElement("div");
+    runningRow.className = "pipeline-step";
+    runningRow.innerHTML = `<span class="step-icon" style="color:var(--info)">…</span><span class="step-body"><strong>extraction_llm</strong> — calling model…</span>`;
+    liveLog.appendChild(runningRow);
+
+    try {
+      const r = await fetch(`/api/sources/${encodeURIComponent(sid)}/extract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const j = await r.json().catch(() => ({}));
+
+      // Re-render pipeline log with full results
+      liveLog.innerHTML = "";
+      const steps = j.pipeline || (j.detail && j.detail.pipeline) || [];
+      const logHtml = renderPipelineLog(steps);
+      liveLog.innerHTML = logHtml
+        ? logHtml.replace(/^<div class="pipeline-log">/, "").replace(/<\/div>$/, "")
+        : "";
+
+      if (j.success) {
+        btn.textContent = `✓ ${j.facts_written} fact(s) extracted`;
+        btn.style.color = "var(--ok)";
+        btn.style.borderColor = "var(--ok)";
+        if (j.caption) {
+          const cap = document.createElement("div");
+          cap.className = "meta";
+          cap.style.marginTop = "4px";
+          cap.textContent = `Caption: "${j.caption}"`;
+          btn.after(cap);
+        }
+      } else {
+        const errMsg = j.error || (j.detail && (j.detail.error || JSON.stringify(j.detail))) || "extraction failed";
+        btn.textContent = `✗ ${errMsg}`;
+        btn.style.color = "var(--err)";
+        btn.style.borderColor = "var(--err)";
+        btn.disabled = false;
+        btn.classList.remove("running");
+      }
+    } catch (e) {
+      runningRow.innerHTML = `<span class="step-icon" style="color:var(--err)">✗</span><span class="step-body">network error: ${escapeHtml(String(e))}</span>`;
+      btn.textContent = "⚡ Extract Facts";
+      btn.disabled = false;
+      btn.classList.remove("running");
+    }
+  }
+
+  // ---------- pending placeholder ----------
   function pending(file, domain) {
     const div = document.createElement("div");
     div.className = "result info";
     div.innerHTML = `
       <div>
-        <div class="name"><span class="badge info">UPLOADING</span> ${file.name}
-          <span class="meta">→ ${domain}</span></div>
+        <div class="name"><span class="badge info">UPLOADING</span> ${escapeHtml(file.name)}
+          <span class="meta">→ ${escapeHtml(domain)}</span></div>
         <div class="meta">${(file.size/1024).toFixed(0)} KB</div>
       </div><div></div>`;
     $("results").prepend(div);
     return div;
   }
 
+  // ---------- upload ----------
   async function handleFiles(fileList) {
     const domain = $("domain").value;
     const overwrite = $("overwrite").checked;
@@ -296,9 +445,7 @@
         const qs = new URLSearchParams();
         if (overwrite) qs.set("overwrite", "true");
         if (force) qs.set("force", "true");
-        const url = `/api/upload/${encodeURIComponent(domain)}${
-          qs.toString() ? "?" + qs : ""
-        }`;
+        const url = `/api/upload/${encodeURIComponent(domain)}${qs.toString() ? "?" + qs : ""}`;
         const r = await fetch(url, { method: "POST", body: fd });
         const j = await r.json().catch(() => ({}));
         const cls = classify(j, r.status);

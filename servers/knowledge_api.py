@@ -48,6 +48,7 @@ from servers.knowledge import (
     _ingest_file_at_path,
     apply_curation_item,
     delete_source_record,
+    extract_source_facts_single_shot,
     rename_source_record,
     source_download_bytes,
 )
@@ -430,6 +431,27 @@ async def download_source_token(token: str) -> Response:
     if not item:
         raise HTTPException(status_code=404, detail="Download link not found or expired")
     return await _download_source_response(str(item["source_id"]))
+
+
+@app.post("/api/sources/{source_id}/extract")
+async def extract_source(
+    source_id: str,
+    body: dict[str, Any] | None = OPTIONAL_BODY,
+) -> dict[str, Any]:
+    """Single-shot fact extraction: one LLM call extracts structured facts and/or a caption.
+
+    For images and zero-chunk sources: sends raw bytes to the extraction model directly.
+    For text documents: uses existing indexed chunks (cheaper — no image token cost).
+    The extraction model and prompt caching are configured via KNOWLEDGE_EXTRACTION_MODEL.
+    """
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    hint = str((body or {}).get("hint") or "") or None
+    result = await extract_source_facts_single_shot(
+        settings, embeddings, sparse_encoder, vectors, db, source_id, hint=hint
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=422, detail=result)
+    return result
 
 
 @app.delete("/api/sources/{source_id}")
