@@ -5,7 +5,7 @@ Last reviewed: 2026-05-04
 Snapshot evaluation of `servers/knowledge.py` + `servers/knowledge_api.py` and
 related modules. Update this doc whenever a meaningful structural change lands.
 
-## Overall: 7.5 / 10
+## Overall: 7.7 / 10
 
 A non-trivial, production-quality personal RAG stack. Punches above what most
 weekend projects ship.
@@ -23,7 +23,7 @@ weekend projects ship.
 | Security | 7 | Path traversal blocked, token-gated downloads, auth token on REST. Watch: token cleanup runs on every read (cheap DoS vector), no rate limiting, single-user (intentional). |
 | API ergonomics | 8 | MCP tools well-named and documented. Pre-formatted `download_markdown` is great for chat agents. REST and MCP stay in sync via shared functions. |
 | Schema design | 8 | Reasonable normalization. Minor `id`/`source_id` field naming inconsistency in returned dicts. `related_domains` as JSON-in-TEXT is pragmatic. |
-| Testing | 4 | Curation and basic server tests exist; nothing exercises hybrid search, ingest pipelines, or sparse encoder math. The most complex code is the least tested. |
+| Testing | 6 | Curation, basic server, and chunking/BM25/facts/validator unit tests now in place. Still missing: end-to-end ingest + hybrid-search integration tests behind a Qdrant-backed fixture. |
 
 ## Recent Improvements (2026-05-04)
 
@@ -39,6 +39,10 @@ weekend projects ship.
   for context-size control. Default `None` preserves prior behavior.
 - `knowledge_sources` now reports `download_error` instead of silently
   dropping the URL when token creation fails.
+- Added `tests/test_knowledge_internals.py` (40 unit tests) covering
+  `chunk_text`, `BM25SparseEncoder`, `_is_likely_binary`, the text-ingest
+  validator, the search keyword regex, and `facts_search` key/value
+  semantics. Total suite: 75 tests, runs in ~2.5s.
 
 ## Recommended Next Investments (in order)
 
