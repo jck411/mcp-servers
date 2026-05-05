@@ -40,11 +40,6 @@
   .row { display: flex; gap: 12px; align-items: flex-end; }
   .row > * { flex: 1; }
   .row > .small { flex: 0 0 auto; }
-  .checks { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); }
-  .checks label { display: inline-flex; align-items: center; gap: 6px;
-    text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--muted); margin: 0; }
-  .checks input { width: auto; }
-
   #drop {
     border: 2px dashed var(--border); border-radius: 8px;
     padding: 36px 16px; text-align: center; color: var(--muted);
@@ -136,10 +131,6 @@
           <label>&nbsp;</label>
           <button id="refresh-domains" title="Reload domain list">↻</button>
         </div>
-      </div>
-      <div class="checks">
-        <label><input type="checkbox" id="overwrite" /> overwrite (replace file with same name)</label>
-        <label><input type="checkbox" id="force" /> force (re-extract / re-embed)</label>
       </div>
     </div>
 
@@ -328,7 +319,7 @@
   function classify(json, status) {
     if (status === 409) return {
       kind: "warn", badge: "EXISTS",
-      msg: messageFrom(json, "Filename already on disk. Tick overwrite to replace."),
+      msg: messageFrom(json, "Filename already exists. Remove existing source, then upload again."),
     };
     if (!json || json.success === false) return {
       kind: "err", badge: "ERROR", msg: messageFrom(json, "upload failed"),
@@ -364,7 +355,10 @@
     const path = storedPathFrom(json);
     const ptype = json.pipeline_type || "";
     const chunks = json.chunks_stored || 0;
-    const canExtract = !!sid && ptype !== "unsupported";
+    const isConflict = classified.badge === "EXISTS";
+    const canExtract = !!sid && !isConflict && ptype !== "unsupported";
+    const canRemove = !!sid && classified.badge !== "DUPLICATE";
+    const removeLabel = isConflict ? "🗑 Remove Existing" : "🗑 Remove";
     const ocrMethod = ocrSummaryFrom(json.pipeline || []);
 
     const div = document.createElement("div");
@@ -386,7 +380,7 @@
         ${pipelineHtml}
         <div class="card-actions">
           ${canExtract ? `<button class="extract" data-sid="${escapeHtml(sid)}" data-name="${escapeHtml(file.name)}">⚡ Extract Facts</button>` : ""}
-          ${canExtract ? `<button class="remove" data-sid="${escapeHtml(sid)}">🗑 Remove</button>` : ""}
+          ${canRemove ? `<button class="remove" data-sid="${escapeHtml(sid)}">${removeLabel}</button>` : ""}
         </div>
       </div>
       <div>${sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""}</div>`;
@@ -529,8 +523,6 @@
   // ---------- upload ----------
   async function handleFiles(fileList) {
     const domain = $("domain").value;
-    const overwrite = $("overwrite").checked;
-    const force = $("force").checked;
     if (!domain) return;
 
     for (const file of fileList) {
@@ -538,10 +530,7 @@
       try {
         const fd = new FormData();
         fd.append("file", file, file.name);
-        const qs = new URLSearchParams();
-        if (overwrite) qs.set("overwrite", "true");
-        if (force) qs.set("force", "true");
-        const url = `/api/upload/${encodeURIComponent(domain)}${qs.toString() ? "?" + qs : ""}`;
+        const url = `/api/upload/${encodeURIComponent(domain)}`;
         const r = await fetch(url, { method: "POST", body: fd });
         let j = {};
         let parseOk = false;

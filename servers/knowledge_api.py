@@ -185,7 +185,7 @@ async def upload_file(
         detail: dict[str, Any] = {
             "message": (
                 f"File '{filename}' already exists in '{domain}'. "
-                "Use ?overwrite=true to replace."
+                "Remove the existing source first, then upload again."
             ),
             "file": filename,
             "domain": domain,

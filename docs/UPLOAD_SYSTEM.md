@@ -17,12 +17,34 @@ Everything that happens when you drop a file into the upload UI at `https://api-
 
 ---
 
+## Access Control
+
+The public upload surface is intentionally kept simple: `knowledge_api` does
+not implement per-endpoint login, CSRF, or user accounts in Python. Access is
+provided by **Cloudflare Zero Trust / Cloudflare Access** with email
+confirmation in front of the upload hostname/page.
+
+Protect the whole upload hostname if possible. If using path-based rules, cover
+both the browser UI and the API paths it calls:
+
+```
+/ui/*
+/api/*
+```
+
+This keeps the service code small and easy to debug. Destructive actions are
+handled operationally instead of with complex app permissions: the UI asks for
+confirmation before deleting a source, and upload conflicts can be handled
+manually by removing the old source first and uploading again.
+
+---
+
 ## Upload Flow
 
 ```
-Browser → POST /api/upload/{domain}?overwrite=&force=
+Browser → POST /api/upload/{domain}
              │
-             ├─ 409 if file exists and overwrite=false
+             ├─ 409 if file exists: remove existing source, then upload again
              ├─ write bytes to knowledge/<domain>/<filename>
              └─ _ingest_file_at_path()
                     │
@@ -81,8 +103,12 @@ Bytes are stored on disk and a source row is created, but no chunks or embedding
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `overwrite` | bool | false | Replace file on disk if same name exists |
-| `force` | bool | false | Re-process even if content hash already ingested |
+| `overwrite` | bool | false | Direct API escape hatch: replace file on disk if same name exists |
+| `force` | bool | false | Direct API escape hatch: re-process even if content hash already ingested |
+
+The browser UI intentionally does not expose `overwrite` or `force`. The normal
+workflow is delete-then-upload: if a filename already exists, click **Remove
+Existing**, confirm deletion, then upload the file again.
 
 **Success response shape:**
 
@@ -111,7 +137,7 @@ Bytes are stored on disk and a source row is created, but no chunks or embedding
 ```json
 {
   "detail": {
-    "message": "File 'W2.2025.pdf' already exists in 'finances'. Use ?overwrite=true to replace.",
+    "message": "File 'W2.2025.pdf' already exists in 'finances'. Remove the existing source first, then upload again.",
     "source_id": "5fb666ad-…",
     "source": { … }
   }
@@ -187,14 +213,14 @@ Lists all sources in a domain. Each item includes `id`, `filename`, `chunk_count
 | `STORED·NO DESC` | Image stored but description failed |
 | `BACKFILLED` | Duplicate hash; stored path was attached to existing source |
 | `DUPLICATE` | Exact duplicate already fully ingested |
-| `EXISTS` | Same filename on disk, `overwrite=false` (409) |
+| `EXISTS` | Same filename on disk. Use **Remove Existing**, then upload again |
 | `ERROR` | Upload failed |
 
 **Buttons on each card:**
 
 - **▶ show pipeline log** — expands per-step details (step name, model, token counts, notes). Only shown when `pipeline` array is non-empty.
 - **⚡ Extract Facts** — calls `POST /api/sources/{id}/extract`. Live "calling model…" placeholder shown while in-flight. On success, shows fact count and rerenders pipeline log with extraction steps. On failure, shows error inline.
-- **🗑 Remove** — calls `DELETE /api/sources/{id}` after a confirmation dialog. Card fades and removes itself on success.
+- **🗑 Remove / Remove Existing** — calls `DELETE /api/sources/{id}` after a confirmation dialog. Card fades and removes itself on success.
 - **copy id** — copies `source_id` to clipboard.
 
 ---
@@ -271,7 +297,7 @@ ssh proxmox-tunnel 'pct exec 110 -- journalctl -u mcp-server@knowledge_api -n 50
 ```bash
 ssh proxmox-tunnel 'pct exec 110 -- bash -c "
   echo test > /tmp/t.txt &&
-  curl -s -X POST http://127.0.0.1:9018/api/upload/finances?overwrite=true -F file=@/tmp/t.txt
+  curl -s -X POST http://127.0.0.1:9018/api/upload/finances -F file=@/tmp/t.txt
 "'
 ```
 
