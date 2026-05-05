@@ -3201,8 +3201,10 @@ async def knowledge_search(
         formatted.append({
             "content": p.get("content", ""),
             "domain": p.get("domain", ""),
+            "source_id": p.get("source_id", ""),
             "source_name": p.get("source_name", ""),
             "source_type": p.get("source_type", ""),
+            "chunk_id": str(r.id),
             "chunk_index": p.get("chunk_index", 0),
             "similarity": round(r.score, 4),
         })
@@ -3217,8 +3219,10 @@ async def knowledge_search(
 
     # Include relevant facts
     if include_facts:
-        # Extract keywords from query for fact matching
-        keywords = [w for w in query.lower().split() if len(w) > 2]
+        # Extract keywords from query for fact matching. Use a regex to strip
+        # punctuation (e.g. "wages?" -> "wages") and keep short tokens like
+        # "vw", "gm", "hr", "ldl" that are valid identifiers.
+        keywords = re.findall(r"\b\w{2,}\b", query.lower())
         if keywords:
             facts = await db.facts_search(resolved_domains, keywords)
             response["facts"] = facts
@@ -3256,7 +3260,9 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
         filename = src.get("filename") or sid
         try:
             token = await db.download_token_create(sid, 900)
-        except Exception:
+        except Exception as exc:
+            src["download_missing"] = True
+            src["download_error"] = f"failed to mint download token: {exc}"
             continue
         url = f"{base}/api/download/{token['token']}"
         safe_label = str(filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
