@@ -2702,19 +2702,26 @@ async def apply_curation_item(
     return {"success": True, "item_id": item_id, "results": results}
 
 
-async def _resolve_domains(domain: str | None, domains: list[str] | None) -> list[str]:
+async def resolve_search_domains(
+    db: KnowledgeDB,
+    domain: str | None,
+    domains: list[str] | None,
+) -> list[str]:
     """Resolve a domain query to a list of domains including related ones.
 
     If a single domain is given, automatically includes its related domains.
-    The 'core' domain is always included unless the caller explicitly excludes it.
+    The 'core' domain is always included when it exists.
     """
-    _, _, _, _, db = _require_ready()
-
     if domains:
-        result = list(domains)
+        result = []
+        for item in domains:
+            clean = str(item).strip()
+            if clean and clean not in result:
+                result.append(clean)
     elif domain:
-        result = [domain]
-        domain_info = await db.domain_get(domain)
+        clean_domain = str(domain).strip()
+        result = [clean_domain] if clean_domain else []
+        domain_info = await db.domain_get(clean_domain) if clean_domain else None
         if domain_info and domain_info["related_domains"]:
             for related in domain_info["related_domains"]:
                 if related not in result:
@@ -2729,6 +2736,73 @@ async def _resolve_domains(domain: str | None, domains: list[str] | None) -> lis
         result.append("core")
 
     return result
+
+
+def search_fact_keywords(query: str) -> list[str]:
+    """Extract fact-search keywords from a free-form search query."""
+    return re.findall(r"\b\w{2,}\b", query.lower())
+
+
+async def search_knowledge(
+    *,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    query: str,
+    domain: str | None = None,
+    domains: list[str] | None = None,
+    limit: int = 10,
+    min_similarity: float = 0.25,
+    include_facts: bool = True,
+    max_chars: int | None = None,
+) -> dict[str, Any]:
+    """Run the shared Knowledge search path used by MCP and REST."""
+    resolved_domains = await resolve_search_domains(db, domain, domains)
+
+    query_embedding = await embeddings.embed(query)
+    sparse_query = sparse_encoder.encode_query(query)
+
+    results = await vectors.search(
+        query_embedding,
+        sparse_query=sparse_query,
+        domains=resolved_domains,
+        limit=limit,
+        min_score=min_similarity,
+    )
+
+    formatted = []
+    for r in results:
+        p = r.payload or {}
+        content = str(p.get("content", ""))
+        if max_chars is not None and max_chars > 0 and len(content) > max_chars:
+            content = content[:max_chars] + "…"
+        formatted.append({
+            "content": content,
+            "domain": p.get("domain", ""),
+            "source_id": p.get("source_id", ""),
+            "source_name": p.get("source_name", ""),
+            "source_type": p.get("source_type", ""),
+            "chunk_id": str(r.id),
+            "chunk_index": p.get("chunk_index", 0),
+            "similarity": round(r.score, 4),
+        })
+
+    response: dict[str, Any] = {
+        "success": True,
+        "query": query,
+        "searched_domains": resolved_domains,
+        "count": len(formatted),
+        "results": formatted,
+    }
+
+    if include_facts:
+        keywords = search_fact_keywords(query)
+        facts = await db.facts_search(resolved_domains, keywords) if keywords else []
+        response["facts"] = facts
+        response["fact_count"] = len(facts)
+
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -3195,59 +3269,20 @@ async def knowledge_search(
         max_chars: Optional cap on each result's content length to reduce
             context size. None (default) returns full chunk text.
     """
-    settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
-
-    resolved_domains = await _resolve_domains(domain, domains)
-
-    # Semantic search
-    query_embedding = await embeddings_client.embed(query)
-    sparse_query = sparse_encoder.encode_query(query)
-
-    results = await vectors.search(
-        query_embedding,
-        sparse_query=sparse_query,
-        domains=resolved_domains,
+    _, embeddings_client, sparse_encoder, vectors, db = _require_ready()
+    return await search_knowledge(
+        embeddings=embeddings_client,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+        query=query,
+        domain=domain,
+        domains=domains,
         limit=limit,
-        min_score=min_similarity,
+        min_similarity=min_similarity,
+        include_facts=include_facts,
+        max_chars=max_chars,
     )
-
-    formatted = []
-    for r in results:
-        p = r.payload or {}
-        content = str(p.get("content", ""))
-        if max_chars is not None and max_chars > 0 and len(content) > max_chars:
-            content = content[:max_chars] + "…"
-        formatted.append({
-            "content": content,
-            "domain": p.get("domain", ""),
-            "source_id": p.get("source_id", ""),
-            "source_name": p.get("source_name", ""),
-            "source_type": p.get("source_type", ""),
-            "chunk_id": str(r.id),
-            "chunk_index": p.get("chunk_index", 0),
-            "similarity": round(r.score, 4),
-        })
-
-    response: dict[str, Any] = {
-        "success": True,
-        "query": query,
-        "searched_domains": resolved_domains,
-        "count": len(formatted),
-        "results": formatted,
-    }
-
-    # Include relevant facts
-    if include_facts:
-        # Extract keywords from query for fact matching. Use a regex to strip
-        # punctuation (e.g. "wages?" -> "wages") and keep short tokens like
-        # "vw", "gm", "hr", "ldl" that are valid identifiers.
-        keywords = re.findall(r"\b\w{2,}\b", query.lower())
-        if keywords:
-            facts = await db.facts_search(resolved_domains, keywords)
-            response["facts"] = facts
-            response["fact_count"] = len(facts)
-
-    return response
 
 
 @mcp.tool("knowledge_sources")

@@ -146,6 +146,28 @@ Existing**, confirm deletion, then upload the file again.
 
 ---
 
+### `GET /api/search`
+
+REST search uses the same shared core path as MCP `knowledge_search`, so API
+clients and agents get the same domain resolution, fact matching, and result
+metadata.
+
+| Query param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `q` | string | required | Search query |
+| `domain` | string | null | Search one domain plus its related domains and `core` |
+| `domains` | comma list | null | Explicit domains to search; overrides `domain` |
+| `limit` | int | 10 | Max chunk results |
+| `min_similarity` | float | 0.25 | Dense-search score threshold |
+| `include_facts` | bool | true | Also search structured facts by keyword |
+| `max_chars` | int | null | Truncate each result chunk to this many characters |
+
+Each result includes `source_id`, `chunk_id`, `source_name`, `source_type`,
+`chunk_index`, and `similarity`, so a UI or script can chain directly into
+download, rename, delete, or fact extraction endpoints.
+
+---
+
 ### `POST /api/sources/{source_id}/extract`
 
 Runs single-shot fact extraction using `KNOWLEDGE_EXTRACTION_MODEL` (default `anthropic/claude-sonnet-4-6`).

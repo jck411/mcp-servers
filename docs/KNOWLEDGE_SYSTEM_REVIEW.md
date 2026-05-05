@@ -37,12 +37,15 @@ weekend projects ship.
   "blood pressure 130" now hit a fact whose value is `130/82`.
 - `knowledge_search` accepts optional `max_chars` to truncate chunk content
   for context-size control. Default `None` preserves prior behavior.
+- `GET /api/search` now uses the same shared search helper as
+  `knowledge_search`: related-domain/core resolution, `source_id`/`chunk_id`
+  result metadata, `max_chars`, and regex-based fact keywords stay in sync.
 - `knowledge_sources` now reports `download_error` instead of silently
   dropping the URL when token creation fails.
-- Added `tests/test_knowledge_internals.py` (40 unit tests) covering
+- Added `tests/test_knowledge_internals.py` covering
   `chunk_text`, `BM25SparseEncoder`, `_is_likely_binary`, the text-ingest
-  validator, the search keyword regex, and `facts_search` key/value
-  semantics. Total suite: 75 tests, runs in ~2.5s.
+  validator, search keyword extraction, and `facts_search` key/value
+  semantics.
 - Replaced `print(..., file=sys.stderr)` with stdlib `logging` across
   `knowledge.py` and `knowledge_api.py`. New `shared/logging_config.py`
   centralizes setup; `LOG_LEVEL` env var controls verbosity.
@@ -52,7 +55,9 @@ weekend projects ship.
   count, chunk count, BM25 doc count, and embedding model.
 - Added `tests/test_logging_config.py` (10 tests) covering the decorator's
   success / error / duration / name-preservation paths and the result
-  summarizer. Total suite: 85 tests.
+  summarizer.
+- Added shared-search parity tests for REST/MCP result fields, domain
+  resolution, truncation, and fact keyword extraction. Current suite: 87 tests.
 
 ## Recommended Next Investments (in order)
 

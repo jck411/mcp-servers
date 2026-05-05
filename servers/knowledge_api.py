@@ -51,6 +51,7 @@ from servers.knowledge import (
     delete_sources_for_overwrite,
     extract_source_facts_single_shot,
     rename_source_record,
+    search_knowledge,
     source_download_bytes,
 )
 from servers.knowledge_source_files import (
@@ -272,50 +273,29 @@ async def upload_file(
 @app.get("/api/search")
 async def search(
     q: str,
+    domain: str | None = None,
     domains: str | None = None,
     limit: int = 10,
     min_similarity: float = 0.25,
+    include_facts: bool = True,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
     """Semantic + keyword search across the knowledge base."""
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-
-    if domains:
-        domain_list = [d.strip() for d in domains.split(",")]
-    else:
-        all_domains = await db.domain_list()
-        domain_list = [d["name"] for d in all_domains if not d["archived"]]
-
-    if "core" not in domain_list and await db.domain_exists("core"):
-        domain_list.append("core")
-
-    query_embedding = await embeddings.embed(q)
-    sparse_query = sparse_encoder.encode_query(q)
-
-    results = await vectors.search(
-        query_embedding,
-        sparse_query=sparse_query,
+    _, embeddings, sparse_encoder, vectors, db = _require_ready()
+    domain_list = [d.strip() for d in domains.split(",") if d.strip()] if domains else None
+    return await search_knowledge(
+        embeddings=embeddings,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+        query=q,
+        domain=domain,
         domains=domain_list,
         limit=limit,
-        min_score=min_similarity,
+        min_similarity=min_similarity,
+        include_facts=include_facts,
+        max_chars=max_chars,
     )
-
-    keywords = [w for w in q.lower().split() if len(w) > 2]
-    facts = await db.facts_search(domain_list, keywords) if keywords else []
-
-    return {
-        "query": q,
-        "searched_domains": domain_list,
-        "results": [
-            {
-                "content": (r.payload or {}).get("content", ""),
-                "domain": (r.payload or {}).get("domain", ""),
-                "source_name": (r.payload or {}).get("source_name", ""),
-                "similarity": round(r.score, 4),
-            }
-            for r in results
-        ],
-        "facts": facts,
-    }
 
 
 # ---------------------------------------------------------------------------

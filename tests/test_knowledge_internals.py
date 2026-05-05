@@ -8,8 +8,8 @@ text-ingest input validator.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,8 +20,10 @@ from servers.knowledge import (
     _validate_text_ingest_inputs,
     chunk_text,
     compute_text_hash,
+    resolve_search_domains,
+    search_fact_keywords,
+    search_knowledge,
 )
-
 
 # ---------------------------------------------------------------------------
 # chunk_text
@@ -263,13 +265,108 @@ async def test_facts_search_empty_domains_returns_empty(db_with_facts: Knowledge
 # ---------------------------------------------------------------------------
 
 
-def test_search_keyword_regex_keeps_short_identifiers():
-    # Mirrors the in-tool regex used by knowledge_search to feed facts_search.
-    keywords = re.findall(r"\b\w{2,}\b", "What is my LDL and BP?".lower())
+def test_search_fact_keywords_keeps_short_identifiers():
+    keywords = search_fact_keywords("What is my LDL and BP?")
     assert "ldl" in keywords
     assert "bp" in keywords
 
 
-def test_search_keyword_regex_strips_punctuation():
-    keywords = re.findall(r"\b\w{2,}\b", "wages?".lower())
+def test_search_fact_keywords_strips_punctuation():
+    keywords = search_fact_keywords("wages?")
     assert keywords == ["wages"]
+
+
+async def test_resolve_search_domains_includes_related_and_core(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "domains.db")
+    await db.initialize()
+    await db.domain_create("core", "core", [])
+    await db.domain_create("finance", "finance", [])
+    await db.domain_create("health", "health", ["finance"])
+    try:
+        domains = await resolve_search_domains(db, "health", None)
+    finally:
+        await db.close()
+
+    assert domains == ["health", "finance", "core"]
+
+
+async def test_search_knowledge_returns_ids_truncates_and_searches_facts(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "search.db")
+    await db.initialize()
+    await db.domain_create("core", "core", [])
+    await db.domain_create("finance", "finance", [])
+    await db.domain_create("health", "health", ["finance"])
+    await db.fact_set("health", "ldl_2024_12", "142 mg/dL", source="lab")
+
+    class FakeEmbeddings:
+        async def embed(self, query: str) -> list[float]:
+            self.query = query
+            return [0.1, 0.2]
+
+    class FakeSparseEncoder:
+        def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+            self.query = query
+            return [7], [1.0]
+
+    class FakeVectors:
+        async def search(
+            self,
+            query_embedding: list[float],
+            *,
+            sparse_query: tuple[list[int], list[float]] | None,
+            domains: list[str] | None,
+            limit: int,
+            min_score: float,
+        ) -> list[SimpleNamespace]:
+            self.call = {
+                "query_embedding": query_embedding,
+                "sparse_query": sparse_query,
+                "domains": domains,
+                "limit": limit,
+                "min_score": min_score,
+            }
+            return [
+                SimpleNamespace(
+                    id="chunk-1",
+                    score=0.87654,
+                    payload={
+                        "content": "abcdefghij",
+                        "domain": "health",
+                        "source_id": "source-1",
+                        "source_name": "labs.pdf",
+                        "source_type": "pdf",
+                        "chunk_index": 2,
+                    },
+                )
+            ]
+
+    vectors = FakeVectors()
+    try:
+        response = await search_knowledge(
+            embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+            sparse_encoder=FakeSparseEncoder(),  # type: ignore[arg-type]
+            vectors=vectors,  # type: ignore[arg-type]
+            db=db,
+            query="LDL?",
+            domain="health",
+            limit=5,
+            min_similarity=0.2,
+            max_chars=4,
+        )
+    finally:
+        await db.close()
+
+    assert vectors.call["domains"] == ["health", "finance", "core"]
+    assert response["searched_domains"] == ["health", "finance", "core"]
+    assert response["results"] == [{
+        "content": "abcd\u2026",
+        "domain": "health",
+        "source_id": "source-1",
+        "source_name": "labs.pdf",
+        "source_type": "pdf",
+        "chunk_id": "chunk-1",
+        "chunk_index": 2,
+        "similarity": 0.8765,
+    }]
+    assert response["fact_count"] == 1
+    assert response["facts"][0]["key"] == "ldl_2024_12"
