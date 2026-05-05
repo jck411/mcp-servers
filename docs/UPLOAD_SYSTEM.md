@@ -33,7 +33,7 @@ Browser → POST /api/upload/{domain}?overwrite=&force=
                     │
                     └─ _extract_and_chunk_with_log()  ← determines pipeline_type
                            │
-                           ├─ .pdf          → document_ocr  (vision LLM per page)
+                           ├─ .pdf          → document_ocr  (native text, then vision OCR)
                            ├─ .jpg/.png/…   → image_description  (vision LLM, single call)
                            ├─ .txt/.md/…    → text_read  (read bytes, decode UTF-8)
                            └─ other         → unsupported  (bytes stored, no chunks)
@@ -51,10 +51,11 @@ Browser → POST /api/upload/{domain}?overwrite=&force=
 
 ### `document_ocr` — PDFs
 
-1. **pdf_render**: Render each page to an image at `KNOWLEDGE_VISION_DPI` (default 200 dpi), capped at `KNOWLEDGE_VISION_MAX_PAGES` (default 20).
-2. **vision_ocr** (per page): Send image to `KNOWLEDGE_VISION_MODEL` (default `google/gemini-2.0-flash-001`) via OpenRouter. Returns the page text.
-3. **chunking**: Split concatenated page text into overlapping chunks (`KNOWLEDGE_CHUNK_MAX_CHARS` / `KNOWLEDGE_CHUNK_OVERLAP`).
-4. **embed + store**: Dense embedding via `EMBEDDING_MODEL` (default `openai/text-embedding-3-small`), sparse BM25 encoding, upsert to Qdrant.
+1. **pdftotext**: Try native PDF text extraction first.
+2. **rasterize**: If no embedded text is found, render pages at `KNOWLEDGE_VISION_DPI` (default 200 dpi), capped at `KNOWLEDGE_VISION_MAX_PAGES` (default 20).
+3. **vision_ocr** (per page): Send each rendered page to `KNOWLEDGE_VISION_MODEL` (default `google/gemini-2.0-flash-001`) via OpenRouter.
+4. **chunking**: Split concatenated page text into overlapping chunks (`KNOWLEDGE_CHUNK_MAX_CHARS` / `KNOWLEDGE_CHUNK_OVERLAP`).
+5. **embed + store**: Dense embedding via `EMBEDDING_MODEL` (default `openai/text-embedding-3-small`), sparse BM25 encoding, upsert to Qdrant.
 
 ### `image_description` — Photos/images
 
@@ -96,11 +97,7 @@ Bytes are stored on disk and a source row is created, but no chunks or embedding
   "stored_path": "finances/W2.2025.pdf",
   "pipeline_type": "document_ocr",
   "pipeline": [
-    {"step": "pdf_render", "status": "ok", "note": "2 pages rendered"},
-    {"step": "vision_ocr", "model": "google/gemini-2.0-flash-001", "status": "ok",
-     "note": "page 1/2 — 1842 chars", "tokens_in": 500, "tokens_out": 400},
-    {"step": "vision_ocr", "model": "google/gemini-2.0-flash-001", "status": "ok",
-     "note": "page 2/2 — 1210 chars", "tokens_in": 480, "tokens_out": 310},
+    {"step": "pdftotext", "status": "ok", "note": "3052 chars (native PDF text)"},
     {"step": "chunking", "status": "ok", "note": "15 chunk(s) from 3052 chars"}
   ],
   "needs_extraction": false
@@ -131,8 +128,9 @@ Uses **forced tool calling** (`tool_choice: store_extracted_facts`) to guarantee
 
 **How it gathers content:**
 
-- If the source is an image (`chunks=0` or image extension): reads the raw file bytes, sends as a base64 `image_url` message.
+- If the source is an image: reads the raw file bytes, sends as a base64 `image_url` message.
 - Otherwise: loads all stored chunk text from Qdrant, concatenates, sends as a single text message.
+- Unsupported zero-chunk binaries are rejected with a clear error instead of being sent to the vision model as fake images.
 
 **Response:**
 

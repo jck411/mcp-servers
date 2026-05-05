@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import re
@@ -302,6 +303,7 @@ class KnowledgeDB:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA busy_timeout=10000")
         await self._conn.executescript("""
@@ -547,6 +549,8 @@ class KnowledgeDB:
     async def facts_search(self, domains: list[str], keys: list[str]) -> list[dict[str, Any]]:
         """Search facts across multiple domains by key substring match."""
         assert self._conn is not None
+        if not domains:
+            return []
         placeholders_d = ",".join("?" for _ in domains)
         conditions = [f"domain IN ({placeholders_d})"]
         params: list[Any] = list(domains)
@@ -569,16 +573,38 @@ class KnowledgeDB:
 
     # -- Sources --
 
-    async def source_exists(self, content_hash: str) -> bool:
+    async def source_exists(self, content_hash: str, domain: str | None = None) -> bool:
         assert self._conn is not None
+        if domain is not None:
+            cursor = await self._conn.execute(
+                "SELECT 1 FROM sources WHERE content_hash = ? AND domain = ?",
+                (content_hash, domain),
+            )
+            return await cursor.fetchone() is not None
         cursor = await self._conn.execute(
             "SELECT 1 FROM sources WHERE content_hash = ?", (content_hash,)
         )
         return await cursor.fetchone() is not None
 
-    async def source_get_by_hash(self, content_hash: str) -> dict[str, Any] | None:
+    async def source_get_by_hash(
+        self,
+        content_hash: str,
+        domain: str | None = None,
+    ) -> dict[str, Any] | None:
         """Return the first existing source row matching this content hash, if any."""
         assert self._conn is not None
+        if domain is not None:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, domain, source_type, filename, content_hash, chunk_count,
+                       ingested_at, stored_path, media_type, size_bytes
+                FROM sources WHERE content_hash = ? AND domain = ?
+                ORDER BY ingested_at ASC LIMIT 1
+                """,
+                (content_hash, domain),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
         cursor = await self._conn.execute(
             """
             SELECT id, domain, source_type, filename, content_hash, chunk_count,
@@ -714,6 +740,25 @@ class KnowledgeDB:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def sources_list_by_domain_filename(
+        self, domain: str, filename: str
+    ) -> list[dict[str, Any]]:
+        """Return all source rows matching domain + filename, newest first."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
+                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
+                   s.size_bytes
+            FROM sources s
+            WHERE s.domain = ? AND s.filename = ?
+            ORDER BY s.ingested_at DESC
+            """,
+            (domain, filename),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def source_rename(
         self,
@@ -1049,15 +1094,17 @@ class KnowledgeVectorStore:
 
     async def chunks_by_source(self, source_id: str, limit: int = 1000) -> list[dict[str, Any]]:
         """Return stored chunk payloads for one source, ordered by chunk index."""
+        limit = max(1, limit)
         points = []
         offset = None
         while True:
+            remaining = limit - len(points)
             batch, offset = await self._client.scroll(
                 collection_name=self._collection,
                 scroll_filter=Filter(
                     must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
                 ),
-                limit=min(limit, 256),
+                limit=min(remaining, 256),
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
@@ -1072,12 +1119,14 @@ class KnowledgeVectorStore:
 
     async def chunks_all(self, limit: int = 50_000) -> list[dict[str, Any]]:
         """Scroll all chunk payloads — used for BM25 warm-up on startup."""
+        limit = max(1, limit)
         points = []
         offset = None
         while True:
+            remaining = limit - len(points)
             batch, offset = await self._client.scroll(
                 collection_name=self._collection,
-                limit=256,
+                limit=min(remaining, 256),
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
@@ -1259,6 +1308,28 @@ async def delete_source_record(
     }
 
 
+async def delete_sources_for_overwrite(
+    settings: KnowledgeSettings,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    domain: str,
+    filename: str,
+) -> list[dict[str, Any]]:
+    """Remove existing source rows/chunks for a domain filename before replacement."""
+    deleted: list[dict[str, Any]] = []
+    for source in await db.sources_list_by_domain_filename(domain, filename):
+        result = await delete_source_record(
+            settings,
+            vectors,
+            db,
+            str(source["id"]),
+            delete_file=True,
+        )
+        if result.get("success"):
+            deleted.append(result)
+    return deleted
+
+
 async def rename_source_record(
     settings: KnowledgeSettings,
     vectors: KnowledgeVectorStore,
@@ -1277,17 +1348,29 @@ async def rename_source_record(
 
     old_path = resolve_source_path(settings.knowledge_path, source)
     renamed_file = False
+    preserved_files: list[str] = []
     stored_path = source.get("stored_path")
     if old_path and old_path.exists() and old_path.is_file():
         new_path = old_path.with_name(clean_filename)
-        if new_path.exists() and new_path != old_path:
-            return {"success": False, "error": f"File already exists: {new_path.name}"}
+        rel_path = source_relative_path(settings.knowledge_path, old_path)
         if new_path != old_path:
-            old_path.rename(new_path)
-            renamed_file = True
-            stored_path = source_relative_path(settings.knowledge_path, new_path)
+            references = await db.sources_referencing_file(
+                stored_paths=[rel_path, str(old_path)],
+                domain=source.get("domain"),
+                filename=source.get("filename"),
+                exclude_source_id=source_id,
+            )
+            if references:
+                preserved_files.append(rel_path)
+                stored_path = rel_path
+            else:
+                if new_path.exists():
+                    return {"success": False, "error": f"File already exists: {new_path.name}"}
+                old_path.rename(new_path)
+                renamed_file = True
+                stored_path = source_relative_path(settings.knowledge_path, new_path)
         else:
-            stored_path = source_relative_path(settings.knowledge_path, old_path)
+            stored_path = rel_path
 
     await db.source_rename(source_id, clean_filename, stored_path)
     await vectors.update_source_name(source_id, clean_filename)
@@ -1298,6 +1381,7 @@ async def rename_source_record(
         "old_filename": source.get("filename"),
         "new_filename": clean_filename,
         "renamed_file": renamed_file,
+        "preserved_files": preserved_files,
         "source": updated,
     }
 
@@ -1457,8 +1541,10 @@ async def _tesseract_image(path: Path, language: str) -> str:
 
 
 _IMAGE_MEDIA = {
+    ".avif": "image/avif",
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".heic": "image/heic", ".heif": "image/heif",
     ".tif": "image/tiff", ".tiff": "image/tiff",
 }
 
@@ -1797,25 +1883,58 @@ async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str
 
 def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
     """Chunk plain text into overlapping segments."""
+    text = text.strip()
+    if not text:
+        return []
+
+    max_chars = max(1, int(max_chars or 1000))
+    overlap = max(0, min(int(overlap or 0), max_chars - 1))
     if len(text) <= max_chars:
         return [text]
 
-    chunks = []
+    chunks: list[str] = []
     current = ""
+
+    def append_current() -> None:
+        nonlocal current
+        clean = current.strip()
+        if clean:
+            chunks.append(clean)
+        current = ""
+
+    def append_long_segment(segment: str) -> None:
+        start = 0
+        while start < len(segment):
+            end = min(start + max_chars, len(segment))
+            piece = segment[start:end].strip()
+            if piece:
+                chunks.append(piece)
+            if end >= len(segment):
+                break
+            start = end - overlap if overlap else end
+
     for para in text.split("\n\n"):
-        if len(current) + len(para) > max_chars:
-            if current:
-                chunks.append(current.strip())
-            # Start new chunk with overlap from end of previous
+        para = para.strip()
+        if not para:
+            continue
+
+        if len(para) > max_chars:
+            append_current()
+            append_long_segment(para)
+            continue
+
+        separator = "\n\n" if current else ""
+        if len(current) + len(separator) + len(para) <= max_chars:
+            current = f"{current}{separator}{para}" if current else para
+        else:
+            append_current()
             if chunks and overlap > 0:
-                prev = chunks[-1]
-                current = prev[-overlap:] + "\n\n" + para
+                prefix = chunks[-1][-overlap:].strip()
+                candidate = f"{prefix}\n\n{para}" if prefix else para
+                current = candidate if len(candidate) <= max_chars else para
             else:
                 current = para
-        else:
-            current = current + "\n\n" + para if current else para
-    if current:
-        chunks.append(current.strip())
+    append_current()
 
     return [c for c in chunks if c]
 
@@ -1898,7 +2017,7 @@ async def _ingest_file_at_path(
     media_type = source_media_type(dest.name)
     size_bytes = dest.stat().st_size
 
-    existing = await db.source_get_by_hash(file_hash)
+    existing = await db.source_get_by_hash(file_hash, domain=domain)
     if existing and not force:
         existing_id = str(existing.get("id") or "")
         existing_path = existing.get("stored_path")
@@ -1909,7 +2028,6 @@ async def _ingest_file_at_path(
                 stored_path=rel_path,
                 media_type=media_type,
                 size_bytes=size_bytes,
-                domain=domain,
             )
             return {
                 "success": True,
@@ -1949,7 +2067,6 @@ async def _ingest_file_at_path(
         )
         # Determine a helpful reason from the pipeline log
         failed = [s for s in pipeline_log if s.get("status") == "failed"]
-        warn = [s for s in pipeline_log if s.get("status") == "warn"]
         if failed:
             reason = f"pipeline step '{failed[0]['step']}' failed: {failed[0].get('note', '')}"
         elif pipeline_type == "image_description":
@@ -2050,14 +2167,18 @@ async def extract_source_facts_single_shot(
     # --- Step 1: gather content ---
     user_content: str | list[dict[str, Any]]
 
-    if is_image or chunk_count == 0:
+    if is_image:
         source_path = resolve_source_path(settings.knowledge_path, source)
         if not source_path:
             pipeline.append({
                 "step": "load_source", "status": "failed",
                 "note": "file not found on disk",
             })
-            return {"success": False, "error": "Source file not found on disk", "pipeline": pipeline}
+            return {
+                "success": False,
+                "error": "Source file not found on disk",
+                "pipeline": pipeline,
+            }
         try:
             image_bytes = source_path.read_bytes()
             image_media_type = _IMAGE_MEDIA.get(suffix, "image/png")
@@ -2069,7 +2190,11 @@ async def extract_source_facts_single_shot(
             pipeline.append({
                 "step": "load_source", "status": "failed", "note": str(exc),
             })
-            return {"success": False, "error": f"Could not read source file: {exc}", "pipeline": pipeline}
+            return {
+                "success": False,
+                "error": f"Could not read source file: {exc}",
+                "pipeline": pipeline,
+            }
 
         import base64 as _b64
         b64 = _b64.b64encode(image_bytes).decode("ascii")
@@ -2079,6 +2204,19 @@ async def extract_source_facts_single_shot(
             {"type": "text", "text": f"Extract all information from this document.{hint_text}"},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]
+    elif chunk_count == 0:
+        pipeline.append({
+            "step": "load_chunks", "status": "failed",
+            "note": "source has no indexed text chunks and is not a supported image",
+        })
+        return {
+            "success": False,
+            "error": (
+                "Source has no indexed text chunks; "
+                "Extract Facts only supports images or indexed text"
+            ),
+            "pipeline": pipeline,
+        }
     else:
         chunks = await vectors.chunks_by_source(source_id)
         text_body = "\n\n".join(
@@ -2088,6 +2226,12 @@ async def extract_source_facts_single_shot(
             "step": "load_chunks", "status": "ok",
             "note": f"{len(chunks)} chunks, {len(text_body)} chars total",
         })
+        if not text_body.strip():
+            return {
+                "success": False,
+                "error": "No stored chunk text found for source",
+                "pipeline": pipeline,
+            }
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
         user_content = (
             f"Extract all information from this document.{hint_text}\n\n---\n\n{text_body}"
@@ -2193,18 +2337,18 @@ async def extract_source_facts_single_shot(
             llm_step["cache_read_tokens"] = usage.get("cache_read_input_tokens", 0)
             llm_step["status"] = "ok"
             output_type = "tool_call" if tool_calls else "text"
-            llm_step["note"] = (
-                f"{output_type}, {len(raw_output)} chars"
-                + (f", {llm_step['cache_read_tokens']} cached tokens" if llm_step["cache_read_tokens"] else "")
+            cache_note = (
+                f", {llm_step['cache_read_tokens']} cached tokens"
+                if llm_step["cache_read_tokens"]
+                else ""
             )
+            llm_step["note"] = f"{output_type}, {len(raw_output)} chars{cache_note}"
     except Exception as exc:  # noqa: BLE001
         # Capture response body for HTTP errors to expose the provider's error message
         body = ""
         if hasattr(exc, "response") and exc.response is not None:  # type: ignore[union-attr]
-            try:
+            with contextlib.suppress(Exception):
                 body = exc.response.text[:500]  # type: ignore[union-attr]
-            except Exception:
-                pass
         llm_step["note"] = f"{exc}" + (f" | body: {body}" if body else "")
         pipeline.append(llm_step)
         return {"success": False, "error": f"LLM call failed: {exc}", "pipeline": pipeline}
@@ -2257,7 +2401,13 @@ async def extract_source_facts_single_shot(
     write_step: dict[str, Any] = {"step": "write_facts", "model": None}
     try:
         for key, value in facts.items():
-            await db.fact_set(domain, key, str(value), source=f"extracted:{source_id}", confidence=0.9)
+            await db.fact_set(
+                domain,
+                key,
+                str(value),
+                source=f"extracted:{source_id}",
+                confidence=0.9,
+            )
             written_facts.append(key)
         write_step["status"] = "ok"
         write_step["note"] = f"{len(written_facts)} fact(s) written to '{domain}'"
@@ -2272,6 +2422,7 @@ async def extract_source_facts_single_shot(
     if caption:
         cap_step: dict[str, Any] = {"step": "write_caption_chunk", "model": None}
         try:
+            sparse_encoder.fit_batch([caption])
             cap_embedding = await embeddings.embed(caption)
             cap_sparse = sparse_encoder.encode(caption)
             now = datetime.now(UTC).isoformat()
@@ -2372,7 +2523,7 @@ async def _ingest_curation_text(
         raise ValueError("No content to ingest")
 
     content_hash = compute_text_hash(content)
-    if await db.source_exists(content_hash):
+    if await db.source_exists(content_hash, domain=domain):
         return {
             "action": "ingest_text",
             "status": "skipped",
@@ -2820,7 +2971,7 @@ async def knowledge_ingest_text(
 
     content_hash = compute_text_hash(content)
 
-    if await db.source_exists(content_hash):
+    if await db.source_exists(content_hash, domain=domain):
         return {
             "success": True,
             "message": "Content already ingested (identical hash).",
@@ -2977,9 +3128,10 @@ async def knowledge_upload_file_base64(
         return {"success": False, "error": f"Invalid base64 content: {exc}"}
 
     domain_dir = settings.knowledge_path / domain
-    domain_dir.mkdir(parents=True, exist_ok=True)
-
-    dest = domain_dir / clean_filename
+    dest = (domain_dir / clean_filename).resolve()
+    if not dest.is_relative_to(settings.knowledge_path.resolve()):
+        return {"success": False, "error": "Invalid upload path"}
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and not overwrite:
         return {
             "success": False,
@@ -2990,10 +3142,7 @@ async def knowledge_upload_file_base64(
         }
 
     if overwrite:
-        existing = await db.source_get_by_filename(domain, clean_filename)
-        if existing:
-            await vectors.delete_by_source(existing["id"])
-            await db.source_remove(existing["id"])
+        await delete_sources_for_overwrite(settings, vectors, db, domain, clean_filename)
 
     dest.write_bytes(data)
 

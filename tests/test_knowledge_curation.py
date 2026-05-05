@@ -6,9 +6,13 @@ import pytest
 from servers.knowledge import (
     KnowledgeDB,
     apply_curation_item,
+    chunk_text,
     curation_item_has_destructive_actions,
     delete_source_record,
+    delete_sources_for_overwrite,
+    rename_source_record,
 )
+from servers.knowledge_source_files import resolve_source_path, sanitize_source_filename
 
 
 @pytest.fixture
@@ -159,6 +163,109 @@ async def test_delete_source_preserves_file_referenced_by_another_source(
     assert await knowledge_db.source_get("new-source") is not None
 
 
+async def test_overwrite_cleanup_removes_all_sources_for_filename(
+    knowledge_db: KnowledgeDB,
+    tmp_path: Path,
+):
+    await knowledge_db.domain_create("pets", "Pets test domain", [])
+    image_path = tmp_path / "pets" / "benji.jpg"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"old bytes")
+
+    for source_id, content_hash in (("older-source", "older-hash"), ("newer-source", "newer-hash")):
+        await knowledge_db.source_add(
+            source_id,
+            "pets",
+            "jpg",
+            "benji.jpg",
+            content_hash,
+            1,
+            "pets/benji.jpg",
+            "image/jpeg",
+            9,
+        )
+
+    class FakeVectors:
+        def __init__(self) -> None:
+            self.deleted_source_ids: list[str] = []
+
+        async def delete_by_source(self, source_id: str) -> None:
+            self.deleted_source_ids.append(source_id)
+
+    vectors = FakeVectors()
+    results = await delete_sources_for_overwrite(
+        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
+        vectors,  # type: ignore[arg-type]
+        knowledge_db,
+        "pets",
+        "benji.jpg",
+    )
+
+    assert [result["source"]["id"] for result in results] == ["newer-source", "older-source"]
+    assert vectors.deleted_source_ids == ["newer-source", "older-source"]
+    assert not image_path.exists()
+    assert await knowledge_db.source_get("older-source") is None
+    assert await knowledge_db.source_get("newer-source") is None
+
+
+async def test_rename_source_does_not_move_file_shared_by_another_source(
+    knowledge_db: KnowledgeDB,
+    tmp_path: Path,
+):
+    await knowledge_db.domain_create("pets", "Pets test domain", [])
+    image_path = tmp_path / "pets" / "benji.jpg"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"benji bytes")
+
+    await knowledge_db.source_add(
+        "old-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "old-hash",
+        0,
+        "pets/benji.jpg",
+        "image/jpeg",
+        11,
+    )
+    await knowledge_db.source_add(
+        "new-source",
+        "pets",
+        "jpg",
+        "benji.jpg",
+        "new-hash",
+        0,
+        "pets/benji.jpg",
+        "image/jpeg",
+        11,
+    )
+
+    class FakeVectors:
+        def __init__(self) -> None:
+            self.updated: list[tuple[str, str]] = []
+
+        async def update_source_name(self, source_id: str, source_name: str) -> None:
+            self.updated.append((source_id, source_name))
+
+    result = await rename_source_record(
+        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
+        FakeVectors(),  # type: ignore[arg-type]
+        knowledge_db,
+        "old-source",
+        "benji-old.jpg",
+    )
+
+    old_source = await knowledge_db.source_get("old-source")
+    new_source = await knowledge_db.source_get("new-source")
+    assert result["success"] is True
+    assert result["renamed_file"] is False
+    assert result["preserved_files"] == ["pets/benji.jpg"]
+    assert old_source["filename"] == "benji-old.jpg"
+    assert old_source["stored_path"] == "pets/benji.jpg"
+    assert new_source["filename"] == "benji.jpg"
+    assert image_path.exists()
+
+
 async def test_source_get_by_domain_filename_returns_newest_match(
     knowledge_db: KnowledgeDB,
 ):
@@ -191,3 +298,23 @@ async def test_source_get_by_domain_filename_returns_newest_match(
     assert source is not None
     assert source["id"] == "newer-source"
     assert source["stored_path"] == "pets/.sources/newer-source/benji.jpg"
+
+
+def test_chunk_text_splits_single_long_paragraph():
+    chunks = chunk_text("a" * 2500, max_chars=1000, overlap=100)
+
+    assert len(chunks) == 3
+    assert all(len(chunk) <= 1000 for chunk in chunks)
+    assert chunks[1].startswith("a" * 100)
+
+
+def test_source_filename_sanitizes_windows_paths_and_control_chars(tmp_path: Path):
+    assert sanitize_source_filename("C:\\fakepath\\scan\n.pdf") == "scan.pdf"
+
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret")
+
+    source = {"stored_path": "../secret.txt", "domain": "core", "filename": "secret.txt"}
+    assert resolve_source_path(root, source) is None

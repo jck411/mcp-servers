@@ -169,9 +169,21 @@
         .map((d) => d.name)
         .sort();
       const last = localStorage.getItem("knowledge_last_domain");
-      sel.innerHTML = names
-        .map((n) => `<option value="${n}"${n === last ? " selected" : ""}>${n}</option>`)
-        .join("");
+      sel.textContent = "";
+      for (const n of names) {
+        const option = document.createElement("option");
+        option.value = n;
+        option.textContent = n;
+        option.selected = n === last;
+        sel.appendChild(option);
+      }
+      if (!names.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.disabled = true;
+        option.textContent = "no domains";
+        sel.appendChild(option);
+      }
     } catch (e) {
       sel.innerHTML = "<option>error loading</option>";
     }
@@ -235,15 +247,18 @@
   function messageFrom(json, fallback) {
     const detail = json && json.detail;
     if (typeof detail === "string") return detail;
-    return (
+    const message = (
       nested(json, ["message"]) ||
       nested(json, ["reason"]) ||
       nested(json, ["error"]) ||
       nested(json, ["detail", "message"]) ||
       nested(json, ["detail", "reason"]) ||
       nested(json, ["detail", "error"]) ||
-      fallback
+      ""
     );
+    if (message) return message;
+    if (detail && typeof detail === "object") return JSON.stringify(detail);
+    return fallback;
   }
 
   function escapeHtml(value) {
@@ -349,7 +364,7 @@
     const path = storedPathFrom(json);
     const ptype = json.pipeline_type || "";
     const chunks = json.chunks_stored || 0;
-    const canExtract = !!sid;
+    const canExtract = !!sid && ptype !== "unsupported";
     const ocrMethod = ocrSummaryFrom(json.pipeline || []);
 
     const div = document.createElement("div");
@@ -418,7 +433,7 @@
         card.style.transition = "opacity 0.3s";
         setTimeout(() => card.remove(), 350);
       } else {
-        const msg = j.error || j.detail || `HTTP ${r.status}`;
+        const msg = messageFrom(j, `HTTP ${r.status}`);
         btn.textContent = `✗ ${msg}`;
         btn.style.color = "var(--err)";
         btn.disabled = false;

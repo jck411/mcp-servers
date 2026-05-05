@@ -30,6 +30,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from servers.knowledge import (
     _ingest_file_at_path,
     apply_curation_item,
     delete_source_record,
+    delete_sources_for_overwrite,
     extract_source_facts_single_shot,
     rename_source_record,
     source_download_bytes,
@@ -95,6 +97,14 @@ async def lifespan(app: FastAPI):
     await _vectors.ensure_collection()
     await _db.initialize()
 
+    try:
+        all_chunks = await _vectors.chunks_all()
+        texts = [p["content"] for p in all_chunks if p.get("content")]
+        if texts:
+            _sparse_encoder.fit_batch(texts)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[knowledge_api] BM25 warm-up skipped: {exc}", file=sys.stderr)
+
     yield
 
     await _embeddings.close()
@@ -105,7 +115,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Knowledge REST API", version="1.0.0", lifespan=lifespan)
 
 # Static upload UI (drag-drop browser page).
-# Served at /ui/  — bearer token entered by the user is held in browser sessionStorage.
+# Served at /ui/.
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 if _WEB_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")
@@ -120,7 +130,7 @@ def _content_disposition(filename: str) -> str:
         ch for ch in filename
         if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
     ) or "download"
-    return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+    return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +165,7 @@ async def upload_file(
     if not filename:
         raise HTTPException(status_code=422, detail="Invalid filename")
 
-    from pathlib import Path as _Path
-    if not _Path(filename).suffix:
+    if not Path(filename).suffix:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -166,9 +175,10 @@ async def upload_file(
             ),
         )
 
-    dest = settings.knowledge_path / domain / filename
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    data = await file.read()
+    root = settings.knowledge_path.resolve()
+    dest = (settings.knowledge_path / domain / filename).resolve()
+    if not dest.is_relative_to(root):
+        raise HTTPException(status_code=422, detail="Invalid upload path")
 
     if dest.exists() and not overwrite:
         existing_source = await db.source_get_by_domain_filename(domain, filename)
@@ -188,6 +198,11 @@ async def upload_file(
             detail=detail,
         )
 
+    data = await file.read()
+    if overwrite:
+        await delete_sources_for_overwrite(settings, vectors, db, domain, filename)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
 
     if not ingest:

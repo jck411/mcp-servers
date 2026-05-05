@@ -23,7 +23,10 @@ class ChunkReader(Protocol):
 
 def sanitize_source_filename(filename: str | None) -> str:
     """Return a safe display/storage filename with path components removed."""
-    clean = Path(filename or "upload").name
+    raw = str(filename or "upload").replace("\\", "/")
+    clean = Path(raw).name
+    clean = "".join(ch for ch in clean if ord(ch) >= 32 and ch != "\x7f" and ch not in {"/", "\\"})
+    clean = clean.strip()
     if not clean or clean in (".", ".."):
         clean = "upload"
     return clean
@@ -37,10 +40,23 @@ def source_media_type(filename: str | None) -> str:
 
 def source_relative_path(knowledge_path: Path, path: Path) -> str:
     """Return a portable path relative to the Knowledge storage root."""
+    root = knowledge_path.resolve()
+    resolved = path.resolve()
     try:
-        return str(path.relative_to(knowledge_path))
+        return resolved.relative_to(root).as_posix()
     except ValueError:
         return str(path)
+
+
+def _resolved_file_inside_knowledge_path(knowledge_path: Path, path: Path) -> Path | None:
+    """Return a resolved file path only if it stays inside the storage root."""
+    root = knowledge_path.resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        return None
+    if resolved.exists() and resolved.is_file():
+        return resolved
+    return None
 
 
 def resolve_source_path(knowledge_path: Path, source: dict[str, Any]) -> Path | None:
@@ -55,8 +71,9 @@ def resolve_source_path(knowledge_path: Path, source: dict[str, Any]) -> Path | 
         path = Path(str(stored_path))
         if not path.is_absolute():
             path = knowledge_path / path
-        if path.exists() and path.is_file():
-            return path
+        resolved = _resolved_file_inside_knowledge_path(knowledge_path, path)
+        if resolved:
+            return resolved
 
     filename = source.get("filename")
     domain = source.get("domain")
@@ -64,8 +81,9 @@ def resolve_source_path(knowledge_path: Path, source: dict[str, Any]) -> Path | 
         return None
 
     legacy_path = knowledge_path / str(domain) / sanitize_source_filename(str(filename))
-    if legacy_path.exists() and legacy_path.is_file():
-        return legacy_path
+    resolved = _resolved_file_inside_knowledge_path(knowledge_path, legacy_path)
+    if resolved:
+        return resolved
     return None
 
 
