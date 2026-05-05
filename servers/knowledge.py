@@ -547,7 +547,7 @@ class KnowledgeDB:
         return [dict(row) for row in rows]
 
     async def facts_search(self, domains: list[str], keys: list[str]) -> list[dict[str, Any]]:
-        """Search facts across multiple domains by key substring match."""
+        """Search facts across multiple domains by substring match on key OR value."""
         assert self._conn is not None
         if not domains:
             return []
@@ -556,11 +556,12 @@ class KnowledgeDB:
         params: list[Any] = list(domains)
 
         if keys:
-            key_conditions = []
+            term_conditions = []
             for k in keys:
-                key_conditions.append("key LIKE ?")
+                term_conditions.append("(key LIKE ? OR value LIKE ?)")
                 params.append(f"%{k}%")
-            conditions.append(f"({' OR '.join(key_conditions)})")
+                params.append(f"%{k}%")
+            conditions.append(f"({' OR '.join(term_conditions)})")
 
         where = " AND ".join(conditions)
         cursor = await self._conn.execute(
@@ -3165,6 +3166,7 @@ async def knowledge_search(
     limit: int = 10,
     min_similarity: float = 0.25,
     include_facts: bool = True,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
     """Search knowledge base using hybrid semantic + keyword search.
 
@@ -3178,6 +3180,8 @@ async def knowledge_search(
         limit: Max results to return.
         min_similarity: Minimum similarity threshold (0.0 to 1.0).
         include_facts: Also search structured facts for relevant matches.
+        max_chars: Optional cap on each result's content length to reduce
+            context size. None (default) returns full chunk text.
     """
     settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
 
@@ -3198,8 +3202,11 @@ async def knowledge_search(
     formatted = []
     for r in results:
         p = r.payload or {}
+        content = str(p.get("content", ""))
+        if max_chars is not None and max_chars > 0 and len(content) > max_chars:
+            content = content[:max_chars] + "…"
         formatted.append({
-            "content": p.get("content", ""),
+            "content": content,
             "domain": p.get("domain", ""),
             "source_id": p.get("source_id", ""),
             "source_name": p.get("source_name", ""),
