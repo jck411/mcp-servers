@@ -32,7 +32,6 @@ import hashlib
 import json
 import re
 import secrets
-import sys
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
@@ -70,6 +69,9 @@ from servers.knowledge_source_files import (
     source_media_type,
     source_relative_path,
 )
+from shared.logging_config import get_logger, logged_tool
+
+log = get_logger("knowledge")
 
 # Default port for HTTP transport
 DEFAULT_HTTP_PORT = 9017
@@ -1529,9 +1531,8 @@ async def _vision_ocr_bytes(
             text = (data["choices"][0]["message"]["content"] or "").strip()
             return "" if text == "[no text]" else text
     except Exception as exc:  # noqa: BLE001
-        print(
-            f"[knowledge] vision OCR failed ({settings.vision_model}): {exc}",
-            file=sys.stderr,
+        log.warning(
+            "vision_ocr_failed model=%s error=%r", settings.vision_model, exc,
         )
         return ""
 
@@ -1659,7 +1660,7 @@ async def _vision_call(
     except Exception as exc:  # noqa: BLE001
         step["status"] = "failed"
         step["note"] = str(exc)
-        print(f"[knowledge] _vision_call failed ({model}/{step_name}): {exc}", file=sys.stderr)
+        log.warning("vision_call failed model=%s step=%s error=%r", model, step_name, exc)
         return "", step
 
 
@@ -2736,6 +2737,7 @@ async def _resolve_domains(domain: str | None, domains: list[str] | None) -> lis
 
 
 @mcp.tool("knowledge_domain_create")
+@logged_tool(log)
 async def knowledge_domain_create(
     name: str,
     description: str = "",
@@ -2778,6 +2780,7 @@ async def knowledge_domain_create(
 
 
 @mcp.tool("knowledge_domain_list")
+@logged_tool(log)
 async def knowledge_domain_list() -> dict[str, Any]:
     """List all knowledge domains with their descriptions and related domains."""
     _, _, _, vectors, db = _require_ready()
@@ -2794,6 +2797,7 @@ async def knowledge_domain_list() -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_domain_archive")
+@logged_tool(log)
 async def knowledge_domain_archive(name: str) -> dict[str, Any]:
     """Archive a domain. Archived domains are excluded from searches by default.
 
@@ -2816,6 +2820,7 @@ async def knowledge_domain_archive(name: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_domain_relate")
+@logged_tool(log)
 async def knowledge_domain_relate(
     name: str, related_domains: list[str]
 ) -> dict[str, Any]:
@@ -2842,6 +2847,7 @@ async def knowledge_domain_relate(
 
 
 @mcp.tool("knowledge_fact_set")
+@logged_tool(log)
 async def knowledge_fact_set(
     domain: str,
     key: str,
@@ -2884,6 +2890,7 @@ async def knowledge_fact_set(
 
 
 @mcp.tool("knowledge_fact_delete")
+@logged_tool(log)
 async def knowledge_fact_delete(domain: str, key: str) -> dict[str, Any]:
     """Delete a specific fact from a domain.
 
@@ -2901,6 +2908,7 @@ async def knowledge_fact_delete(domain: str, key: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_facts_list")
+@logged_tool(log)
 async def knowledge_facts_list(domain: str) -> dict[str, Any]:
     """List all structured facts in a domain.
 
@@ -2914,6 +2922,7 @@ async def knowledge_facts_list(domain: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_facts_search")
+@logged_tool(log)
 async def knowledge_facts_search(
     query: str,
     domains: list[str] | None = None,
@@ -2944,6 +2953,7 @@ async def knowledge_facts_search(
 
 
 @mcp.tool("knowledge_ingest_text")
+@logged_tool(log)
 async def knowledge_ingest_text(
     domain: str,
     content: str,
@@ -3017,6 +3027,7 @@ async def knowledge_ingest_text(
 
 
 @mcp.tool("knowledge_ingest_file")
+@logged_tool(log)
 async def knowledge_ingest_file(
     domain: str,
     filename: str | None = None,
@@ -3078,10 +3089,9 @@ async def knowledge_ingest_file(
                     "status": "indexed",
                     "chunks": outcome.get("chunks_stored"),
                 })
-                print(
-                    f"  [KNOWLEDGE] Indexed {file_path.name}: "
-                    f"{outcome.get('chunks_stored')} chunks",
-                    file=sys.stderr,
+                log.info(
+                    "indexed file=%s chunks=%s",
+                    file_path.name, outcome.get("chunks_stored"),
                 )
             else:
                 results.append({
@@ -3092,7 +3102,7 @@ async def knowledge_ingest_file(
 
         except Exception as exc:
             results.append({"file": file_path.name, "status": "error", "error": str(exc)})
-            print(f"  [KNOWLEDGE] Failed {file_path.name}: {exc}", file=sys.stderr)
+            log.exception("ingest_failed file=%s error=%r", file_path.name, exc)
 
     return {
         "success": True,
@@ -3103,6 +3113,7 @@ async def knowledge_ingest_file(
 
 
 @mcp.tool("knowledge_upload_file_base64")
+@logged_tool(log)
 async def knowledge_upload_file_base64(
     domain: str,
     filename: str,
@@ -3159,6 +3170,7 @@ async def knowledge_upload_file_base64(
 
 
 @mcp.tool("knowledge_search")
+@logged_tool(log)
 async def knowledge_search(
     query: str,
     domain: str | None = None,
@@ -3239,6 +3251,7 @@ async def knowledge_search(
 
 
 @mcp.tool("knowledge_sources")
+@logged_tool(log)
 async def knowledge_sources(domain: str) -> dict[str, Any]:
     """List all ingested sources in a domain.
 
@@ -3280,6 +3293,7 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_source_download_base64")
+@logged_tool(log)
 async def knowledge_source_download_base64(
     source_id: str,
 ) -> dict[str, Any]:
@@ -3299,6 +3313,7 @@ async def knowledge_source_download_base64(
 
 
 @mcp.tool("knowledge_source_download_url")
+@logged_tool(log)
 async def knowledge_source_download_url(
     source_id: str,
     ttl_seconds: int = 900,
@@ -3331,6 +3346,7 @@ async def knowledge_source_download_url(
 
 
 @mcp.tool("knowledge_source_delete")
+@logged_tool(log)
 async def knowledge_source_delete(source_id: str, delete_file: bool = True) -> dict[str, Any]:
     """Delete one ingested source by source_id, including its vector chunks.
 
@@ -3342,6 +3358,7 @@ async def knowledge_source_delete(source_id: str, delete_file: bool = True) -> d
 
 
 @mcp.tool("knowledge_source_rename")
+@logged_tool(log)
 async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, Any]:
     """Rename one ingested source by source_id.
 
@@ -3358,6 +3375,7 @@ async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, An
 
 
 @mcp.tool("knowledge_curation_list")
+@logged_tool(log)
 async def knowledge_curation_list(
     status: str | None = "pending",
     kind: str | None = None,
@@ -3380,6 +3398,7 @@ async def knowledge_curation_list(
 
 
 @mcp.tool("knowledge_curation_get")
+@logged_tool(log)
 async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
     """Get one curation queue item by id."""
     _, _, _, _, db = _require_ready()
@@ -3390,6 +3409,7 @@ async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_curation_apply")
+@logged_tool(log)
 async def knowledge_curation_apply(
     item_id: str,
     confirmation: str | None = None,
@@ -3412,6 +3432,7 @@ async def knowledge_curation_apply(
 
 
 @mcp.tool("knowledge_curation_reject")
+@logged_tool(log)
 async def knowledge_curation_reject(item_id: str) -> dict[str, Any]:
     """Reject a curation queue item without applying any proposed actions."""
     _, _, _, _, db = _require_ready()
@@ -3422,6 +3443,7 @@ async def knowledge_curation_reject(item_id: str) -> dict[str, Any]:
 
 
 @mcp.tool("knowledge_curation_snooze")
+@logged_tool(log)
 async def knowledge_curation_snooze(item_id: str) -> dict[str, Any]:
     """Snooze a curation queue item without applying or rejecting it."""
     _, _, _, _, db = _require_ready()
@@ -3442,11 +3464,11 @@ async def _startup() -> None:
     try:
         _settings = KnowledgeSettings()  # type: ignore[call-arg]
     except Exception as exc:
-        print(f"[KNOWLEDGE] Disabled — config error: {exc}", file=sys.stderr)
+        log.error("disabled config_error=%r", exc)
         return
 
     _settings.knowledge_path.mkdir(parents=True, exist_ok=True)
-    print(f"[KNOWLEDGE] Knowledge path: {_settings.knowledge_path}", file=sys.stderr)
+    log.info("knowledge_path=%s", _settings.knowledge_path)
 
     _embeddings = EmbeddingClient(_settings)
     _sparse_encoder = BM25SparseEncoder()
@@ -3456,7 +3478,7 @@ async def _startup() -> None:
     try:
         await _vectors.ensure_collection()
     except Exception as exc:
-        print(f"[KNOWLEDGE] Disabled — Qdrant unreachable: {exc}", file=sys.stderr)
+        log.error("disabled qdrant_unreachable=%r", exc)
         return
 
     await _db.initialize()
@@ -3468,9 +3490,9 @@ async def _startup() -> None:
         texts = [p["content"] for p in all_chunks if p.get("content")]
         if texts:
             _sparse_encoder.fit_batch(texts)
-            print(f"[KNOWLEDGE] BM25 warmed up on {len(texts)} existing chunks", file=sys.stderr)
+            log.info("bm25_warmup chunks=%d", len(texts))
     except Exception as exc:
-        print(f"[KNOWLEDGE] BM25 warm-up skipped: {exc}", file=sys.stderr)
+        log.warning("bm25_warmup_skipped error=%r", exc)
 
     # Ensure 'core' domain exists
     await _db.domain_create(
@@ -3480,7 +3502,7 @@ async def _startup() -> None:
     )
 
     _ready = True
-    print("[KNOWLEDGE] Initialization complete", file=sys.stderr)
+    log.info("initialization complete")
 
 
 async def _shutdown() -> None:

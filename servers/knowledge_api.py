@@ -30,7 +30,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -57,6 +56,9 @@ from servers.knowledge import (
 from servers.knowledge_source_files import (
     sanitize_source_filename,
 )
+from shared.logging_config import get_logger
+
+log = get_logger("knowledge_api")
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -102,8 +104,9 @@ async def lifespan(app: FastAPI):
         texts = [p["content"] for p in all_chunks if p.get("content")]
         if texts:
             _sparse_encoder.fit_batch(texts)
+            log.info("bm25_warmup chunks=%d", len(texts))
     except Exception as exc:  # noqa: BLE001
-        print(f"[knowledge_api] BM25 warm-up skipped: {exc}", file=sys.stderr)
+        log.warning("bm25_warmup_skipped error=%r", exc)
 
     yield
 
@@ -131,6 +134,49 @@ def _content_disposition(filename: str) -> str:
         if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
     ) or "download"
     return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/health
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/health")
+async def health() -> dict[str, Any]:
+    """Liveness + dependency status for the Knowledge subsystem."""
+    if not all([_settings, _embeddings, _sparse_encoder, _vectors, _db]):
+        return {"status": "starting", "ready": False}
+
+    settings, _, sparse_encoder, vectors, db = _require_ready()
+
+    qdrant_ok = True
+    chunk_count: int | None = None
+    try:
+        info = await vectors._client.get_collection(vectors._collection)
+        chunk_count = int(info.points_count or 0)
+    except Exception as exc:  # noqa: BLE001
+        qdrant_ok = False
+        log.warning("health qdrant_error=%r", exc)
+
+    source_count: int | None = None
+    try:
+        assert db._conn is not None
+        cursor = await db._conn.execute("SELECT COUNT(*) FROM sources")
+        row = await cursor.fetchone()
+        source_count = int(row[0]) if row else 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("health sqlite_error=%r", exc)
+
+    return {
+        "status": "ok" if qdrant_ok else "degraded",
+        "ready": True,
+        "qdrant_reachable": qdrant_ok,
+        "knowledge_path": str(settings.knowledge_path),
+        "source_count": source_count,
+        "chunk_count": chunk_count,
+        "bm25_doc_count": sparse_encoder._doc_count,
+        "embedding_model": settings.embedding_model,
+    }
 
 
 # ---------------------------------------------------------------------------

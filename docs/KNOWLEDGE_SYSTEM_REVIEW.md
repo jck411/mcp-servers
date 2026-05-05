@@ -5,7 +5,7 @@ Last reviewed: 2026-05-04
 Snapshot evaluation of `servers/knowledge.py` + `servers/knowledge_api.py` and
 related modules. Update this doc whenever a meaningful structural change lands.
 
-## Overall: 7.7 / 10
+## Overall: 8.0 / 10
 
 A non-trivial, production-quality personal RAG stack. Punches above what most
 weekend projects ship.
@@ -19,7 +19,7 @@ weekend projects ship.
 | Search quality | 7 | Hybrid is good, BM25 warmup on startup is good. Lacks: query expansion, cross-encoder rerank, MMR diversity, relevance feedback. |
 | Ingestion pipeline | 9 | Multi-stage with structured logging, vision OCR with tesseract fallback, image-description path for photos, single-shot fact extraction. Hash-based dedup with stored-path backfill is mature. |
 | Robustness | 7 | Good: WAL, FK enforcement, busy_timeout, hash dedup, secure path resolution, token-based downloads. Gaps: no Qdrant↔SQLite reconciliation tool, no transaction-spanning ingest. |
-| Observability | 5 | Print-to-stderr only. No structured logs, metrics, or tracing. Fine for personal use; reading journalctl is the debug path. |
+| Observability | 7 | Stdlib `logging` via `shared/logging_config.py`. Every MCP tool wrapped with `@logged_tool` decorator emitting `tool=<name> status=ok|error duration_ms=N` plus result summary. `GET /api/health` reports Qdrant reachability, source/chunk counts, BM25 state. Still missing: counters/metrics, structured (JSON) logs, tracing. |
 | Security | 7 | Path traversal blocked, token-gated downloads, auth token on REST. Watch: token cleanup runs on every read (cheap DoS vector), no rate limiting, single-user (intentional). |
 | API ergonomics | 8 | MCP tools well-named and documented. Pre-formatted `download_markdown` is great for chat agents. REST and MCP stay in sync via shared functions. |
 | Schema design | 8 | Reasonable normalization. Minor `id`/`source_id` field naming inconsistency in returned dicts. `related_domains` as JSON-in-TEXT is pragmatic. |
@@ -43,6 +43,16 @@ weekend projects ship.
   `chunk_text`, `BM25SparseEncoder`, `_is_likely_binary`, the text-ingest
   validator, the search keyword regex, and `facts_search` key/value
   semantics. Total suite: 75 tests, runs in ~2.5s.
+- Replaced `print(..., file=sys.stderr)` with stdlib `logging` across
+  `knowledge.py` and `knowledge_api.py`. New `shared/logging_config.py`
+  centralizes setup; `LOG_LEVEL` env var controls verbosity.
+- Wrapped every `@mcp.tool` on the knowledge server with `@logged_tool(log)`,
+  emitting per-call `tool=... status=... duration_ms=...` lines.
+- Added `GET /api/health` endpoint reporting Qdrant reachability, source
+  count, chunk count, BM25 doc count, and embedding model.
+- Added `tests/test_logging_config.py` (10 tests) covering the decorator's
+  success / error / duration / name-preservation paths and the result
+  summarizer. Total suite: 85 tests.
 
 ## Recommended Next Investments (in order)
 

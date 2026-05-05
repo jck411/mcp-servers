@@ -126,6 +126,34 @@ pytest tests/ -v
 ruff check servers/ shared/
 ```
 
+## Observability
+
+All servers use stdlib `logging` via `shared/logging_config.py`. Output goes
+to stderr in this format:
+
+```
+2026-05-04T15:30:42-0600 INFO    knowledge: tool=knowledge_search status=ok duration_ms=212.4 success=True count=10
+```
+
+Set verbosity with the `LOG_LEVEL` env var (default `INFO`). On the LXC:
+
+```bash
+journalctl -u mcp-server@knowledge -f          # follow live
+LOG_LEVEL=DEBUG  # set in /etc/default/mcp or systemd override for verbose
+```
+
+Every `@mcp.tool` on the `knowledge` server is wrapped with
+`@logged_tool(log)` from [shared/logging_config.py](shared/logging_config.py),
+so each call logs `tool=<name> status=ok|error duration_ms=N` plus a short
+result summary. Apply the same decorator to other servers as needed.
+
+The Knowledge REST API exposes `GET /api/health` returning Qdrant
+reachability, source/chunk counts, BM25 doc count, and embedding model:
+
+```bash
+curl https://api-knowledge.jackshome.com/api/health
+```
+
 ## Deployment (Proxmox)
 
 Target: LXC CT 110 at `192.168.1.110` (Debian 13). Full guide: [deploy/PROXMOX_DEPLOY.md](deploy/PROXMOX_DEPLOY.md)
