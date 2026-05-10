@@ -19,3 +19,7 @@ documents/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+.env.config
+
+.env.network

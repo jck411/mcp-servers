@@ -105,6 +105,8 @@ fi
 if [[ -f .env ]]; then
     set -a
     source .env
+    [[ -f .env.network ]] && source .env.network
+    [[ -f .env.config ]] && source .env.config
     set +a
 fi
 
