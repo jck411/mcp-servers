@@ -35,7 +35,7 @@ Each server:
 | knowledge | 9017 |
 | knowledge_api (REST, not MCP) | 9018 |
 
-Next available MCP port: **9019**. Retired ports (do not reuse): `9001`, `9002`, `9009`, `9011`, `9012`, `9014`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
+Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9012`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
 
 All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
@@ -193,11 +193,11 @@ Servers bind `0.0.0.0` with **no built-in HTTP authentication**. Security is enf
 
 ### LAN access
 
-Direct IP is safe as-is. Ensure your router/Proxmox firewall does **not** expose ports `9001–9018` to the internet — only your LAN subnet should reach them.
+Direct IP is safe as-is. Ensure your router/Proxmox firewall does **not** expose ports `9003–9018` to the internet — only your LAN subnet should reach them.
 
 ### Remote access (Cloudflare Tunnel)
 
-Use a **Cloudflare Tunnel** — never port-forward `9001–9018` through your router. The tunnel gives each server a public HTTPS endpoint without opening firewall holes.
+Use a **Cloudflare Tunnel** — never port-forward `9003–9018` through your router. The tunnel gives each server a public HTTPS endpoint without opening firewall holes.
 
 ### Locking down the public tunnel (for ChatGPT, etc.)
 

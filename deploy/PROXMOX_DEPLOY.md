@@ -291,8 +291,8 @@ Add to your tunnel config on 192.168.1.11:
 ingress:
   - hostname: mcp-calculator.jackshome.com
     service: http://192.168.1.110:9003
-  - hostname: mcp-shell.jackshome.com
-    service: http://192.168.1.110:9001
+  - hostname: mcp-hue.jackshome.com
+    service: http://192.168.1.110:9015
   # ... etc
 ```
 

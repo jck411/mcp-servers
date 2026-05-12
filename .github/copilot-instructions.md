@@ -118,7 +118,7 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired ports — do not reuse: 9001, 9002, 9009, 9011, 9012, 9014
+Retired ports — do not reuse: 9002, 9012
 
 Next available: 9019
 

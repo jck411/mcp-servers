@@ -150,7 +150,7 @@ Then restart whichever services need it: `./deploy/deploy.sh --no-push <name>`.
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired (do not reuse): 9001, 9002, 9009, 9011, 9012, 9014. Next available: 9019.
+Retired (do not reuse): 9002, 9012. Next available: 9019.
 
 ---
 

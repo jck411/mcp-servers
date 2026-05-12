@@ -13,7 +13,6 @@ credentials/**/*.json
 credentials/*.pem
 logs/
 data/
-documents/
 *.bak
 *.tmp
 .ruff_cache/
