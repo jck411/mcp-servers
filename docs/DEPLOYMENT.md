@@ -122,14 +122,6 @@ pct exec 110 -- bash -c 'systemctl is-active mcp-server@spotify'
 `deploy/mcp-server@.service` is **not** copied automatically by `deploy.sh`. Copy it manually after changes:
 
 ```bash
-# From home (local)
-ssh root@192.168.1.110 '
-  cd /opt/mcp-servers && git pull &&
-  cp deploy/mcp-server@.service /etc/systemd/system/ &&
-  systemctl daemon-reload
-'
-
-# From remote (tunnel)
 ssh proxmox-tunnel 'pct exec 110 -- bash -c "
   cd /opt/mcp-servers && git pull &&
   cp deploy/mcp-server@.service /etc/systemd/system/ &&

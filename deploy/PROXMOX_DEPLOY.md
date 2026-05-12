@@ -51,9 +51,8 @@ Enter the container:
 ```bash
 # From Proxmox host
 pct enter 110
-
-# Or via SSH once container is up
-ssh root@192.168.1.110
+# Or from elsewhere
+ssh proxmox-tunnel 'pct exec 110 -- bash'
 ```
 
 Install base packages:
@@ -266,11 +265,10 @@ pct exec 110 -- ip link show eth0 | grep ether
 From your dev machine:
 
 ```bash
-# Push changes to GitHub, then on Proxmox:
-ssh root@192.168.1.110 "cd /opt/mcp-servers && su - mcp -c './deploy/deploy.sh'"
+ssh proxmox-tunnel "pct exec 110 -- bash -lc 'cd /opt/mcp-servers && su - mcp -c \"./deploy/deploy.sh\"'"
 
 # Or deploy a specific server only:
-ssh root@192.168.1.110 "cd /opt/mcp-servers && su - mcp -c './deploy/deploy.sh calculator'"
+ssh proxmox-tunnel "pct exec 110 -- bash -lc 'cd /opt/mcp-servers && su - mcp -c \"./deploy/deploy.sh calculator\"'"
 ```
 
 ### Adding a New Server
@@ -284,10 +282,10 @@ ssh root@192.168.1.110 "cd /opt/mcp-servers && su - mcp -c './deploy/deploy.sh c
 
 ```bash
 # Quick status of all MCP servers
-ssh root@192.168.1.110 "systemctl list-units 'mcp-server@*' --no-pager"
+ssh proxmox-tunnel "pct exec 110 -- systemctl list-units 'mcp-server@*' --no-pager"
 
 # Resource usage
-ssh root@192.168.1.110 "ps aux | grep 'servers\.' | grep -v grep"
+ssh proxmox-tunnel "pct exec 110 -- ps aux | grep 'servers\\.' | grep -v grep"
 
 # Container resource limits from Proxmox host
 ssh root@192.168.1.11 "pct config 110"
