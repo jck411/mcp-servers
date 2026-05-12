@@ -9,6 +9,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
@@ -491,9 +492,20 @@ async def sensor_status() -> str:
     if err := _check_key():
         return err
 
-    motion_data = await hue_request("GET", "/clip/v2/resource/motion")
-    power_data = await hue_request("GET", "/clip/v2/resource/device_power")
-    button_data = await hue_request("GET", "/clip/v2/resource/button")
+    motion_data, power_data, button_data, device_data = await asyncio.gather(
+        hue_request("GET", "/clip/v2/resource/motion"),
+        hue_request("GET", "/clip/v2/resource/device_power"),
+        hue_request("GET", "/clip/v2/resource/button"),
+        hue_request("GET", "/clip/v2/resource/device"),
+    )
+
+    # Sensor/button service resources do not carry friendly names; their owner device does.
+    device_names: dict[str, str] = {}
+    for device in device_data.get("data", []):
+        device_id = device.get("id")
+        name = device.get("metadata", {}).get("name")
+        if device_id and name:
+            device_names[device_id] = name
 
     # Build device_id → battery% map
     battery_map: dict[str, int] = {}
@@ -504,9 +516,13 @@ async def sensor_status() -> str:
             battery_map[owner_id] = pct
 
     lines = ["=== Motion Sensors ==="]
-    for sensor in motion_data.get("data", []):
+    sensors = sorted(
+        motion_data.get("data", []),
+        key=lambda sensor: device_names.get(sensor.get("owner", {}).get("rid", ""), ""),
+    )
+    for sensor in sensors:
         owner_id = sensor.get("owner", {}).get("rid", "")
-        name = sensor.get("metadata", {}).get("name", "Unknown")
+        name = device_names.get(owner_id, f"[{owner_id[:8]}]" if owner_id else "Unknown")
         detected = sensor.get("motion", {}).get("motion", False)
         enabled = sensor.get("enabled", True)
         battery = battery_map.get(owner_id)
@@ -516,13 +532,33 @@ async def sensor_status() -> str:
         lines.append(f"  {name:<30} {state_str:<18}{batt_str}{ena_str}")
 
     lines.append("\n=== Buttons / Dimmers ===")
+    latest_button_by_device: dict[str, dict[str, Any]] = {}
     for btn in button_data.get("data", []):
         owner_id = btn.get("owner", {}).get("rid", "")
-        name = btn.get("metadata", {}).get("name", "Unknown")
+        if not owner_id:
+            continue
+        updated = btn.get("button", {}).get("button_report", {}).get("updated", "")
+        existing = latest_button_by_device.get(owner_id)
+        existing_updated = (
+            existing.get("button", {}).get("button_report", {}).get("updated", "")
+            if existing
+            else ""
+        )
+        if existing is None or updated > existing_updated:
+            latest_button_by_device[owner_id] = btn
+
+    button_items = sorted(
+        latest_button_by_device.items(),
+        key=lambda item: device_names.get(item[0], ""),
+    )
+    for owner_id, btn in button_items:
+        name = device_names.get(owner_id, f"[{owner_id[:8]}]")
         last_event = btn.get("button", {}).get("last_event", "none")
+        control_id = btn.get("metadata", {}).get("control_id")
+        control_str = f" button {control_id}" if control_id is not None else ""
         battery = battery_map.get(owner_id)
         batt_str = f"  🔋{battery}%" if battery is not None else ""
-        lines.append(f"  {name:<30} last: {last_event:<20}{batt_str}")
+        lines.append(f"  {name:<30} last: {last_event:<20}{control_str:<10}{batt_str}")
 
     return "\n".join(lines)
 
