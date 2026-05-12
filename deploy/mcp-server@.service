@@ -4,12 +4,11 @@
 #   sudo cp mcp-server@.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now mcp-server@calculator
-#   sudo systemctl enable --now mcp-server@shell_control
-#   sudo systemctl enable --now mcp-server@playwright
+#   sudo systemctl enable --now mcp-server@hue
 #
 # The %i instance name maps to the server module:
-#   mcp-server@calculator    → python -m servers.calculator  (port from override)
-#   mcp-server@shell_control → python -m servers.shell_control
+#   mcp-server@calculator → python -m servers.calculator  (port from override)
+#   mcp-server@hue        → python -m servers.hue
 #
 # Ports are set via per-instance overrides. After creating the unit:
 #   sudo systemctl edit mcp-server@calculator

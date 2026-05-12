@@ -105,24 +105,20 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 
 | Server | Port |
 |--------|------|
-| shell_control | 9001 |
 | calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
 | gdrive | 9006 |
 | pdf | 9007 |
 | monarch | 9008 |
-| notes | 9009 |
 | spotify | 9010 |
-| playwright | 9011 |
 | tv | 9013 |
-| rag | 9014 |
 | hue | 9015 |
 | web_search | 9016 |
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired ports — do not reuse: 9002, 9012
+Retired ports — do not reuse: 9001, 9002, 9009, 9011, 9012, 9014
 
 Next available: 9019
 

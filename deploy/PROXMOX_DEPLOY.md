@@ -3,7 +3,7 @@
 **Target:** LXC container on Proxmox (192.168.1.11)  
 **Container:** CT 110, IP `192.168.1.110`  
 **OS:** Debian 13 (matches all other containers)  
-**Servers:** calculator (9003), shell_control (9001), playwright (9011)
+**Servers:** calculator (9003), hue (9015), knowledge (9017), and others — see `deploy/setup-systemd.sh` for the full list.
 
 ---
 
@@ -37,8 +37,8 @@ pct status 110
 
 ### Resource Notes
 
-- **2 cores / 2 GB RAM** is generous for 3 lightweight Python servers
-- Increase to 4 cores / 4 GB if migrating heavier servers (playwright + PDF)
+- **2 cores / 2 GB RAM** is generous for the current lightweight Python servers
+- Increase to 4 cores / 4 GB if you add heavier servers (PDF/Knowledge)
 - `nesting=1` required for systemd inside the container
 - `onboot=1` ensures servers survive Proxmox reboots
 
@@ -108,16 +108,6 @@ su - mcp -c "cd /opt/mcp-servers && uv sync --extra all"
 su - mcp -c "/opt/mcp-servers/.venv/bin/python -c 'import fastmcp; print(fastmcp.__version__)'"
 ```
 
-### For Playwright (browser automation)
-
-Playwright needs browser binaries. Skip this if you're not deploying the playwright server:
-
-```bash
-su - mcp -c "/opt/mcp-servers/.venv/bin/python -m playwright install chromium --with-deps"
-```
-
-> **Note:** Playwright in a headless LXC is limited. If browser_open needs a GUI (Brave app-mode), you may want to skip the playwright server on Proxmox and run it on the Dell XPS instead.
-
 ---
 
 ## 5. Configure Environment
@@ -136,16 +126,16 @@ sudo /opt/mcp-servers/deploy/setup-systemd.sh
 
 # Output will show:
 #   ✅ /opt/mcp-servers/.env.calculator → port 9003
-#   ✅ /opt/mcp-servers/.env.shell_control → port 9001
-#   ✅ /opt/mcp-servers/.env.playwright → port 9011
+#   ✅ /opt/mcp-servers/.env.hue → port 9015
+#   ✅ /opt/mcp-servers/.env.knowledge → port 9017
 
 # Or install specific servers only:
-# sudo /opt/mcp-servers/deploy/setup-systemd.sh calculator shell_control
+# sudo /opt/mcp-servers/deploy/setup-systemd.sh calculator hue
 
-# Verify all three are running
+# Verify they are running
 systemctl status mcp-server@calculator --no-pager
-systemctl status mcp-server@shell_control --no-pager
-systemctl status mcp-server@playwright --no-pager
+systemctl status mcp-server@hue --no-pager
+systemctl status mcp-server@knowledge --no-pager
 ```
 
 ### Checking Logs
@@ -169,12 +159,8 @@ From inside the container:
 curl -s http://127.0.0.1:9003/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python3 -m json.tool
 
-# Shell Control
-curl -s http://127.0.0.1:9001/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python3 -m json.tool
-
-# Playwright
-curl -s http://127.0.0.1:9011/mcp -H 'Content-Type: application/json' \
+# Hue
+curl -s http://127.0.0.1:9015/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python3 -m json.tool
 ```
 
@@ -198,15 +184,10 @@ curl -X POST http://localhost:8000/api/mcp/servers/connect \
   -H 'Content-Type: application/json' \
   -d '{"url": "http://192.168.1.110:9003/mcp"}'
 
-# Shell Control
+# Hue
 curl -X POST http://localhost:8000/api/mcp/servers/connect \
   -H 'Content-Type: application/json' \
-  -d '{"url": "http://192.168.1.110:9001/mcp"}'
-
-# Playwright
-curl -X POST http://localhost:8000/api/mcp/servers/connect \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "http://192.168.1.110:9011/mcp"}'
+  -d '{"url": "http://192.168.1.110:9015/mcp"}'
 
 # Verify all connected
 curl http://localhost:8000/api/mcp/servers/ | python3 -m json.tool
@@ -224,14 +205,8 @@ Or add them directly to `data/mcp_servers.json` in Backend_FastAPI:
       "disabled_tools": []
     },
     {
-      "id": "shell-control",
-      "url": "http://192.168.1.110:9001/mcp",
-      "enabled": true,
-      "disabled_tools": []
-    },
-    {
-      "id": "playwright",
-      "url": "http://192.168.1.110:9011/mcp",
+      "id": "hue",
+      "url": "http://192.168.1.110:9015/mcp",
       "enabled": true,
       "disabled_tools": []
     }

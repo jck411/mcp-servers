@@ -22,24 +22,20 @@ Each server:
 
 | Server | Port |
 |--------|------|
-| shell_control | 9001 |
 | calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
 | gdrive | 9006 |
 | pdf | 9007 |
 | monarch | 9008 |
-| notes | 9009 |
 | spotify | 9010 |
-| playwright | 9011 |
 | tv | 9013 |
-| rag | 9014 |
 | hue | 9015 |
 | web_search | 9016 |
 | knowledge | 9017 |
 | knowledge_api (REST, not MCP) | 9018 |
 
-Next available MCP port: **9019**. Port `9012` is retired (was `kiosk_clock_tools`). `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
+Next available MCP port: **9019**. Retired ports (do not reuse): `9001`, `9002`, `9009`, `9011`, `9012`, `9014`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
 
 All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
 
@@ -71,8 +67,8 @@ uv sync
 python -m servers.calculator --transport streamable-http --host 0.0.0.0 --port 9003
 
 # Run with extras for specific servers
-uv sync --extra playwright
-python -m servers.playwright --transport streamable-http --host 0.0.0.0 --port 9011
+uv sync --extra hue
+python -m servers.hue --transport streamable-http --host 0.0.0.0 --port 9015
 ```
 
 ## Local Development

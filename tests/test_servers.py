@@ -11,15 +11,6 @@ def test_calculator_module_loads():
     assert hasattr(mod, "run")
 
 
-def test_shell_control_module_loads():
-    """Shell control server module should import without errors."""
-    mod = importlib.import_module("servers.shell_control")
-    assert hasattr(mod, "mcp")
-    assert hasattr(mod, "shell_execute")
-    assert hasattr(mod, "shell_session")
-    assert hasattr(mod, "run")
-
-
 async def test_calculator_evaluate():
     """Calculator evaluate should return correct results."""
     from servers.calculator import evaluate
