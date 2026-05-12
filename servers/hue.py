@@ -9,6 +9,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import json
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastmcp import FastMCP
 
@@ -24,6 +30,14 @@ from shared.hue_auth import (
 )
 
 DEFAULT_HTTP_PORT = 9015
+HUE_LOG_DIR = Path(os.environ.get("HUE_LOG_DIR", "/var/log/hue"))
+HUE_LOG_TIMEZONE = os.environ.get("HUE_TIMEZONE", "America/New_York")
+LOG_PREFIXES = {
+    "changes": "hue_changes",
+    "events": "hue_events",
+    "health": "hue_health",
+    "snapshots": "hue_snapshots",
+}
 
 mcp = FastMCP("hue")
 
@@ -33,6 +47,98 @@ def _check_key() -> str | None:
     if not HUE_API_KEY:
         return "HUE_KEY environment variable is not set. Run hue_register to get a key."
     return None
+
+
+def _log_timezone() -> Any:
+    try:
+        return ZoneInfo(HUE_LOG_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        return datetime.now().astimezone().tzinfo
+
+
+def _log_date() -> str:
+    return datetime.now(_log_timezone()).date().isoformat()
+
+
+def _parse_log_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_log_timezone())
+    return dt
+
+
+def _log_paths(kind: str, date: str | None = None) -> list[Path]:
+    prefix = LOG_PREFIXES.get(kind)
+    if not prefix:
+        return []
+    if date:
+        return [HUE_LOG_DIR / f"{prefix}_{date}.jsonl"]
+    return sorted(HUE_LOG_DIR.glob(f"{prefix}_*.jsonl"))
+
+
+def _read_log_records(kind: str, date: str | None = None) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in _log_paths(kind, date):
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+        except OSError:
+            continue
+    return records
+
+
+def _state_text(state: dict[str, Any]) -> str:
+    parts: list[str] = []
+    on = state.get("on")
+    if on is True:
+        parts.append("ON")
+    elif on is False:
+        parts.append("off")
+    brightness = state.get("brightness")
+    if brightness is not None:
+        parts.append(f"{brightness:.0f}%")
+    mirek = state.get("mirek")
+    if mirek is not None:
+        parts.append(f"mirek={mirek}")
+    if "color" in state:
+        parts.append("color")
+    return " ".join(parts) if parts else "state unknown"
+
+
+def _format_change(record: dict[str, Any]) -> str:
+    ts = record.get("ts", "?")
+    name = record.get("name") or record.get("rid", "?")
+    changed = ", ".join(record.get("changed") or [])
+    before = _state_text(record.get("before") or {})
+    after = _state_text(record.get("after") or {})
+    return f"{ts}  {name}  {changed or 'change'}  {before} -> {after}"
+
+
+def _format_health(record: dict[str, Any]) -> str:
+    parts = [record.get("ts", "?"), record.get("kind", "?")]
+    if record.get("error"):
+        parts.append(str(record["error"]))
+    if record.get("resources") is not None:
+        parts.append(f"resources={record['resources']}")
+    if record.get("counts") is not None:
+        parts.append(f"counts={record['counts']}")
+    return "  ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +723,149 @@ async def identify(light: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool 15 — hue_log_recent
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("hue_log_recent")
+async def log_recent(
+    light: str | None = None,
+    minutes: int = 60,
+    limit: int = 50,
+    date: str | None = None,
+) -> str:
+    """Show recent Hue light/group changes from the local rolling logs.
+
+    Args:
+        light:   Optional case-insensitive light/group name filter.
+        minutes: Look back this many minutes. Ignored when date is provided.
+        limit:   Maximum rows to return.
+        date:    Optional log date as YYYY-MM-DD; scans that whole local date.
+    """
+    if limit < 1:
+        return "limit must be at least 1."
+    limit = min(limit, 200)
+
+    if not HUE_LOG_DIR.exists():
+        return f"Hue log directory not found: {HUE_LOG_DIR}"
+
+    records = _read_log_records("changes", date)
+    if not records:
+        target = date or _log_date()
+        return f"No Hue change logs found for {target} in {HUE_LOG_DIR}."
+
+    cutoff: datetime | None = None
+    if date is None:
+        cutoff = datetime.now(_log_timezone()) - timedelta(minutes=max(1, minutes))
+
+    needle = light.lower() if light else None
+    filtered: list[dict[str, Any]] = []
+    for record in records:
+        ts = _parse_log_ts(record.get("ts"))
+        if cutoff and (not ts or ts < cutoff):
+            continue
+        if needle and needle not in (record.get("name") or "").lower():
+            continue
+        filtered.append(record)
+
+    filtered.sort(key=lambda item: item.get("ts", ""))
+    filtered = filtered[-limit:]
+    if not filtered:
+        scope = f"date {date}" if date else f"last {minutes} minutes"
+        suffix = f" matching '{light}'" if light else ""
+        return f"No Hue changes found for {scope}{suffix}."
+
+    lines = [f"Hue changes ({len(filtered)} shown, newest last):"]
+    lines.extend(_format_change(record) for record in filtered)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 16 — hue_log_status
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("hue_log_status")
+async def log_status() -> str:
+    """Summarize Hue logger health, files, and latest snapshot counts."""
+    if not HUE_LOG_DIR.exists():
+        return f"Hue log directory not found: {HUE_LOG_DIR}"
+
+    lines = [f"Hue log directory: {HUE_LOG_DIR}"]
+    for kind, prefix in LOG_PREFIXES.items():
+        paths = sorted(HUE_LOG_DIR.glob(f"{prefix}_*.jsonl"))
+        if not paths:
+            lines.append(f"{kind:<9} no files")
+            continue
+        newest = paths[-1]
+        size_kb = newest.stat().st_size / 1024
+        lines.append(f"{kind:<9} {len(paths)} file(s), latest {newest.name} ({size_kb:.1f} KB)")
+
+    health = _read_log_records("health")
+    if health:
+        lines.append("\nRecent health:")
+        for record in health[-8:]:
+            lines.append("  " + _format_health(record))
+
+    snapshots = _read_log_records("snapshots")
+    if snapshots:
+        latest = snapshots[-1]
+        lines.append("\nLatest snapshot:")
+        lines.append(f"  {latest.get('ts', '?')} counts={latest.get('counts', {})}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 17 — hue_log_search
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("hue_log_search")
+async def log_search(
+    query: str,
+    kind: str = "changes",
+    date: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Search Hue JSONL logs by plain text.
+
+    Args:
+        query: Text to search for, case-insensitive.
+        kind:  One of changes, events, health, snapshots.
+        date:  Optional log date as YYYY-MM-DD.
+        limit: Maximum matching rows to return.
+    """
+    if kind not in LOG_PREFIXES:
+        return f"Unknown kind '{kind}'. Use one of: {', '.join(LOG_PREFIXES)}."
+    if not query.strip():
+        return "query is required."
+    limit = min(max(limit, 1), 100)
+    needle = query.lower()
+
+    matches: list[dict[str, Any]] = []
+    for record in _read_log_records(kind, date):
+        if needle in json.dumps(record, ensure_ascii=False).lower():
+            matches.append(record)
+
+    matches = matches[-limit:]
+    if not matches:
+        return f"No matches for '{query}' in Hue {kind} logs."
+
+    lines = [f"Hue {kind} matches for '{query}' ({len(matches)} shown):"]
+    for record in matches:
+        if kind == "changes":
+            lines.append(_format_change(record))
+        elif kind == "health":
+            lines.append(_format_health(record))
+        else:
+            ts = record.get("ts", "?")
+            name = record.get("name") or record.get("kind") or record.get("resource_type") or "record"
+            lines.append(f"{ts}  {name}  {json.dumps(record, ensure_ascii=False)[:500]}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Server entrypoints
 # ---------------------------------------------------------------------------
 
@@ -690,4 +939,8 @@ __all__ = [
     "register",
     "all_off",
     "identify",
+    # Log tools
+    "log_recent",
+    "log_status",
+    "log_search",
 ]

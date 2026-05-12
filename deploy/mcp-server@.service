@@ -27,6 +27,7 @@ Wants=network-online.target
 Type=simple
 User=mcp
 Group=mcp
+SupplementaryGroups=hue
 WorkingDirectory=/opt/mcp-servers
 EnvironmentFile=/opt/mcp-servers/.env
 EnvironmentFile=-/opt/mcp-servers/.env.%i
