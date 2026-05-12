@@ -42,7 +42,7 @@ Force a specific mode with `--local`, `--tunnel`, or `--remote`.
 ## What deploy does (steps 1–5)
 
 1. **Push** — commits any dirty local files and runs `git push origin master` (skip with `--no-push`)
-2. **Pull** — SSHs into CT 110 and runs `git pull --ff-only` + `uv sync --extra all`
+2. **Reset code** — SSHs into CT 110, runs `git fetch origin master`, resets tracked files to `origin/master`, then runs `uv sync --extra all`. Runtime/untracked folders such as `credentials/`, `logs/`, `data/`, and `knowledge/` are left alone.
 3. **Port file** — writes `/opt/mcp-servers/.env.<server>` containing `MCP_PORT=<port>`
 4. **Orphan kill** — `fuser -k <port>/tcp` to free the port before restart
 5. **Restart + poll** — `systemctl restart mcp-server@<server>`, polls up to 20 s for `active`
@@ -94,8 +94,8 @@ Check: `which cloudflared && cloudflared version`
 Prints three `pct exec` blocks to paste into the Proxmox web console at `https://proxmox.jackshome.com → CT 110 → Console`:
 
 ```
-# Step 1: Pull + sync
-pct exec 110 -- bash -c 'cd /opt/mcp-servers && git pull --ff-only && uv sync --extra all'
+# Step 1: Reset tracked code + sync
+pct exec 110 -- bash -c 'cd /opt/mcp-servers && git fetch origin master && git reset --hard origin/master && uv sync --extra all'
 
 # Step 2: Restart
 pct exec 110 -- bash -c 'systemctl restart mcp-server@spotify'
@@ -123,7 +123,7 @@ pct exec 110 -- bash -c 'systemctl is-active mcp-server@spotify'
 
 ```bash
 ssh proxmox-tunnel 'pct exec 110 -- bash -c "
-  cd /opt/mcp-servers && git pull &&
+  cd /opt/mcp-servers && git fetch origin master && git reset --hard origin/master &&
   cp deploy/mcp-server@.service /etc/systemd/system/ &&
   systemctl daemon-reload
 "'

@@ -171,7 +171,7 @@ sudo ./deploy/setup-systemd.sh
 # Check status
 ./deploy/deploy.sh --status
 
-# Deploy updates (pull + sync + restart)
+# Deploy updates (reset tracked source to origin/master + sync + restart)
 ./deploy/deploy.sh
 ```
 
@@ -277,4 +277,3 @@ If the tunnel is protected by Zero Trust, add the `CF-Access-Client-Id` and `CF-
 ### Generic (any MCP client)
 
 Point any MCP client at `http://192.168.1.110:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
-

@@ -145,7 +145,9 @@ show_status() {
 
 # ── Build the remote command string ──────────────────────────────────────────
 _build_run_cmd() {
-    local cmds="export PATH=/root/.local/bin:/home/mcp/.local/bin:\$PATH && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all"
+    # Make tracked source files match origin/master exactly. Runtime/untracked
+    # folders such as credentials/, logs/, data/, and knowledge/ are left alone.
+    local cmds="export PATH=/root/.local/bin:/home/mcp/.local/bin:\$PATH && cd ${MCP_REPO} && git fetch origin master && git reset --hard origin/master && uv sync --extra all"
 
     # Write per-server port env files
     for server in "${SERVERS[@]}"; do
@@ -215,8 +217,8 @@ deploy_remote() {
     echo -e "${BOLD}  Paste these commands into Proxmox console (root@pve):${RESET}"
     echo -e "${BOLD}════════════════════════════════════════════════════════════════${RESET}"
     echo ""
-    echo -e "${DIM}# Step 1: Pull code and install deps${RESET}"
-    echo "pct exec ${LXC_MCP} -- bash -c 'export PATH=\"/root/.local/bin:\$PATH\" && cd ${MCP_REPO} && git pull --ff-only && uv sync --extra all'"
+    echo -e "${DIM}# Step 1: Reset tracked code to origin/master and install deps${RESET}"
+    echo "pct exec ${LXC_MCP} -- bash -c 'export PATH=\"/root/.local/bin:\$PATH\" && cd ${MCP_REPO} && git fetch origin master && git reset --hard origin/master && uv sync --extra all'"
     echo ""
     echo -e "${DIM}# Step 2: Restart server(s): ${server_list}${RESET}"
     echo "pct exec ${LXC_MCP} -- bash -c '${restart_cmds}'"
