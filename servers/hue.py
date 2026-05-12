@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastmcp import FastMCP
 
 from shared.hue_auth import (
-    HUE_API_KEY,
     BASE_URL,
+    HUE_API_KEY,
     build_light_state,
     hue_request,
     parse_color,
@@ -33,6 +33,7 @@ DEFAULT_HTTP_PORT = 9015
 HUE_LOG_DIR = Path(os.environ.get("HUE_LOG_DIR", "/var/log/hue"))
 HUE_LOG_TIMEZONE = os.environ.get("HUE_TIMEZONE", "America/New_York")
 LOG_PREFIXES = {
+    "activity": "hue_activity",
     "changes": "hue_changes",
     "events": "hue_events",
     "health": "hue_health",
@@ -130,6 +131,19 @@ def _format_change(record: dict[str, Any]) -> str:
     return f"{ts}  {name}  {changed or 'change'}  {before} -> {after}"
 
 
+def _format_activity(record: dict[str, Any]) -> str:
+    ts = record.get("ts", "?")
+    category = record.get("category") or record.get("resource_type") or "event"
+    name = record.get("name") or record.get("rid") or "?"
+    summary = record.get("summary")
+    if summary:
+        return f"{ts}  [{category}]  {summary}"
+    action = record.get("action") or record.get("event_type") or "event"
+    value = record.get("value")
+    suffix = f" -> {value}" if value is not None else ""
+    return f"{ts}  [{category}]  {name}: {action}{suffix}"
+
+
 def _format_health(record: dict[str, Any]) -> str:
     parts = [record.get("ts", "?"), record.get("kind", "?")]
     if record.get("error"):
@@ -165,13 +179,20 @@ async def list_lights(room: str | None = None) -> str:
             for child in room_data.get("children", [])
             if child.get("rtype") == "device"
         }
-        lights = [l for l in lights if l.get("owner", {}).get("rid") in room_device_ids]
+        lights = [
+            light
+            for light in lights
+            if light.get("owner", {}).get("rid") in room_device_ids
+        ]
 
     if not lights:
         return "No lights found."
 
     lines = []
-    for light in sorted(lights, key=lambda l: l.get("metadata", {}).get("name", "")):
+    for light in sorted(
+        lights,
+        key=lambda light_item: light_item.get("metadata", {}).get("name", ""),
+    ):
         name = light.get("metadata", {}).get("name", "Unknown")
         on_state = light.get("on", {}).get("on", False)
         status = "ON" if on_state else "off"
@@ -451,7 +472,11 @@ async def activate_scene(scene: str, room: str | None = None) -> str:
     scene_id = scene_data["id"]
     scene_name = scene_data.get("metadata", {}).get("name", scene)
 
-    await hue_request("PUT", f"/clip/v2/resource/scene/{scene_id}", json={"recall": {"action": "active"}})
+    await hue_request(
+        "PUT",
+        f"/clip/v2/resource/scene/{scene_id}",
+        json={"recall": {"action": "active"}},
+    )
     return f"Activated scene '{scene_name}'."
 
 
@@ -570,7 +595,11 @@ async def toggle_automation(automation: str, enabled: bool) -> str:
 
     auto_id = target["id"]
     auto_name = target.get("metadata", {}).get("name", automation)
-    await hue_request("PUT", f"/clip/v2/resource/behavior_instance/{auto_id}", json={"enabled": enabled})
+    await hue_request(
+        "PUT",
+        f"/clip/v2/resource/behavior_instance/{auto_id}",
+        json={"enabled": enabled},
+    )
     state = "enabled" if enabled else "disabled"
     return f"Automation '{auto_name}' {state}."
 
@@ -658,7 +687,10 @@ async def register(app_name: str = "mcp-hue", instance_name: str = "server") -> 
             err_type = item["error"].get("type")
             desc = item["error"].get("description", "Unknown error")
             if err_type == 101:
-                return "Link button not pressed. Press the button on the bridge and try again within 30 seconds."
+                return (
+                    "Link button not pressed. Press the button on the bridge and try "
+                    "again within 30 seconds."
+                )
             return f"Registration failed: {desc}"
 
     return f"Unexpected response: {result}"
@@ -687,12 +719,19 @@ async def all_off() -> str:
         if not gl_id:
             continue
         try:
-            await hue_request("PUT", f"/clip/v2/resource/grouped_light/{gl_id}", json={"on": {"on": False}})
+            await hue_request(
+                "PUT",
+                f"/clip/v2/resource/grouped_light/{gl_id}",
+                json={"on": {"on": False}},
+            )
         except Exception as exc:
             errors.append(f"{gl_id[:8]}: {exc}")
 
     if errors:
-        return f"Turned off {len(groups) - len(errors)}/{len(groups)} groups. Errors: {'; '.join(errors)}"
+        return (
+            f"Turned off {len(groups) - len(errors)}/{len(groups)} groups. "
+            f"Errors: {'; '.join(errors)}"
+        )
     return f"Turned off all lights ({len(groups)} groups)."
 
 
@@ -718,7 +757,11 @@ async def identify(light: str) -> str:
     light_id = light_data["id"]
     light_name = light_data.get("metadata", {}).get("name", light)
 
-    await hue_request("PUT", f"/clip/v2/resource/light/{light_id}", json={"identify": {"action": "identify"}})
+    await hue_request(
+        "PUT",
+        f"/clip/v2/resource/light/{light_id}",
+        json={"identify": {"action": "identify"}},
+    )
     return f"Identifying '{light_name}' — it will flash for ~5 seconds."
 
 
@@ -727,21 +770,18 @@ async def identify(light: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool("hue_log_recent")
-async def log_recent(
+async def _log_recent_impl(
+    query: str | None = None,
     light: str | None = None,
+    kind: str = "activity",
+    category: str | None = None,
     minutes: int = 60,
     limit: int = 50,
     date: str | None = None,
 ) -> str:
-    """Show recent Hue light/group changes from the local rolling logs.
-
-    Args:
-        light:   Optional case-insensitive light/group name filter.
-        minutes: Look back this many minutes. Ignored when date is provided.
-        limit:   Maximum rows to return.
-        date:    Optional log date as YYYY-MM-DD; scans that whole local date.
-    """
+    """Shared implementation for the Hue log tools."""
+    if kind not in LOG_PREFIXES:
+        return f"Unknown kind '{kind}'. Use one of: {', '.join(LOG_PREFIXES)}."
     if limit < 1:
         return "limit must be at least 1."
     limit = min(limit, 200)
@@ -749,22 +789,26 @@ async def log_recent(
     if not HUE_LOG_DIR.exists():
         return f"Hue log directory not found: {HUE_LOG_DIR}"
 
-    records = _read_log_records("changes", date)
+    records = _read_log_records(kind, date)
     if not records:
         target = date or _log_date()
-        return f"No Hue change logs found for {target} in {HUE_LOG_DIR}."
+        return f"No Hue {kind} logs found for {target} in {HUE_LOG_DIR}."
 
     cutoff: datetime | None = None
     if date is None:
         cutoff = datetime.now(_log_timezone()) - timedelta(minutes=max(1, minutes))
 
-    needle = light.lower() if light else None
+    effective_query = query if query is not None else light
+    needle = effective_query.lower() if effective_query else None
+    category_filter = category.lower() if category else None
     filtered: list[dict[str, Any]] = []
     for record in records:
         ts = _parse_log_ts(record.get("ts"))
         if cutoff and (not ts or ts < cutoff):
             continue
-        if needle and needle not in (record.get("name") or "").lower():
+        if category_filter and (record.get("category") or "").lower() != category_filter:
+            continue
+        if needle and needle not in json.dumps(record, ensure_ascii=False).lower():
             continue
         filtered.append(record)
 
@@ -772,12 +816,67 @@ async def log_recent(
     filtered = filtered[-limit:]
     if not filtered:
         scope = f"date {date}" if date else f"last {minutes} minutes"
-        suffix = f" matching '{light}'" if light else ""
-        return f"No Hue changes found for {scope}{suffix}."
+        filters = []
+        if effective_query:
+            filters.append(f"matching '{effective_query}'")
+        if category:
+            filters.append(f"category={category}")
+        suffix = f" ({', '.join(filters)})" if filters else ""
+        return f"No Hue {kind} records found for {scope}{suffix}."
 
-    lines = [f"Hue changes ({len(filtered)} shown, newest last):"]
-    lines.extend(_format_change(record) for record in filtered)
+    lines = [f"Hue {kind} ({len(filtered)} shown, newest last):"]
+    for record in filtered:
+        if kind == "activity":
+            lines.append(_format_activity(record))
+        elif kind == "changes":
+            lines.append(_format_change(record))
+        elif kind == "health":
+            lines.append(_format_health(record))
+        else:
+            ts = record.get("ts", "?")
+            record_name = (
+                record.get("name")
+                or record.get("kind")
+                or record.get("resource_type")
+                or "record"
+            )
+            lines.append(
+                f"{ts}  {record_name}  {json.dumps(record, ensure_ascii=False)[:500]}"
+            )
     return "\n".join(lines)
+
+
+@mcp.tool("hue_log_recent")
+async def log_recent(
+    query: str | None = None,
+    light: str | None = None,
+    kind: str = "activity",
+    category: str | None = None,
+    minutes: int = 60,
+    limit: int = 50,
+    date: str | None = None,
+) -> str:
+    """Show recent Hue activity from the local rolling logs.
+
+    Args:
+        query:    Optional case-insensitive text filter over the record.
+        light:    Backward-compatible alias for query.
+        kind:     One of activity, changes, events, health, snapshots.
+        category: Optional activity category filter, e.g. light, input, sensor,
+                  automation, scene, device, metadata. Used with kind=activity.
+        minutes:  Look back this many minutes. Ignored when date is provided.
+        limit:    Maximum rows to return.
+        date:     Optional log date as YYYY-MM-DD; scans that whole local date.
+    """
+    return await _log_recent_impl(
+        query=query,
+        light=light,
+        kind=kind,
+        category=category,
+        minutes=minutes,
+        limit=limit,
+        date=date,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +916,40 @@ async def log_status() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 17 — hue_log_search
+# Tool 17 — hue_log_activity
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("hue_log_activity")
+async def log_activity(
+    category: str | None = None,
+    query: str | None = None,
+    minutes: int = 180,
+    limit: int = 80,
+    date: str | None = None,
+) -> str:
+    """Show normalized Hue activity, including buttons, automations, scenes, sensors, and lights.
+
+    Args:
+        category: Optional category filter: light, input, sensor, automation,
+                  scene, device, metadata.
+        query:    Optional case-insensitive text filter over the activity row.
+        minutes:  Look back this many minutes. Ignored when date is provided.
+        limit:    Maximum rows to return.
+        date:     Optional log date as YYYY-MM-DD; scans that whole local date.
+    """
+    return await _log_recent_impl(
+        query=query,
+        kind="activity",
+        category=category,
+        minutes=minutes,
+        limit=limit,
+        date=date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool 18 — hue_log_search
 # ---------------------------------------------------------------------------
 
 
@@ -832,7 +964,7 @@ async def log_search(
 
     Args:
         query: Text to search for, case-insensitive.
-        kind:  One of changes, events, health, snapshots.
+        kind:  One of activity, changes, events, health, snapshots.
         date:  Optional log date as YYYY-MM-DD.
         limit: Maximum matching rows to return.
     """
@@ -854,14 +986,23 @@ async def log_search(
 
     lines = [f"Hue {kind} matches for '{query}' ({len(matches)} shown):"]
     for record in matches:
-        if kind == "changes":
+        if kind == "activity":
+            lines.append(_format_activity(record))
+        elif kind == "changes":
             lines.append(_format_change(record))
         elif kind == "health":
             lines.append(_format_health(record))
         else:
             ts = record.get("ts", "?")
-            name = record.get("name") or record.get("kind") or record.get("resource_type") or "record"
-            lines.append(f"{ts}  {name}  {json.dumps(record, ensure_ascii=False)[:500]}")
+            record_name = (
+                record.get("name")
+                or record.get("kind")
+                or record.get("resource_type")
+                or "record"
+            )
+            lines.append(
+                f"{ts}  {record_name}  {json.dumps(record, ensure_ascii=False)[:500]}"
+            )
     return "\n".join(lines)
 
 
@@ -942,5 +1083,6 @@ __all__ = [
     # Log tools
     "log_recent",
     "log_status",
+    "log_activity",
     "log_search",
 ]
