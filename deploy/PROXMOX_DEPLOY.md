@@ -5,6 +5,8 @@
 **OS:** Debian 13 (matches all other containers)  
 **Servers:** calculator (9003), hue (9015), knowledge (9017), and others — see `deploy/setup-systemd.sh` for the full list.
 
+> **Remote access prerequisites.** Commands below that use `ssh proxmox-tunnel` require the Cloudflare Access service token wrapper described in [`../docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#deploying-from-remote-away-from-home). `ssh.jackshome.com` is fronted by Cloudflare Access (service token `mcp-servers-ssh`) and PVE has password auth disabled — key + token is mandatory.
+
 ---
 
 ## 1. Create the LXC Container

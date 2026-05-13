@@ -142,6 +142,7 @@ Next available: 9019
 - LXC CT 110 at 192.168.1.110, repo at `/opt/mcp-servers`
 - **Direct SSH to 192.168.1.110 does NOT work** — use `ssh proxmox-tunnel` (Cloudflare) to reach PVE host, then `pct exec 110 -- bash -c '...'`
 - `deploy.sh` auto-detects: tries direct SSH first, then `proxmox-tunnel`, then prints manual commands
+- `proxmox-tunnel` requires the Cloudflare Access service token wired through `~/.ssh/cloudflared-access-ssh.sh` (token values live in `~/REPOS/symlinked-env/.env` as `PROXMOX_SSH_CF_ACCESS_CLIENT_ID/SECRET`; see `docs/DEPLOYMENT.md` for the exact setup). PVE SSH is key-only with passwords disabled.
 - Service user: `mcp` — all runtime files owned by `mcp:mcp`
 - Package manager: `uv` — never pip
 - Systemd template: `mcp-server@.service`

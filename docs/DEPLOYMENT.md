@@ -65,15 +65,30 @@ SSHes to PVE at `root@192.168.1.11`, then `pct exec 110` into the LXC.
 
 ## Deploying from remote (away from home)
 
-Requires `proxmox-tunnel` in `~/.ssh/config` and `cloudflared` installed. Auto-detected — no flags needed.
+Requires `cloudflared` installed locally, the `proxmox-tunnel` Host in `~/.ssh/config`, and the Cloudflare Access service token wired into a wrapper script. Auto-detected — no flags needed.
+
+`ssh.jackshome.com` is fronted by the Cloudflare Access app **"Proxmox SSH"** with a non-identity policy that requires service token `mcp-servers-ssh`. PVE itself only accepts SSH keys (`PasswordAuthentication no`, `PermitRootLogin prohibit-password`). The wrapper script injects the service-token headers before cloudflared dials the SSH origin.
 
 ```
-# ~/.ssh/config entry required:
+# ~/.ssh/config entry:
 Host proxmox-tunnel
     HostName ssh.jackshome.com
     User root
-    ProxyCommand cloudflared access ssh --hostname %h
+    ProxyCommand /home/jack/.ssh/cloudflared-access-ssh.sh %h
     StrictHostKeyChecking no
+
+# ~/.ssh/cloudflared-access-ssh.sh (chmod 700)
+#!/usr/bin/env bash
+set -euo pipefail
+. "$HOME/.config/cloudflared/access-tokens.env"
+export TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET
+exec cloudflared access ssh --hostname "$1"
+
+# ~/.config/cloudflared/access-tokens.env (chmod 600)
+# Values stored in the master ~/REPOS/symlinked-env/.env as
+#   PROXMOX_SSH_CF_ACCESS_CLIENT_ID / PROXMOX_SSH_CF_ACCESS_CLIENT_SECRET
+TUNNEL_SERVICE_TOKEN_ID=<client_id>.access
+TUNNEL_SERVICE_TOKEN_SECRET=<client_secret>
 ```
 
 Check: `which cloudflared && cloudflared version`
