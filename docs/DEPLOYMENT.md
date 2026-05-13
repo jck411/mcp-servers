@@ -1,19 +1,24 @@
 # Deployment
 
-How to deploy any MCP server in this repo to LXC CT 110 (`192.168.1.110`).
+How to deploy the Knowledge services in this repo to LXC CT 110
+(`192.168.1.110`).
+
+Private/account/home-control MCPs (`calendar`, `gmail`, `gdrive`, `monarch`,
+`spotify`, `tv`, `hue`) use the same codebase but run as `mcp-accounts` on LXC
+CT 117. Deploy those through `NETWORK/deploy/registry.yml`, not this script.
 
 ---
 
 ## Quick reference
 
 ```bash
-# Deploy one server (auto-detects local/tunnel/console)
-./deploy/deploy.sh spotify
+# Deploy one Knowledge service (auto-detects local/tunnel/console)
+./deploy/deploy.sh knowledge
 
-# Deploy multiple servers
+# Deploy both Knowledge services
 ./deploy/deploy.sh knowledge knowledge_api
 
-# Deploy all servers
+# Deploy all services managed by this script
 ./deploy/deploy.sh
 
 # Already pushed? Skip the git commit/push step
@@ -55,10 +60,9 @@ Force a specific mode with `--local`, `--tunnel`, or `--remote`.
 SSHes to PVE at `root@192.168.1.11`, then `pct exec 110` into the LXC.
 
 ```bash
-./deploy/deploy.sh spotify
 ./deploy/deploy.sh knowledge knowledge_api
-./deploy/deploy.sh --no-push hue        # code already pushed
-./deploy/deploy.sh --local calendar     # force local mode
+./deploy/deploy.sh --no-push knowledge_api  # code already pushed
+./deploy/deploy.sh --local knowledge        # force local mode
 ```
 
 ---
@@ -94,7 +98,7 @@ TUNNEL_SERVICE_TOKEN_SECRET=<client_secret>
 Check: `which cloudflared && cloudflared version`
 
 ```bash
-./deploy/deploy.sh spotify
+./deploy/deploy.sh knowledge
 # Internally: ssh proxmox-tunnel 'pct exec 110 -- bash -c "…"'
 ```
 
@@ -103,7 +107,7 @@ Check: `which cloudflared && cloudflared version`
 ## When SSH is unreachable (Proxmox console)
 
 ```bash
-./deploy/deploy.sh --remote spotify
+./deploy/deploy.sh --remote knowledge
 ```
 
 Prints three `pct exec` blocks to paste into the Proxmox web console at `https://proxmox.jackshome.com → CT 110 → Console`:
@@ -113,15 +117,15 @@ Prints three `pct exec` blocks to paste into the Proxmox web console at `https:/
 pct exec 110 -- bash -c 'cd /opt/mcp-servers && git fetch origin master && git reset --hard origin/master && uv sync --extra all'
 
 # Step 2: Restart
-pct exec 110 -- bash -c 'systemctl restart mcp-server@spotify'
+pct exec 110 -- bash -c 'systemctl restart mcp-server@knowledge'
 
 # Step 3: Check status
-pct exec 110 -- bash -c 'systemctl is-active mcp-server@spotify'
+pct exec 110 -- bash -c 'systemctl is-active mcp-server@knowledge'
 ```
 
 ---
 
-## Adding a new server
+## Adding a new Knowledge service
 
 1. Create `servers/<name>.py` following the pattern in an existing server
 2. Add `[name]=<port>` to `PORT_MAP` in both `deploy/deploy.sh` and `deploy/setup-systemd.sh`
@@ -129,6 +133,9 @@ pct exec 110 -- bash -c 'systemctl is-active mcp-server@spotify'
 4. Add any extra pip packages to `pyproject.toml` under `[project.optional-dependencies]` and add to the `all` group
 5. Add the port to the Port Assignments table in `.github/copilot-instructions.md`
 6. Deploy: `./deploy/deploy.sh <name>`
+
+For private/account/home-control MCPs, add the service to the `mcp-accounts`
+deployment path in `NETWORK/deploy/registry.yml` instead.
 
 ---
 
@@ -152,17 +159,12 @@ Then restart whichever services need it: `./deploy/deploy.sh --no-push <name>`.
 
 | Server | Port |
 |--------|------|
-| calendar | 9004 |
-| gmail | 9005 |
-| gdrive | 9006 |
-| monarch | 9008 |
-| spotify | 9010 |
-| tv | 9013 |
-| hue | 9015 |
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired (do not reuse): 9002, 9003, 9007, 9012, 9016. Next available: 9019.
+The private/home MCP ports are listed in the README and managed by the CT 117
+`mcp-accounts` deployment path. Retired ports (do not reuse): 9002, 9003,
+9007, 9012, 9016. Next available: 9019.
 
 ---
 
@@ -176,25 +178,24 @@ Retired (do not reuse): 9002, 9003, 9007, 9012, 9016. Next available: 9019.
 **Check a single server:**
 ```bash
 # From home (via PVE)
-ssh root@192.168.1.11 'pct exec 110 -- systemctl is-active mcp-server@spotify'
+ssh root@192.168.1.11 'pct exec 110 -- systemctl is-active mcp-server@knowledge'
 
 # From remote (via tunnel)
-ssh proxmox-tunnel 'pct exec 110 -- systemctl is-active mcp-server@spotify'
+ssh proxmox-tunnel 'pct exec 110 -- systemctl is-active mcp-server@knowledge'
 ```
 
 **View logs:**
 ```bash
 # From home
-ssh root@192.168.1.11 'pct exec 110 -- journalctl -u mcp-server@spotify -n 50 --no-pager'
+ssh root@192.168.1.11 'pct exec 110 -- journalctl -u mcp-server@knowledge -n 50 --no-pager'
 
 # From remote
-ssh proxmox-tunnel 'pct exec 110 -- journalctl -u mcp-server@spotify -n 50 --no-pager'
+ssh proxmox-tunnel 'pct exec 110 -- journalctl -u mcp-server@knowledge -n 50 --no-pager'
 ```
 
 **Smoke-test a server's tool list:**
 ```bash
-# Replace port as needed (see port table above)
-ssh root@192.168.1.11 'pct exec 110 -- curl -s http://127.0.0.1:9010/mcp \
+ssh root@192.168.1.11 'pct exec 110 -- curl -s http://127.0.0.1:9017/mcp \
   -X POST -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"'

@@ -1,11 +1,9 @@
-# Deploying MCP Servers to Proxmox
+# Knowledge Services on Proxmox
 
 **Target:** LXC container on Proxmox (192.168.1.11)  
 **Container:** CT 110, IP `192.168.1.110`  
 **OS:** Debian 13 (matches all other containers)  
-**Servers:** Knowledge-only (`knowledge` 9017, `knowledge_api` 9018). Private/account/home-control MCPs run on CT 117 (`mcp-accounts`).
-
-> **Note:** Some older examples below still show the original all-in-one MCP layout. Treat `deploy/setup-systemd.sh`, `deploy/deploy.sh`, and `NETWORK/deploy/registry.yml` as the current source of truth.
+**Services:** `knowledge` on 9017 and `knowledge_api` on 9018. Private/account/home-control MCPs run on CT 117 (`mcp-accounts`) through the NETWORK deploy registry.
 
 > **Remote access prerequisites.** Commands below that use `ssh proxmox-tunnel` require the Cloudflare Access service token wrapper described in [`../docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#deploying-from-remote-away-from-home). `ssh.jackshome.com` is fronted by Cloudflare Access (service token `mcp-servers-ssh`) and PVE has password auth disabled — key + token is mandatory.
 
@@ -41,8 +39,8 @@ pct status 110
 
 ### Resource Notes
 
-- **2 cores / 2 GB RAM** is generous for the current lightweight Python servers
-- Increase to 4 cores / 4 GB if you add heavier servers (PDF/Knowledge)
+- **2 cores / 2 GB RAM** is enough for the current Knowledge MCP/API pair.
+- Increase CPU/RAM if OCR, extraction, or Qdrant load grows.
 - `nesting=1` required for systemd inside the container
 - `onboot=1` ensures servers survive Proxmox reboots
 
@@ -129,24 +127,22 @@ Per-instance port files are created automatically by the setup script in step 6.
 sudo /opt/mcp-servers/deploy/setup-systemd.sh
 
 # Output will show:
-#   ✅ /opt/mcp-servers/.env.calculator → port 9003
-#   ✅ /opt/mcp-servers/.env.hue → port 9015
-#   ✅ /opt/mcp-servers/.env.knowledge → port 9017
+#   /opt/mcp-servers/.env.knowledge → port 9017
+#   /opt/mcp-servers/.env.knowledge_api → port 9018
 
 # Or install specific servers only:
-# sudo /opt/mcp-servers/deploy/setup-systemd.sh calculator hue
+# sudo /opt/mcp-servers/deploy/setup-systemd.sh knowledge
 
 # Verify they are running
-systemctl status mcp-server@calculator --no-pager
-systemctl status mcp-server@hue --no-pager
 systemctl status mcp-server@knowledge --no-pager
+systemctl status mcp-server@knowledge_api --no-pager
 ```
 
 ### Checking Logs
 
 ```bash
 # Live logs for a specific server
-journalctl -u mcp-server@calculator -f
+journalctl -u mcp-server@knowledge -f
 
 # All MCP server logs
 journalctl -u 'mcp-server@*' --since "5 min ago"
@@ -159,21 +155,24 @@ journalctl -u 'mcp-server@*' --since "5 min ago"
 From inside the container:
 
 ```bash
-# Calculator
-curl -s http://127.0.0.1:9003/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python3 -m json.tool
+# Knowledge MCP
+curl -s http://127.0.0.1:9017/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -m json.tool
 
-# Hue
-curl -s http://127.0.0.1:9015/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | python3 -m json.tool
+# Knowledge REST API
+curl -s http://127.0.0.1:9018/api/health | python3 -m json.tool
 ```
 
 From your **dev machine** (Dell XPS / 192.168.1.19):
 
 ```bash
 # Test connectivity across the network
-curl -s http://192.168.1.110:9003/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+curl -s http://192.168.1.110:9017/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ---
@@ -183,34 +182,23 @@ curl -s http://192.168.1.110:9003/mcp -H 'Content-Type: application/json' \
 Once servers are verified, tell Backend_FastAPI to connect:
 
 ```bash
-# Calculator
+# Knowledge
 curl -X POST http://localhost:8000/api/mcp/servers/connect \
   -H 'Content-Type: application/json' \
-  -d '{"url": "http://192.168.1.110:9003/mcp"}'
-
-# Hue
-curl -X POST http://localhost:8000/api/mcp/servers/connect \
-  -H 'Content-Type: application/json' \
-  -d '{"url": "http://192.168.1.110:9015/mcp"}'
+  -d '{"url": "http://192.168.1.110:9017/mcp"}'
 
 # Verify all connected
 curl http://localhost:8000/api/mcp/servers/ | python3 -m json.tool
 ```
 
-Or add them directly to `data/mcp_servers.json` in Backend_FastAPI:
+Or add Knowledge directly to `data/mcp_servers.json` in Backend_FastAPI:
 
 ```json
 {
   "servers": [
     {
-      "id": "calculator",
-      "url": "http://192.168.1.110:9003/mcp",
-      "enabled": true,
-      "disabled_tools": []
-    },
-    {
-      "id": "hue",
-      "url": "http://192.168.1.110:9015/mcp",
+      "id": "knowledge",
+      "url": "http://192.168.1.110:9017/mcp",
       "enabled": true,
       "disabled_tools": []
     }
@@ -247,15 +235,19 @@ From your dev machine:
 ssh proxmox-tunnel "pct exec 110 -- bash -lc 'cd /opt/mcp-servers && su - mcp -c \"./deploy/deploy.sh\"'"
 
 # Or deploy a specific server only:
-ssh proxmox-tunnel "pct exec 110 -- bash -lc 'cd /opt/mcp-servers && su - mcp -c \"./deploy/deploy.sh calculator\"'"
+ssh proxmox-tunnel "pct exec 110 -- bash -lc 'cd /opt/mcp-servers && su - mcp -c \"./deploy/deploy.sh knowledge\"'"
 ```
 
-### Adding a New Server
+### Adding a New Knowledge Service
 
 1. Create `servers/<name>.py` in this repo
-2. Add port to `.env` on Proxmox: `MCP_PORT_<name>=<port>`
-3. Enable: `systemctl enable --now mcp-server@<name>`
-4. Connect from backend: `POST /api/mcp/servers/connect {"url": "http://192.168.1.110:<port>/mcp"}`
+2. Add `[name]=<port>` to `PORT_MAP` in `deploy/deploy.sh` and `deploy/setup-systemd.sh`
+3. Add the name to `ALL_SERVERS` and/or `DEFAULT_SERVERS`
+4. Run `sudo /opt/mcp-servers/deploy/setup-systemd.sh <name>`
+5. Deploy with `./deploy/deploy.sh <name>`
+
+For private/account/home-control MCPs, update the CT 117 `mcp-accounts`
+deployment in `NETWORK/deploy/registry.yml` instead.
 
 ### Monitoring
 
@@ -287,17 +279,16 @@ ssh root@192.168.1.11 "pct config 110"
 
 ## Optional: Cloudflare Tunnel
 
-To expose MCP servers externally (use with your existing Cloudflare Tunnel on Proxmox host):
+To expose Knowledge externally (use with your existing Cloudflare Tunnel on Proxmox host):
 
 Add to your tunnel config on 192.168.1.11:
 
 ```yaml
 ingress:
-  - hostname: mcp-calculator.jackshome.com
-    service: http://192.168.1.110:9003
-  - hostname: mcp-hue.jackshome.com
-    service: http://192.168.1.110:9015
-  # ... etc
+  - hostname: mcp-knowledge.jackshome.com
+    service: http://192.168.1.110:9017
+  - hostname: api-knowledge.jackshome.com
+    service: http://192.168.1.110:9018
 ```
 
 Then restart: `systemctl restart cloudflared`

@@ -30,7 +30,6 @@ from shared.google_auth import (
 )
 from shared.time_context import EASTERN_TIMEZONE_NAME
 from shared.tasks import (
-    ScheduledTask,
     Task,
     TaskAuthorizationError,
     TaskSearchResult,

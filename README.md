@@ -37,7 +37,7 @@ Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9003`,
 
 ### Knowledge Curation Queue
 
-The `knowledge` server owns a reviewed curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Tools:
+The `knowledge` server owns an approval-gated curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Tools:
 
 - `knowledge_curation_list`
 - `knowledge_curation_get`
@@ -52,6 +52,12 @@ Destructive actions require `confirmation` equal to the queue item id.
 - [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; discovers LXC 110 and LXC 117
 - [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — OpenCode config; see that repo's `add-mcp-server.sh` to register servers
 - [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure
+
+## Docs
+
+- [Knowledge system](docs/KNOWLEDGE_SYSTEM.md) — how domains, sources, search, extraction, and curation work
+- [Upload system](docs/UPLOAD_SYSTEM.md) — browser/API upload flow and troubleshooting
+- [Deployment](docs/DEPLOYMENT.md) — deploy script, systemd, ports, and debugging
 
 ## Quick Start
 

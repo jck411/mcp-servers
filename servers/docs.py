@@ -1,0 +1,157 @@
+"""Docs MCP server — live filesystem access to ~/REPOS for LLM context.
+
+Runs locally via stdio. Never deployed to an LXC.
+Gives any AI agent an always-up-to-date view of repos, infrastructure,
+env layout, and the ability to read/search any file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+from pathlib import Path
+
+from fastmcp import FastMCP
+
+REPOS = Path(os.environ.get("DOCS_REPOS_ROOT", Path.home() / "REPOS"))
+SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache", "uv.lock"}
+DEFAULT_HTTP_PORT = 9019
+
+mcp = FastMCP("docs")
+
+
+@mcp.tool("docs_overview")
+async def overview() -> str:
+    """High-level overview of the entire homelab: repos, LXC/VM services, DHCP devices, and env key counts."""
+    parts: list[str] = []
+
+    # Repos
+    repos = []
+    for d in sorted(REPOS.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        readme = d / "README.md"
+        first = ""
+        if readme.exists():
+            for line in readme.read_text(errors="replace").splitlines():
+                line = line.strip().lstrip("#").strip()
+                if line:
+                    first = line[:120]
+                    break
+        repos.append(f"  {d.name}: {first}" if first else f"  {d.name}")
+    parts.append("## Repos\n" + "\n".join(repos))
+
+    # LXC / VM fleet
+    svc = REPOS / "NETWORK/lxc/services.json"
+    if svc.exists():
+        rows = []
+        for s in json.loads(svc.read_text()):
+            ports = ",".join(str(p) for p in s.get("ports", []))
+            rows.append(
+                f"  {s['name']:20s}  ip={s['ip']:16s}  ports={ports:12s}  "
+                f"id={s['id']}  repo={s.get('owner_repo') or '—'}"
+            )
+        parts.append("## Infrastructure (LXC/VM)\n" + "\n".join(rows))
+
+    # DHCP devices
+    dhcp = REPOS / "NETWORK/dhcp/reservations.json"
+    if dhcp.exists():
+        rows = [
+            f"  {d['name']:25s}  ip={d['ip']:16s}  mac={d.get('mac', '—')}"
+            for d in json.loads(dhcp.read_text())
+        ]
+        parts.append("## Devices (DHCP)\n" + "\n".join(rows))
+
+    # Env manifest summary
+    manifest = REPOS / "symlinked-env/env-manifest.tsv"
+    if manifest.exists():
+        rows = []
+        for line in manifest.read_text().splitlines():
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("|")
+            if len(p) >= 5:
+                env_n = len(p[3].split()) if p[3].strip() else 0
+                cfg_n = len(p[4].split()) if p[4].strip() else 0
+                rows.append(f"  {p[0]:8s} {p[1]:24s}  secrets={env_n:2d}  config={cfg_n:2d}")
+        parts.append("## Env Manifest (per-target key counts)\n" + "\n".join(rows))
+
+    return "\n\n".join(parts)
+
+
+@mcp.tool("docs_read_file")
+async def read_file(path: str) -> str:
+    """Read a file from ~/REPOS by relative path (e.g. 'NETWORK/infrastructure.md').
+    If path is a directory, lists its contents."""
+    target = (REPOS / path).resolve()
+    if not str(target).startswith(str(REPOS.resolve())):
+        return "Error: path must be inside ~/REPOS"
+    if not target.exists():
+        return f"Error: {path} not found"
+    if target.is_dir():
+        entries = []
+        for p in sorted(target.iterdir()):
+            if p.name in SKIP_DIRS:
+                continue
+            kind = "dir/" if p.is_dir() else f"{p.stat().st_size:,}b"
+            entries.append(f"  {p.name:40s}  {kind}")
+        return f"Directory: {path}/\n" + "\n".join(entries)
+    return target.read_text(errors="replace")[:50_000]
+
+
+@mcp.tool("docs_search")
+async def search(query: str, file_pattern: str = "") -> str:
+    """Grep across all repos. Returns matching lines (max 50). Optional file_pattern like '*.py' or '*.md'."""
+    cmd = ["grep", "-rnI", "--color=never", "-m", "50"]
+    for skip in SKIP_DIRS:
+        cmd += [f"--exclude-dir={skip}"]
+    if file_pattern:
+        cmd += [f"--include={file_pattern}"]
+    cmd += [query, str(REPOS)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        lines = r.stdout.replace(str(REPOS) + "/", "").splitlines()[:50]
+        return "\n".join(lines) if lines else "No results."
+    except subprocess.TimeoutExpired:
+        return "Search timed out."
+
+
+@mcp.tool("docs_env_manifest")
+async def env_manifest() -> str:
+    """Returns the env manifest (which repo/LXC gets which keys) plus the config.env contents."""
+    out = []
+    manifest = REPOS / "symlinked-env/env-manifest.tsv"
+    if manifest.exists():
+        out.append("## env-manifest.tsv\n" + manifest.read_text())
+    config = REPOS / "symlinked-env/config.env"
+    if config.exists():
+        out.append("## config.env\n" + config.read_text())
+    return "\n\n".join(out) if out else "Error: manifest files not found"
+
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+
+def run(transport: str = "stdio", host: str = "0.0.0.0", port: int = DEFAULT_HTTP_PORT) -> None:
+    if transport == "streamable-http":
+        mcp.run(transport="streamable-http", host=host, port=port,
+                json_response=True, stateless_http=True,
+                uvicorn_config={"access_log": False})
+    else:
+        mcp.run(transport="stdio")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Docs MCP Server — live ~/REPOS context")
+    p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
+    args = p.parse_args()
+    run(args.transport, args.host, args.port)
+
+
+if __name__ == "__main__":
+    main()
+
+__all__ = ["mcp", "run", "overview", "read_file", "search", "env_manifest"]

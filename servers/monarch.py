@@ -16,7 +16,7 @@ from typing import Any, Optional
 from fastmcp import FastMCP
 from monarchmoney import MonarchMoney, RequireMFAException
 
-from shared.monarch_auth import MonarchCredentials, get_monarch_credentials, get_session_file_path
+from shared.monarch_auth import get_monarch_credentials, get_session_file_path
 
 # ---------------------------------------------------------------------------
 # Exceptions

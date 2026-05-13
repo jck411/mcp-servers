@@ -297,9 +297,33 @@ class BM25SparseEncoder:
 class KnowledgeDB:
     """SQLite store for domains, facts, and source tracking."""
 
+    _DOMAIN_COLUMNS = "name, description, related_domains, created_at, archived"
+    _SOURCE_COLUMNS = (
+        "id, domain, source_type, filename, content_hash, chunk_count, "
+        "ingested_at, stored_path, media_type, size_bytes"
+    )
+    _SOURCE_COLUMNS_QUALIFIED = (
+        "s.id, s.domain, s.source_type, s.filename, s.content_hash, "
+        "s.chunk_count, s.ingested_at, s.stored_path, s.media_type, s.size_bytes"
+    )
+    _SOURCE_COLUMNS_LIST = (
+        "s.id, s.source_type, s.filename, s.content_hash, s.chunk_count, "
+        "s.ingested_at, s.stored_path, s.media_type, s.size_bytes"
+    )
+
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
         self._conn: aiosqlite.Connection | None = None
+
+    @staticmethod
+    def _decode_domain_row(row: aiosqlite.Row) -> dict[str, Any]:
+        return {
+            "name": row["name"],
+            "description": row["description"],
+            "related_domains": json.loads(row["related_domains"]),
+            "created_at": row["created_at"],
+            "archived": bool(row["archived"]),
+        }
 
     async def initialize(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,7 +428,6 @@ class KnowledgeDB:
     ) -> bool:
         """Create a domain. Returns False if it already exists."""
         assert self._conn is not None
-        import json
 
         try:
             await self._conn.execute(
@@ -420,46 +443,21 @@ class KnowledgeDB:
 
     async def domain_list(self) -> list[dict[str, Any]]:
         assert self._conn is not None
-        import json
-
-        cursor = await self._conn.execute(
-            "SELECT name, description, related_domains, created_at, archived FROM domains"
-        )
+        cursor = await self._conn.execute(f"SELECT {self._DOMAIN_COLUMNS} FROM domains")
         rows = await cursor.fetchall()
-        results = []
-        for row in rows:
-            results.append({
-                "name": row["name"],
-                "description": row["description"],
-                "related_domains": json.loads(row["related_domains"]),
-                "created_at": row["created_at"],
-                "archived": bool(row["archived"]),
-            })
-        return results
+        return [self._decode_domain_row(row) for row in rows]
 
     async def domain_get(self, name: str) -> dict[str, Any] | None:
         assert self._conn is not None
-        import json
-
         cursor = await self._conn.execute(
-            "SELECT name, description, related_domains, created_at, archived "
-            "FROM domains WHERE name = ?",
+            f"SELECT {self._DOMAIN_COLUMNS} FROM domains WHERE name = ?",
             (name,),
         )
         row = await cursor.fetchone()
-        if not row:
-            return None
-        return {
-            "name": row["name"],
-            "description": row["description"],
-            "related_domains": json.loads(row["related_domains"]),
-            "created_at": row["created_at"],
-            "archived": bool(row["archived"]),
-        }
+        return self._decode_domain_row(row) if row else None
 
     async def domain_update_related(self, name: str, related_domains: list[str]) -> bool:
         assert self._conn is not None
-        import json
 
         cursor = await self._conn.execute(
             "UPDATE domains SET related_domains = ? WHERE name = ?",
@@ -596,26 +594,18 @@ class KnowledgeDB:
     ) -> dict[str, Any] | None:
         """Return the first existing source row matching this content hash, if any."""
         assert self._conn is not None
+        where = "content_hash = ?"
+        params: list[Any] = [content_hash]
         if domain is not None:
-            cursor = await self._conn.execute(
-                """
-                SELECT id, domain, source_type, filename, content_hash, chunk_count,
-                       ingested_at, stored_path, media_type, size_bytes
-                FROM sources WHERE content_hash = ? AND domain = ?
-                ORDER BY ingested_at ASC LIMIT 1
-                """,
-                (content_hash, domain),
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+            where += " AND domain = ?"
+            params.append(domain)
         cursor = await self._conn.execute(
-            """
-            SELECT id, domain, source_type, filename, content_hash, chunk_count,
-                   ingested_at, stored_path, media_type, size_bytes
-            FROM sources WHERE content_hash = ?
+            f"""
+            SELECT {self._SOURCE_COLUMNS}
+            FROM sources WHERE {where}
             ORDER BY ingested_at ASC LIMIT 1
             """,
-            (content_hash,),
+            params,
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -624,9 +614,8 @@ class KnowledgeDB:
         """Return the most-recent source row matching domain + filename, if any."""
         assert self._conn is not None
         cursor = await self._conn.execute(
-            """
-            SELECT id, domain, source_type, filename, content_hash, chunk_count,
-                   ingested_at, stored_path, media_type, size_bytes
+            f"""
+            SELECT {self._SOURCE_COLUMNS}
             FROM sources WHERE domain = ? AND filename = ?
             ORDER BY ingested_at DESC LIMIT 1
             """,
@@ -713,10 +702,8 @@ class KnowledgeDB:
     async def source_get(self, source_id: str) -> dict[str, Any] | None:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            """
-            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
-                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
-                   s.size_bytes
+            f"""
+            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
             FROM sources s
             WHERE s.id = ?
             """,
@@ -730,10 +717,8 @@ class KnowledgeDB:
     ) -> dict[str, Any] | None:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            """
-            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
-                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
-                   s.size_bytes
+            f"""
+            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
             FROM sources s
             WHERE s.domain = ? AND s.filename = ?
             ORDER BY s.ingested_at DESC
@@ -750,10 +735,8 @@ class KnowledgeDB:
         """Return all source rows matching domain + filename, newest first."""
         assert self._conn is not None
         cursor = await self._conn.execute(
-            """
-            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
-                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
-                   s.size_bytes
+            f"""
+            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
             FROM sources s
             WHERE s.domain = ? AND s.filename = ?
             ORDER BY s.ingested_at DESC
@@ -786,10 +769,8 @@ class KnowledgeDB:
     async def sources_list(self, domain: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            """
-            SELECT s.id, s.source_type, s.filename, s.content_hash,
-                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
-                   s.size_bytes
+            f"""
+            SELECT {self._SOURCE_COLUMNS_LIST}
             FROM sources s
             WHERE s.domain = ?
             ORDER BY s.ingested_at DESC
@@ -832,9 +813,7 @@ class KnowledgeDB:
 
         cursor = await self._conn.execute(
             f"""
-            SELECT s.id, s.domain, s.source_type, s.filename, s.content_hash,
-                   s.chunk_count, s.ingested_at, s.stored_path, s.media_type,
-                   s.size_bytes
+            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
             FROM sources s
             WHERE {where}
             ORDER BY s.ingested_at DESC
@@ -1035,8 +1014,6 @@ class KnowledgeVectorStore:
                     ),
                 },
             )
-
-        import contextlib
 
         indexes: list[tuple[str, PayloadSchemaType]] = [
             ("domain", PayloadSchemaType.KEYWORD),
@@ -1498,9 +1475,8 @@ async def _vision_ocr_bytes(
     """OCR an image via OpenRouter vision LLM. Returns text or empty on failure."""
     if not settings.vision_model or not settings.openrouter_api_key:
         return ""
-    import base64 as _b64
 
-    b64 = _b64.b64encode(image_bytes).decode("ascii")
+    b64 = base64.b64encode(image_bytes).decode("ascii")
     data_url = f"data:{media_type};base64,{b64}"
     payload = {
         "model": settings.vision_model,
@@ -1618,8 +1594,7 @@ async def _vision_call(
         step["note"] = "no model or api_key configured"
         return "", step
 
-    import base64 as _b64
-    b64 = _b64.b64encode(image_bytes).decode("ascii")
+    b64 = base64.b64encode(image_bytes).decode("ascii")
     data_url = f"data:{media_type};base64,{b64}"
     payload = {
         "model": model,
@@ -2198,8 +2173,7 @@ async def extract_source_facts_single_shot(
                 "pipeline": pipeline,
             }
 
-        import base64 as _b64
-        b64 = _b64.b64encode(image_bytes).decode("ascii")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{image_media_type};base64,{b64}"
         hint_text = f"\nDocument type hint: {hint}" if hint else ""
         user_content = [

@@ -299,7 +299,8 @@ Missing `knowledge` from this list causes `OSError: [Errno 30] Read-only file sy
 
 ## Deployment
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for how to deploy this (and any other server) from home, remotely via tunnel, or via the Proxmox console.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for how to deploy the Knowledge services
+from home, remotely via tunnel, or via the Proxmox console.
 
 ```bash
 ./deploy/deploy.sh knowledge_api          # auto-detects local vs tunnel
