@@ -6,11 +6,10 @@
 # composition, so we use EnvironmentFile=/opt/mcp-servers/.env.<instance>
 #
 # Usage:
-#   sudo ./deploy/setup-systemd.sh              # Install all servers
-#   sudo ./deploy/setup-systemd.sh calculator    # Install specific server
+#   sudo ./deploy/setup-systemd.sh            # Install Knowledge services
+#   sudo ./deploy/setup-systemd.sh knowledge  # Install a specific service
 #
-# NOTE: Account-access servers (calendar, gmail, gdrive, monarch, spotify)
-#       have been migrated to LXC 117 (mcp-accounts).
+# NOTE: Private/account/home-control servers live on LXC 117 (mcp-accounts).
 
 set -euo pipefail
 
@@ -23,17 +22,12 @@ cd "$REPO_DIR" && uv sync --extra all
 
 # Port map
 declare -A PORT_MAP=(
-    [calculator]=9003
-    [pdf]=9007
-    [tv]=9013
-    [hue]=9015
-    [web_search]=9016
     [knowledge]=9017
     [knowledge_api]=9018
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("calculator" "pdf" "tv" "hue" "web_search" "knowledge" "knowledge_api")
+DEFAULT_SERVERS=("knowledge" "knowledge_api")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

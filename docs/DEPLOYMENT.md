@@ -152,20 +152,17 @@ Then restart whichever services need it: `./deploy/deploy.sh --no-push <name>`.
 
 | Server | Port |
 |--------|------|
-| calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
 | gdrive | 9006 |
-| pdf | 9007 |
 | monarch | 9008 |
 | spotify | 9010 |
 | tv | 9013 |
 | hue | 9015 |
-| web_search | 9016 |
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired (do not reuse): 9002, 9012. Next available: 9019.
+Retired (do not reuse): 9002, 9003, 9007, 9012, 9016. Next available: 9019.
 
 ---
 

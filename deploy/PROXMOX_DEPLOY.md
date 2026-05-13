@@ -3,7 +3,9 @@
 **Target:** LXC container on Proxmox (192.168.1.11)  
 **Container:** CT 110, IP `192.168.1.110`  
 **OS:** Debian 13 (matches all other containers)  
-**Servers:** calculator (9003), hue (9015), knowledge (9017), and others — see `deploy/setup-systemd.sh` for the full list.
+**Servers:** Knowledge-only (`knowledge` 9017, `knowledge_api` 9018). Private/account/home-control MCPs run on CT 117 (`mcp-accounts`).
+
+> **Note:** Some older examples below still show the original all-in-one MCP layout. Treat `deploy/setup-systemd.sh`, `deploy/deploy.sh`, and `NETWORK/deploy/registry.yml` as the current source of truth.
 
 > **Remote access prerequisites.** Commands below that use `ssh proxmox-tunnel` require the Cloudflare Access service token wrapper described in [`../docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#deploying-from-remote-away-from-home). `ssh.jackshome.com` is fronted by Cloudflare Access (service token `mcp-servers-ssh`) and PVE has password auth disabled — key + token is mandatory.
 

@@ -18,7 +18,7 @@
 |-----|-------|
 | File | `servers/hue.py` |
 | Auth helper | `shared/hue_auth.py` |
-| Port | 9015 (LXC 110) |
+| Port | 9015 (LXC 117) |
 | Tools | 14 (`hue_` prefix) |
 | API key env | `HUE_KEY` |
 | SSL | `verify=False` (self-signed cert) |

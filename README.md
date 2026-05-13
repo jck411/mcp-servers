@@ -1,6 +1,6 @@
 # mcp-servers
 
-Standalone MCP servers deployed to Proxmox LXCs via systemd. General-purpose servers run on LXC 110 (192.168.1.110), while account-access servers (gmail, gdrive, calendar, monarch, spotify) are isolated on LXC 117 (192.168.1.117) for credential separation. Any MCP-compatible client can connect over HTTP.
+Standalone MCP servers deployed to Proxmox LXCs via systemd. Knowledge services run on LXC 110 (192.168.1.110), while private/account/home-control servers (gmail, gdrive, calendar, monarch, spotify, tv, hue) are isolated on LXC 117 (192.168.1.117). Any MCP-compatible client can connect over HTTP when allowed by the local firewall.
 
 ## Architecture
 
@@ -20,23 +20,20 @@ Each server:
 
 | Server | Port | LXC |
 |--------|------|-----|
-| calculator | 9003 | 110 |
 | calendar | 9004 | 117 |
 | gmail | 9005 | 117 |
 | gdrive | 9006 | 117 |
-| pdf | 9007 | 110 |
 | monarch | 9008 | 117 |
 | spotify | 9010 | 117 |
-| tv | 9013 | 110 |
-| hue | 9015 | 110 |
-| web_search | 9016 | 110 |
+| tv | 9013 | 117 |
+| hue | 9015 | 117 |
 | knowledge | 9017 | 110 |
 | knowledge_api (REST, not MCP) | 9018 | 110 |
 
-Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9012`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
+Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9003`, `9007`, `9012`, `9016`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
 
-- **LXC 110** (general): calculator, pdf, tv, hue, web_search, knowledge, knowledge_api
-- **LXC 117** (accounts): calendar, gmail, gdrive, monarch, spotify — Google OAuth, Monarch, and Spotify credentials only exist here
+- **LXC 110** (knowledge): knowledge, knowledge_api
+- **LXC 117** (private/home): calendar, gmail, gdrive, monarch, spotify, tv, hue — account credentials and home-control keys only exist here
 
 ### Knowledge Curation Queue
 
@@ -52,7 +49,7 @@ Destructive actions require `confirmation` equal to the queue item id.
 
 ## Related Repos
 
-- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; connect it to any server at `http://192.168.1.110:<port>/mcp`
+- [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; discovers LXC 110 and LXC 117
 - [`jck411/opencode-config`](https://github.com/jck411/opencode-config) (LXC 114) — OpenCode config; see that repo's `add-mcp-server.sh` to register servers
 - [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure
 
@@ -62,8 +59,8 @@ Destructive actions require `confirmation` equal to the queue item id.
 # Install with uv
 uv sync
 
-# Run a single server (e.g., calculator)
-python -m servers.calculator --transport streamable-http --host 0.0.0.0 --port 9003
+# Run a single server (e.g., hue)
+python -m servers.hue --transport streamable-http --host 0.0.0.0 --port 9015
 
 # Run with extras for specific servers
 uv sync --extra hue
@@ -81,7 +78,7 @@ cd /path/to/mcp-servers
 
 # Launch one or more servers
 ./dev.sh spotify
-./dev.sh spotify calculator    # multiple at once
+./dev.sh spotify hue           # multiple at once
 ./dev.sh --list                # show all servers + ports
 ```
 
@@ -152,7 +149,7 @@ curl https://api-knowledge.jackshome.com/api/health
 
 ## Deployment (Proxmox)
 
-Target: LXC CT 110 at `192.168.1.110` (Debian 13). Full guide: [deploy/PROXMOX_DEPLOY.md](deploy/PROXMOX_DEPLOY.md)
+Target: LXC CT 110 at `192.168.1.110` (Debian 13) for Knowledge services. LXC 117 at `192.168.1.117` runs the private/account/home-control services through the NETWORK deploy registry.
 
 ```bash
 # On Proxmox LXC (192.168.1.110):
@@ -163,10 +160,10 @@ uv sync --extra all
 # .env is already symlinked on the LXC — no copy needed
 sudo ./deploy/setup-systemd.sh
 
-# Check status
+# Check Knowledge status
 ./deploy/deploy.sh --status
 
-# Deploy updates (reset tracked source to origin/master + sync + restart)
+# Deploy Knowledge updates (reset tracked source to origin/master + sync + restart)
 ./deploy/deploy.sh
 ```
 
@@ -177,13 +174,13 @@ sudo ./deploy/setup-systemd.sh
 systemctl list-units 'mcp-server@*' --no-pager
 
 # Logs
-journalctl -u mcp-server@calculator -f
+journalctl -u mcp-server@knowledge -f
 
 # Restart one server
-sudo systemctl restart mcp-server@calculator
+sudo systemctl restart mcp-server@knowledge
 
 # Deploy specific server
-./deploy/deploy.sh calculator
+./deploy/deploy.sh knowledge
 ```
 
 ## Security
@@ -192,7 +189,7 @@ Servers bind `0.0.0.0` with **no built-in HTTP authentication**. Security is enf
 
 ### LAN access
 
-Direct IP is safe as-is. Ensure your router/Proxmox firewall does **not** expose ports `9003–9018` to the internet — only your LAN subnet should reach them.
+Raw MCP ports are internal backend ports. LXC firewalls should allow only trusted clients such as chat-backend, OpenCode, the Proxmox host for Cloudflare tunnel ingress, and the admin laptop. Do not expose ports `9003–9018` through router port-forwarding.
 
 ### Remote access (Cloudflare Tunnel)
 
@@ -222,8 +219,8 @@ Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextproto
 
 | Access | Base URL |
 |--------|----------|
-| LAN (general) | `http://192.168.1.110:<port>/mcp` |
-| LAN (accounts) | `http://192.168.1.117:<port>/mcp` |
+| LAN (knowledge) | `http://192.168.1.110:<port>/mcp` |
+| LAN (private/home) | `http://192.168.1.117:<port>/mcp` |
 | Remote (Cloudflare Tunnel) | `https://<tunnel-hostname>/mcp` |
 
 ### VS Code Copilot
@@ -233,8 +230,8 @@ Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextproto
 ```json
 {
   "servers": {
-    "calculator": { "type": "http", "url": "http://192.168.1.110:9003/mcp" },
-    "spotify":    { "type": "http", "url": "http://192.168.1.110:9010/mcp" }
+    "knowledge": { "type": "http", "url": "http://192.168.1.110:9017/mcp" },
+    "spotify":   { "type": "http", "url": "http://192.168.1.117:9010/mcp" }
   }
 }
 ```
@@ -246,7 +243,7 @@ Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextproto
 ```json
 {
   "mcp": {
-    "calculator": { "type": "http", "url": "http://192.168.1.110:9003/mcp" }
+    "knowledge": { "type": "http", "url": "http://192.168.1.110:9017/mcp" }
   }
 }
 ```
@@ -257,10 +254,10 @@ Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextproto
 
 ```yaml
 mcpServers:
-  calculator:
-    url: http://192.168.1.110:9003/mcp
+  knowledge:
+    url: http://192.168.1.110:9017/mcp
   spotify:
-    url: http://192.168.1.110:9010/mcp
+    url: http://192.168.1.117:9010/mcp
 ```
 
 ### ChatGPT
@@ -275,4 +272,4 @@ If the tunnel is protected by Zero Trust, add the `CF-Access-Client-Id` and `CF-
 
 ### Generic (any MCP client)
 
-Point any MCP client at the server's URL. General servers use `http://192.168.1.110:<port>/mcp`, account servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
+Point any MCP client at the server's URL. Knowledge uses `http://192.168.1.110:<port>/mcp`; private/account/home-control servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).

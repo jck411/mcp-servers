@@ -1,10 +1,10 @@
 # Copilot Instructions — mcp-servers
 
-Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
+Standalone MCP servers deployed to Proxmox LXCs via systemd. LXC 110 is Knowledge-only; LXC 117 runs private/account/home-control MCPs.
 
 ## Related Repos
 
-- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure (CT 110, 192.168.1.110)
+- [`jck411/PROXMOX`](https://github.com/jck411/PROXMOX) — host/LXC infrastructure (CT 110 and CT 117)
 
 Knowledge server uses Qdrant at `192.168.1.110:6333` for vector search.
 
@@ -14,7 +14,7 @@ Knowledge server uses Qdrant at `192.168.1.110:6333` for vector search.
 - **Use `./dev.sh`** to launch servers locally with auto-reload (watchfiles watches `servers/` and `shared/`)
   - `./dev.sh` — interactive menu to pick servers
   - `./dev.sh spotify` — launch a single server
-  - `./dev.sh spotify calculator` — launch multiple servers
+  - `./dev.sh spotify hue` — launch multiple servers
   - `./dev.sh --list` — show available servers and ports
 - Servers run on `127.0.0.1` at their assigned port with hot reload — code changes take effect automatically
 - Smoke-test tools via curl: `curl -s http://127.0.0.1:<port>/mcp -X POST -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
@@ -43,7 +43,7 @@ When the user asks to add/port a server, execute every step below without asking
 
 ### 1. Create the server file
 
-- Create `servers/<name>.py` following the pattern in `servers/spotify.py` or `servers/calculator.py`
+- Create `servers/<name>.py` following the pattern in `servers/spotify.py` or `servers/hue.py`
 - Replace all Backend_FastAPI imports with standalone equivalents from `shared/`
 - If `shared/` is missing a needed helper, implement it there first
 - Remove any tools that depend on Backend_FastAPI services that can't be made standalone (e.g., AttachmentService)
@@ -56,8 +56,8 @@ When the user asks to add/port a server, execute every step below without asking
 
 ### 3. Update deploy scripts and instructions
 
-- Add port to `PORT_MAP` in `deploy/setup-systemd.sh` (pick next available)
-- Add server name to `DEFAULT_SERVERS` in `deploy/setup-systemd.sh` and `ALL_SERVERS` in `deploy/deploy.sh`
+- Add port to the correct deploy target: LXC 110 is Knowledge-only; private/account/home-control MCPs belong in the LXC 117 deploy registry entry.
+- Add server name to the correct active server list.
 - Update the Port Assignments table in this file
 
 ### 4. Install and verify locally
@@ -75,18 +75,18 @@ When the user asks to add/port a server, execute every step below without asking
 
 ### 6. Deploy to LXC
 
-Just run the deploy script — it auto-detects connectivity in order: direct SSH → Cloudflare tunnel → prints manual commands:
+For Knowledge services, run the deploy script — it auto-detects connectivity in order: direct SSH → Cloudflare tunnel → prints manual commands:
 ```
 ./deploy/deploy.sh <name>
 ```
 
 The script tries `ssh proxmox-tunnel` (Cloudflare) automatically if direct SSH fails, so it works from anywhere without manual steps. Only falls back to printing `pct exec` commands if both SSH paths are unreachable.
 
-If the server needs credential files (e.g., Google OAuth), copy via the tunnel:
+If a private/account/home-control server needs credential files (e.g., Google OAuth), they live on LXC 117 under `/opt/mcp-accounts`:
 ```
-ssh proxmox-tunnel 'pct exec 110 -- bash -c "mkdir -p /opt/mcp-servers/credentials"'
+ssh proxmox-tunnel 'pct exec 117 -- bash -c "mkdir -p /opt/mcp-accounts/credentials"'
 scp <local_cred_file> proxmox-tunnel:/tmp/
-ssh proxmox-tunnel 'pct push 110 /tmp/<file> /opt/mcp-servers/credentials/<file> && pct exec 110 -- chown -R mcp:mcp /opt/mcp-servers/credentials/ /opt/mcp-servers/data/'
+ssh proxmox-tunnel 'pct push 117 /tmp/<file> /opt/mcp-accounts/credentials/<file> && pct exec 117 -- chown -R mcp:mcp /opt/mcp-accounts/credentials/ /opt/mcp-accounts/data/'
 ```
 
 ### 7. Confirm done
@@ -105,20 +105,17 @@ Defined in `deploy/setup-systemd.sh` PORT_MAP. Never reuse a port.
 
 | Server | Port |
 |--------|------|
-| calculator | 9003 |
 | calendar | 9004 |
 | gmail | 9005 |
 | gdrive | 9006 |
-| pdf | 9007 |
 | monarch | 9008 |
 | spotify | 9010 |
 | tv | 9013 |
 | hue | 9015 |
-| web_search | 9016 |
 | knowledge | 9017 |
 | knowledge_api | 9018 |
 
-Retired ports — do not reuse: 9002, 9012
+Retired ports — do not reuse: 9002, 9003, 9007, 9012, 9016
 
 Next available: 9019
 
@@ -127,7 +124,7 @@ Next available: 9019
 - Google OAuth client secret: `credentials/client_secret_pihome123.json`
 - Google OAuth token: `data/tokens/jck411_at_gmail_com.json`
 - Spotify creds: `credentials/` and `data/tokens/`
-- All credential files are gitignored; secrets live in the universal symlinked `.env`
+- All credential files are gitignored; generated env files come from `symlinked-env/env-manifest.tsv`
 
 ## Code Style
 

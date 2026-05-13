@@ -3,17 +3,15 @@
 # Installation:
 #   sudo cp mcp-server@.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now mcp-server@calculator
-#   sudo systemctl enable --now mcp-server@hue
+#   sudo systemctl enable --now mcp-server@knowledge
 #
 # The %i instance name maps to the server module:
-#   mcp-server@calculator → python -m servers.calculator  (port from override)
-#   mcp-server@hue        → python -m servers.hue
+#   mcp-server@knowledge → python -m servers.knowledge  (port from env file)
 #
 # Ports are set via per-instance overrides. After creating the unit:
-#   sudo systemctl edit mcp-server@calculator
+#   sudo systemctl edit mcp-server@knowledge
 #   [Service]
-#   Environment=MCP_PORT=9003
+#   Environment=MCP_PORT=9017
 #
 # Or use the setup script: deploy/setup-systemd.sh
 

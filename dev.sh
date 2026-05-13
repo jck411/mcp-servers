@@ -4,7 +4,7 @@
 # Usage:
 #   ./dev.sh                      # interactive menu to pick servers
 #   ./dev.sh spotify              # single server (skip menu)
-#   ./dev.sh spotify calculator   # multiple servers (skip menu)
+#   ./dev.sh spotify hue          # multiple servers (skip menu)
 #   ./dev.sh --list               # show available servers + ports
 #
 # Servers run on 127.0.0.1 at their assigned port.
@@ -17,17 +17,15 @@ cd "$SCRIPT_DIR"
 
 # Server → port mapping (must match deploy/setup-systemd.sh)
 declare -A PORTS=(
-    [calculator]=9003
     [calendar]=9004
     [gmail]=9005
     [gdrive]=9006
-    [pdf]=9007
     [monarch]=9008
     [spotify]=9010
     [tv]=9013
     [hue]=9015
-    [web_search]=9016
     [knowledge]=9017
+    [knowledge_api]=9018
 )
 
 RED='\033[0;31m'
@@ -84,7 +82,7 @@ pick_servers() {
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     echo "Usage: ./dev.sh                     # interactive menu"
-    echo "       ./dev.sh spotify calculator   # launch specific servers"
+    echo "       ./dev.sh spotify hue          # launch specific servers"
     echo "       ./dev.sh --list               # show available servers + ports"
     echo ""
     list_servers

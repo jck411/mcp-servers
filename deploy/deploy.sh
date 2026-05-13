@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# deploy.sh — Deploy MCP servers to LXC CT 110 via Proxmox (auto-detects home vs remote)
-# NOTE: Account-access servers (calendar, gmail, gdrive, monarch, spotify) have
-#       been migrated to LXC 117 (mcp-accounts). This script only manages the
-#       general-purpose servers remaining on LXC 110.
+# deploy.sh — Deploy Knowledge MCP/API to LXC CT 110 via Proxmox.
+# Private/account/home-control servers live on LXC 117 (mcp-accounts).
 #
 # Both local (LAN) and tunnel (remote) modes go through the PVE host using
 # `pct exec` so the execution path is identical regardless of location.
 #
 # Usage:
 #   ./deploy/deploy.sh                      # Deploy all servers (auto-detect)
-#   ./deploy/deploy.sh calendar             # Deploy specific server(s)
-#   ./deploy/deploy.sh calendar spotify     # Deploy multiple
-#   ./deploy/deploy.sh --local calendar     # Force home LAN mode (ssh root@192.168.1.11)
-#   ./deploy/deploy.sh --tunnel calendar    # Force Cloudflare tunnel mode
-#   ./deploy/deploy.sh --remote calendar    # No SSH — print pct exec commands to paste
+#   ./deploy/deploy.sh knowledge            # Deploy specific server(s)
+#   ./deploy/deploy.sh knowledge_api        # Deploy REST API wrapper
+#   ./deploy/deploy.sh --local knowledge    # Force home LAN mode (ssh root@192.168.1.11)
+#   ./deploy/deploy.sh --tunnel knowledge   # Force Cloudflare tunnel mode
+#   ./deploy/deploy.sh --remote knowledge   # No SSH — print pct exec commands to paste
 #   ./deploy/deploy.sh --status             # Show server status
 #   ./deploy/deploy.sh --no-push calendar   # Skip git commit/push
 
@@ -29,13 +27,12 @@ BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
 # Port map — must stay in sync with deploy/setup-systemd.sh
 declare -A PORT_MAP=(
-    [calculator]=9003      [pdf]=9007         [tv]=9013
-    [hue]=9015             [web_search]=9016  [knowledge]=9017
+    [knowledge]=9017
     [knowledge_api]=9018
 )
 
 ALL_SERVERS=(
-    calculator pdf tv hue web_search knowledge knowledge_api
+    knowledge knowledge_api
 )
 
 # ── Parse args ────────────────────────────────────────────────────────────────
