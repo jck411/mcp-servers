@@ -8,6 +8,9 @@
 # Usage:
 #   sudo ./deploy/setup-systemd.sh              # Install all servers
 #   sudo ./deploy/setup-systemd.sh calculator    # Install specific server
+#
+# NOTE: Account-access servers (calendar, gmail, gdrive, monarch, spotify)
+#       have been migrated to LXC 117 (mcp-accounts).
 
 set -euo pipefail
 
@@ -21,12 +24,7 @@ cd "$REPO_DIR" && uv sync --extra all
 # Port map
 declare -A PORT_MAP=(
     [calculator]=9003
-    [calendar]=9004
-    [gmail]=9005
-    [gdrive]=9006
     [pdf]=9007
-    [monarch]=9008
-    [spotify]=9010
     [tv]=9013
     [hue]=9015
     [web_search]=9016
@@ -35,7 +33,7 @@ declare -A PORT_MAP=(
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("calculator" "spotify" "gdrive" "gmail" "calendar" "pdf" "monarch" "tv" "hue" "web_search" "knowledge" "knowledge_api")
+DEFAULT_SERVERS=("calculator" "pdf" "tv" "hue" "web_search" "knowledge" "knowledge_api")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

@@ -1,6 +1,6 @@
 # mcp-servers
 
-Standalone MCP servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd. Any MCP-compatible client can connect to these servers over HTTP.
+Standalone MCP servers deployed to Proxmox LXCs via systemd. General-purpose servers run on LXC 110 (192.168.1.110), while account-access servers (gmail, gdrive, calendar, monarch, spotify) are isolated on LXC 117 (192.168.1.117) for credential separation. Any MCP-compatible client can connect over HTTP.
 
 ## Architecture
 
@@ -18,26 +18,25 @@ Each server:
 - Runs via: `python -m servers.<name> --transport streamable-http --host 0.0.0.0 --port <PORT>`
 - Self-describes via the MCP protocol (`list_tools()`)
 
-## Port Assignments
-
-| Server | Port |
-|--------|------|
-| calculator | 9003 |
-| calendar | 9004 |
-| gmail | 9005 |
-| gdrive | 9006 |
-| pdf | 9007 |
-| monarch | 9008 |
-| spotify | 9010 |
-| tv | 9013 |
-| hue | 9015 |
-| web_search | 9016 |
-| knowledge | 9017 |
-| knowledge_api (REST, not MCP) | 9018 |
+| Server | Port | LXC |
+|--------|------|-----|
+| calculator | 9003 | 110 |
+| calendar | 9004 | 117 |
+| gmail | 9005 | 117 |
+| gdrive | 9006 | 117 |
+| pdf | 9007 | 110 |
+| monarch | 9008 | 117 |
+| spotify | 9010 | 117 |
+| tv | 9013 | 110 |
+| hue | 9015 | 110 |
+| web_search | 9016 | 110 |
+| knowledge | 9017 | 110 |
+| knowledge_api (REST, not MCP) | 9018 | 110 |
 
 Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9012`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
 
-All servers deployed to Proxmox LXC (CT 110, 192.168.1.110) via systemd.
+- **LXC 110** (general): calculator, pdf, tv, hue, web_search, knowledge, knowledge_api
+- **LXC 117** (accounts): calendar, gmail, gdrive, monarch, spotify — Google OAuth, Monarch, and Spotify credentials only exist here
 
 ### Knowledge Curation Queue
 
@@ -223,7 +222,8 @@ Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextproto
 
 | Access | Base URL |
 |--------|----------|
-| LAN | `http://192.168.1.110:<port>/mcp` |
+| LAN (general) | `http://192.168.1.110:<port>/mcp` |
+| LAN (accounts) | `http://192.168.1.117:<port>/mcp` |
 | Remote (Cloudflare Tunnel) | `https://<tunnel-hostname>/mcp` |
 
 ### VS Code Copilot
@@ -275,4 +275,4 @@ If the tunnel is protected by Zero Trust, add the `CF-Access-Client-Id` and `CF-
 
 ### Generic (any MCP client)
 
-Point any MCP client at `http://192.168.1.110:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
+Point any MCP client at the server's URL. General servers use `http://192.168.1.110:<port>/mcp`, account servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).

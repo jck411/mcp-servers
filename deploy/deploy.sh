@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # deploy.sh — Deploy MCP servers to LXC CT 110 via Proxmox (auto-detects home vs remote)
+# NOTE: Account-access servers (calendar, gmail, gdrive, monarch, spotify) have
+#       been migrated to LXC 117 (mcp-accounts). This script only manages the
+#       general-purpose servers remaining on LXC 110.
 #
 # Both local (LAN) and tunnel (remote) modes go through the PVE host using
 # `pct exec` so the execution path is identical regardless of location.
@@ -26,14 +29,13 @@ BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 
 # Port map — must stay in sync with deploy/setup-systemd.sh
 declare -A PORT_MAP=(
-    [calculator]=9003      [calendar]=9004    [gmail]=9005
-    [gdrive]=9006          [pdf]=9007         [monarch]=9008
-    [spotify]=9010         [tv]=9013          [hue]=9015
-    [web_search]=9016      [knowledge]=9017   [knowledge_api]=9018
+    [calculator]=9003      [pdf]=9007         [tv]=9013
+    [hue]=9015             [web_search]=9016  [knowledge]=9017
+    [knowledge_api]=9018
 )
 
 ALL_SERVERS=(
-    calculator spotify gdrive gmail calendar pdf monarch tv hue web_search knowledge knowledge_api
+    calculator pdf tv hue web_search knowledge knowledge_api
 )
 
 # ── Parse args ────────────────────────────────────────────────────────────────
