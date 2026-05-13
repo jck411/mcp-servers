@@ -189,7 +189,7 @@ Servers bind `0.0.0.0` with **no built-in HTTP authentication**. Security is enf
 
 ### LAN access
 
-Raw MCP ports are internal backend ports. LXC firewalls should allow only trusted clients such as chat-backend, OpenCode, the Proxmox host for Cloudflare tunnel ingress, and the admin laptop. Do not expose ports `9003–9018` through router port-forwarding.
+Raw MCP ports are internal backend ports. LXC firewalls should allow only trusted clients such as chat-backend, OpenCode, LibreChat, the Proxmox host for Cloudflare tunnel ingress, and the admin laptop. Do not expose ports `9003–9018` through router port-forwarding.
 
 ### Remote access (Cloudflare Tunnel)
 
@@ -259,6 +259,10 @@ mcpServers:
   spotify:
     url: http://192.168.1.117:9010/mcp
 ```
+
+When using MCP through LibreChat, the MCP request comes from the LibreChat
+container (`192.168.1.115`). Your phone or laptop only needs to reach LibreChat;
+it does not need direct firewall access to the raw MCP ports.
 
 ### ChatGPT
 
