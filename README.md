@@ -210,6 +210,9 @@ Add a **Cloudflare Zero Trust Access policy** to the tunnel hostname — zero se
    CF-Access-Client-Id: <client-id>
    CF-Access-Client-Secret: <client-secret>
    ```
+   For `mcp-knowledge.jackshome.com`, the generated values are stored in the
+   master env as `MCP_KNOWLEDGE_CF_ACCESS_CLIENT_ID` and
+   `MCP_KNOWLEDGE_CF_ACCESS_CLIENT_SECRET`.
 4. All enforcement happens at the Cloudflare edge — the servers themselves are unchanged
 
 For clients on your local network, skip Zero Trust and use the direct LAN URL.
