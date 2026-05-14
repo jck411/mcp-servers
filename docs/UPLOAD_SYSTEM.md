@@ -44,6 +44,7 @@ manually by removing the old source first and uploading again.
 ```
 Browser → POST /api/upload/{domain}
              │
+             ├─ 413 if upload is over 50 MB
              ├─ 409 if file exists: remove existing source, then upload again
              ├─ write bytes to knowledge/<domain>/<filename>
              └─ _ingest_file_at_path()
@@ -193,6 +194,7 @@ Uses **forced tool calling** (`tool_choice: store_extracted_facts`) to guarantee
     "box_1_wages": "130427.22"
   },
   "caption": null,
+  "warnings": [],
   "pipeline": [
     {"step": "load_chunks", "status": "ok", "note": "15 chunks, 27485 chars total"},
     {"step": "extraction_llm", "status": "ok", "note": "tool_call, 1648 chars",
@@ -241,7 +243,8 @@ Lists all sources in a domain. Each item includes `id`, `filename`, `chunk_count
 **Buttons on each card:**
 
 - **▶ show pipeline log** — expands per-step details (step name, model, token counts, notes). Only shown when `pipeline` array is non-empty.
-- **⚡ Extract Facts** — calls `POST /api/sources/{id}/extract`. Live "calling model…" placeholder shown while in-flight. On success, shows fact count and rerenders pipeline log with extraction steps. On failure, shows error inline.
+- **Extraction note** — optional hint sent as `hint`, useful for document type, focus fields, or "caption only".
+- **⚡ Extract Facts** — calls `POST /api/sources/{id}/extract`. Live "calling model…" placeholder shown while in-flight. On success, shows fact count, returned facts/caption/warnings, and rerenders pipeline log with extraction steps. On failure, shows error inline.
 - **🗑 Remove / Remove Existing** — calls `DELETE /api/sources/{id}` after a confirmation dialog. Card fades and removes itself on success.
 - **copy id** — copies `source_id` to clipboard.
 

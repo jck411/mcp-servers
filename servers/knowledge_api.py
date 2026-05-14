@@ -127,6 +127,7 @@ if _WEB_DIR.is_dir():
 UPLOAD_FILE = File(...)
 REQUIRED_BODY = Body(...)
 OPTIONAL_BODY = Body(None)
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 def _content_disposition(filename: str) -> str:
@@ -246,6 +247,9 @@ async def upload_file(
         )
 
     data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Upload exceeds 50 MB limit")
+
     if overwrite:
         await delete_sources_for_overwrite(settings, vectors, db, domain, filename)
 

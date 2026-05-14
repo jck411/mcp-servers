@@ -1464,8 +1464,9 @@ EXTRACTION_SYSTEM_PROMPT = (
     "to a 2-3 sentence description, set 'facts' to {}.\n"
     "- For documents: set 'facts' to all extracted key/value pairs, set 'caption' to null.\n"
     "- Omit fields that are not legible or not present — do not set null or 'unknown'.\n"
+    "- Put brief uncertainty notes in 'warnings', e.g. unreadable or partially obscured fields.\n"
     "- Output only valid JSON. No markdown fences, no commentary.\n"
-    "Output format: {\"facts\": {\"key\": \"value\", ...}, \"caption\": null}"
+    "Output format: {\"facts\": {\"key\": \"value\", ...}, \"caption\": null, \"warnings\": []}"
 )
 
 
@@ -2250,6 +2251,11 @@ async def extract_source_facts_single_shot(
                             "structure. null for documents."
                         ),
                     },
+                    "warnings": {
+                        "type": "array",
+                        "description": "Brief notes about unreadable, obscured, or skipped values.",
+                        "items": {"type": "string"},
+                    },
                 },
                 "required": ["facts", "caption"],
             },
@@ -2347,6 +2353,13 @@ async def extract_source_facts_single_shot(
 
         raw_caption = extracted.get("caption")
         caption: str | None = str(raw_caption) if raw_caption not in (None, "") else None
+        raw_warnings = extracted.get("warnings") or []
+        if isinstance(raw_warnings, list):
+            warnings = [str(w) for w in raw_warnings if w]
+        elif raw_warnings:
+            warnings = [str(raw_warnings)]
+        else:
+            warnings = []
         if "facts" in extracted:
             raw_facts = extracted.get("facts") or {}
             if not isinstance(raw_facts, dict):
@@ -2358,10 +2371,11 @@ async def extract_source_facts_single_shot(
         else:
             facts = {
                 str(k): str(v) for k, v in extracted.items()
-                if k != "caption" and v is not None and v != ""
+                if k not in {"caption", "warnings"} and v is not None and v != ""
             }
         parse_step["status"] = "ok"
-        parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}"
+        warn_note = f", {len(warnings)} warning(s)" if warnings else ""
+        parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}{warn_note}"
     except (json.JSONDecodeError, ValueError) as exc:
         parse_step["status"] = "failed"
         parse_step["note"] = f"JSON parse error: {exc} | raw[:200]: {raw_output[:200]}"
@@ -2431,6 +2445,7 @@ async def extract_source_facts_single_shot(
         "facts_written": len(written_facts),
         "facts": facts,
         "caption": caption,
+        "warnings": warnings,
         "pipeline": pipeline,
     }
 

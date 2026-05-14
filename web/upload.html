@@ -32,7 +32,8 @@
     background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 8px 10px; font-size: 14px; font-family: inherit;
   }
-  input[type=password], input[type=text], select { width: 100%; }
+  input[type=password], input[type=text], textarea, select { width: 100%; }
+  textarea { resize: vertical; min-height: 54px; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover { filter: brightness(1.1); }
@@ -112,6 +113,15 @@
   button.remove:hover { border-color: var(--err); color: var(--err); }
   button.remove:disabled { opacity: 0.5; cursor: not-allowed; }
   .card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+  .extract-note { margin-top: 10px; max-width: 620px; }
+  .extract-note label { margin-bottom: 3px; }
+  .extract-note textarea { font-size: 13px; padding: 7px 9px; }
+  .extract-output { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .fact-row { display: grid; grid-template-columns: minmax(140px, 240px) 1fr;
+    gap: 8px; padding: 2px 0; font-size: 12px; }
+  .fact-key { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .fact-value { color: var(--text); word-break: break-word; }
+  .warning-row { color: var(--warn); font-size: 12px; padding: 2px 0; }
 </style>
 </head>
 <body>
@@ -136,7 +146,7 @@
 
     <div class="card" id="drop">
       <div>Drop files here or <span id="pick">choose files</span></div>
-      <div style="margin-top: 6px; font-size: 12px;">PDF, image, docx, txt, anything. Multiple files OK.</div>
+      <div style="margin-top: 6px; font-size: 12px;">PDF, image, docx, txt, anything up to 50 MB. Multiple files OK.</div>
       <input id="file" type="file" multiple />
     </div>
 
@@ -147,6 +157,7 @@
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
+  const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
   // ---------- domains ----------
   async function loadDomains() {
@@ -315,6 +326,23 @@
     return `<div class="pipeline-log">${rows}</div>`;
   }
 
+  function renderExtractionOutput(j) {
+    const facts = j.facts || {};
+    const factRows = Object.entries(facts).map(([key, value]) => `
+      <div class="fact-row">
+        <div class="fact-key">${escapeHtml(key)}</div>
+        <div class="fact-value">${escapeHtml(value)}</div>
+      </div>`).join("");
+    const warnings = (j.warnings || []).map((w) =>
+      `<div class="warning-row">Warning: ${escapeHtml(w)}</div>`
+    ).join("");
+    const caption = j.caption
+      ? `<div class="meta" style="margin-bottom:4px;">Caption: ${escapeHtml(j.caption)}</div>`
+      : "";
+    if (!factRows && !warnings && !caption) return "";
+    return `<div class="extract-output">${caption}${warnings}${factRows}</div>`;
+  }
+
   // ---------- classify upload result ----------
   function classify(json, status) {
     if (status === 409) return {
@@ -378,6 +406,10 @@
         ${ptype ? `<div class="meta" style="color:var(--muted);font-size:11px;">pipeline: ${escapeHtml(ptype)}${ocrMethod ? ` · <span style="color:var(--text)">ocr: ${escapeHtml(ocrMethod)}</span>` : ""}</div>` : ""}
         ${hasPipeline ? `<button class="pipeline-toggle">▶ show pipeline log (${(json.pipeline||[]).length} steps)</button>` : ""}
         ${pipelineHtml}
+        ${canExtract ? `<div class="extract-note">
+          <label>Extraction note</label>
+          <textarea data-extract-note="${escapeHtml(sid)}" placeholder="Optional: document type, fields to focus on, or caption only"></textarea>
+        </div>` : ""}
         <div class="card-actions">
           ${canExtract ? `<button class="extract" data-sid="${escapeHtml(sid)}" data-name="${escapeHtml(file.name)}">⚡ Extract Facts</button>` : ""}
           ${canRemove ? `<button class="remove" data-sid="${escapeHtml(sid)}">${removeLabel}</button>` : ""}
@@ -405,7 +437,7 @@
 
     // Extract Facts
     const extBtn = div.querySelector("button.extract");
-    if (extBtn) extBtn.onclick = () => runExtract(extBtn, div, sid, file.name);
+    if (extBtn) extBtn.onclick = () => runExtract(extBtn, div, sid);
 
     // Remove source
     const removeBtn = div.querySelector("button.remove");
@@ -440,10 +472,12 @@
   }
 
   // ---------- Extract Facts ----------
-  async function runExtract(btn, card, sid, filename) {
+  async function runExtract(btn, card, sid) {
     btn.disabled = true;
     btn.classList.add("running");
     btn.textContent = "⚡ Extracting…";
+    card.querySelector(".extract-output")?.remove();
+    const note = card.querySelector("textarea[data-extract-note]")?.value.trim() || "";
 
     // Inject a live "running" pipeline step
     let liveLog = card.querySelector(".pipeline-log");
@@ -462,7 +496,7 @@
       const r = await fetch(`/api/sources/${encodeURIComponent(sid)}/extract`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify(note ? { hint: note } : {}),
       });
       const j = await r.json().catch(() => ({}));
 
@@ -478,13 +512,7 @@
         btn.textContent = `✓ ${j.facts_written} fact(s) extracted`;
         btn.style.color = "var(--ok)";
         btn.style.borderColor = "var(--ok)";
-        if (j.caption) {
-          const cap = document.createElement("div");
-          cap.className = "meta";
-          cap.style.marginTop = "4px";
-          cap.textContent = `Caption: "${j.caption}"`;
-          btn.after(cap);
-        }
+        btn.closest(".card-actions").insertAdjacentHTML("afterend", renderExtractionOutput(j));
       } else {
         // j.detail may be a string (route-level 404) or an object (app-level error)
         const detail = j.detail;
@@ -526,6 +554,13 @@
     if (!domain) return;
 
     for (const file of fileList) {
+      if (file.size > MAX_UPLOAD_BYTES) {
+        render(file, domain, {
+          kind: "err", badge: "TOO LARGE",
+          msg: `Maximum upload size is 50 MB; this file is ${(file.size/1024/1024).toFixed(1)} MB.`,
+        }, {});
+        continue;
+      }
       const placeholder = pending(file, domain);
       try {
         const fd = new FormData();
