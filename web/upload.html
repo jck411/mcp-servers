@@ -122,6 +122,10 @@
   .fact-key { color: var(--muted); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .fact-value { color: var(--text); word-break: break-word; }
   .warning-row { color: var(--warn); font-size: 12px; padding: 2px 0; }
+  .thumb {
+    width: 96px; height: 96px; object-fit: cover; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg);
+  }
 </style>
 </head>
 <body>
@@ -343,6 +347,13 @@
     return `<div class="extract-output">${caption}${warnings}${factRows}</div>`;
   }
 
+  function thumbnailHtml(file) {
+    if (!file.type.startsWith("image/")) return "";
+    const url = URL.createObjectURL(file);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return `<img class="thumb" src="${url}" alt="">`;
+  }
+
   // ---------- classify upload result ----------
   function classify(json, status) {
     if (status === 409) return {
@@ -415,7 +426,10 @@
           ${canRemove ? `<button class="remove" data-sid="${escapeHtml(sid)}">${removeLabel}</button>` : ""}
         </div>
       </div>
-      <div>${sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""}</div>`;
+      <div>
+        ${thumbnailHtml(file)}
+        ${sid ? `<button class="copy" data-sid="${escapeHtml(sid)}">copy id</button>` : ""}
+      </div>`;
 
     // copy id
     const copyBtn = div.querySelector("button.copy");
