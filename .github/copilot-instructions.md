@@ -20,6 +20,13 @@ Knowledge server uses Qdrant at `192.168.1.110:6333` for vector search.
 - Smoke-test tools via curl: `curl -s http://127.0.0.1:<port>/mcp -X POST -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
 - Only deploy to LXC once local testing passes — never iterate on the LXC directly
 
+## Docs MCP
+
+- `servers.docs` is local-only stdio access to `~/REPOS`; do not deploy it to an LXC.
+- Cross-repo docs live in `_OVERVIEW/SYSTEM_MAP.md` and `_OVERVIEW/OPERATIONS.md`.
+- Before and after cross-repo docs/procedure changes, run `cd ~/REPOS/NETWORK && ./scripts/deploy.sh status`.
+- If those docs need to be pushed to Knowledge, run `cd ~/REPOS/Knowledge && ./sync-docs.sh`.
+
 ### Adding/modifying tools on an existing server
 
 When adding new tools to an existing server during local dev:

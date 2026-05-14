@@ -17,9 +17,37 @@ from fastmcp import FastMCP
 
 REPOS = Path(os.environ.get("DOCS_REPOS_ROOT", Path.home() / "REPOS"))
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache", "uv.lock"}
+WRITEABLE_TEXT_EXTENSIONS = {
+    ".adoc",
+    ".cfg",
+    ".conf",
+    ".csv",
+    ".ini",
+    ".json",
+    ".markdown",
+    ".md",
+    ".rst",
+    ".toml",
+    ".tsv",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 DEFAULT_HTTP_PORT = 9019
 
 mcp = FastMCP("docs")
+
+
+def _resolve_repos_path(path: str) -> tuple[Path | None, str | None]:
+    if not path.strip():
+        return None, "Error: path is required"
+    root = REPOS.resolve()
+    target = (REPOS / path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None, "Error: path must be inside ~/REPOS"
+    return target, None
 
 
 @mcp.tool("docs_overview")
@@ -85,9 +113,10 @@ async def overview() -> str:
 async def read_file(path: str) -> str:
     """Read a file from ~/REPOS by relative path (e.g. 'NETWORK/infrastructure.md').
     If path is a directory, lists its contents."""
-    target = (REPOS / path).resolve()
-    if not str(target).startswith(str(REPOS.resolve())):
-        return "Error: path must be inside ~/REPOS"
+    target, error = _resolve_repos_path(path)
+    if error:
+        return error
+    assert target is not None
     if not target.exists():
         return f"Error: {path} not found"
     if target.is_dir():
@@ -99,6 +128,42 @@ async def read_file(path: str) -> str:
             entries.append(f"  {p.name:40s}  {kind}")
         return f"Directory: {path}/\n" + "\n".join(entries)
     return target.read_text(errors="replace")[:50_000]
+
+
+@mcp.tool("docs_write_file")
+async def write_file(path: str, content: str, mode: str = "replace", create_dirs: bool = False) -> str:
+    """Write text docs/config files inside ~/REPOS.
+    mode: replace (default) or append."""
+    if mode not in {"replace", "append"}:
+        return "Error: mode must be 'replace' or 'append'"
+    if len(content) > 500_000:
+        return "Error: content too large (max 500000 chars)"
+
+    target, error = _resolve_repos_path(path)
+    if error:
+        return error
+    assert target is not None
+
+    if target.exists() and target.is_dir():
+        return "Error: target path is a directory"
+    if target.suffix.lower() not in WRITEABLE_TEXT_EXTENSIONS:
+        allowed = ", ".join(sorted(WRITEABLE_TEXT_EXTENSIONS))
+        return f"Error: writes limited to text/documentation files ({allowed})"
+
+    if create_dirs:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    elif not target.parent.exists():
+        return f"Error: parent directory does not exist: {target.parent}"
+
+    open_mode = "a" if mode == "append" else "w"
+    with target.open(open_mode, encoding="utf-8") as handle:
+        handle.write(content)
+
+    try:
+        rel_path = target.relative_to(REPOS.resolve())
+    except ValueError:
+        rel_path = target
+    return f"OK: wrote {len(content)} chars to {rel_path} ({mode})"
 
 
 @mcp.tool("docs_search")
@@ -154,4 +219,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-__all__ = ["mcp", "run", "overview", "read_file", "search", "env_manifest"]
+__all__ = ["mcp", "run", "overview", "read_file", "write_file", "search", "env_manifest"]

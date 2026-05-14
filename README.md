@@ -59,6 +59,17 @@ Destructive actions require `confirmation` equal to the queue item id.
 - [Upload system](docs/UPLOAD_SYSTEM.md) — browser/API upload flow and troubleshooting
 - [Deployment](docs/DEPLOYMENT.md) — deploy script, systemd, ports, and debugging
 
+## Local Docs MCP (stdio)
+
+`servers.docs` is a local-only MCP server for live `~/REPOS` context. It is not deployed to LXC.
+
+Available tools:
+- `docs_overview`
+- `docs_read_file`
+- `docs_write_file` (guarded text/doc writes in `~/REPOS`, modes: `replace` or `append`)
+- `docs_search`
+- `docs_env_manifest`
+
 ## Quick Start
 
 ```bash
