@@ -24,8 +24,8 @@ Knowledge server uses Qdrant at `192.168.1.110:6333` for vector search.
 
 - `servers.docs` is local-only stdio access to `~/REPOS`; do not deploy it to an LXC.
 - Cross-repo docs live in `_OVERVIEW/SYSTEM_MAP.md` and `_OVERVIEW/OPERATIONS.md`.
+- Agents read all docs (Knowledge `README.md`, `rules.md`, `symlinked-env/README.md`, etc.) live via this MCP — there is no separate publish step.
 - Before and after cross-repo docs/procedure changes, run `cd ~/REPOS/NETWORK && ./scripts/deploy.sh status`.
-- If those docs need to be pushed to Knowledge, run `cd ~/REPOS/Knowledge && ./sync-docs.sh`.
 
 ### Adding/modifying tools on an existing server
 

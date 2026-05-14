@@ -17,6 +17,14 @@ from fastmcp import FastMCP
 
 REPOS = Path(os.environ.get("DOCS_REPOS_ROOT", Path.home() / "REPOS"))
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache", "uv.lock"}
+# Filenames / paths that must never be returned by read_file / search, even though the
+# stdio MCP technically runs with the user's filesystem permissions. These hold real
+# secrets and should not leak into any LLM transcript.
+SECRET_DIR_NAMES = {"credentials", "certs", "secrets"}
+SECRET_FILENAMES = {".env"}
+SECRET_FILENAME_PREFIXES = (".env.",)
+SECRET_FILENAME_ALLOW = {".env.example"}
+SECRET_NAME_SUBSTRINGS = ("secret", "credential", "client_secret", "id_rsa", "id_ed25519")
 WRITEABLE_TEXT_EXTENSIONS = {
     ".adoc",
     ".cfg",
@@ -48,6 +56,24 @@ def _resolve_repos_path(path: str) -> tuple[Path | None, str | None]:
     except ValueError:
         return None, "Error: path must be inside ~/REPOS"
     return target, None
+
+
+def _is_secret_path(target: Path) -> bool:
+    """Return True if the path looks like a secret file or sits in a secret directory."""
+    name = target.name
+    if name in SECRET_FILENAME_ALLOW:
+        return False
+    if name in SECRET_FILENAMES:
+        return True
+    if name.startswith(SECRET_FILENAME_PREFIXES) and name not in SECRET_FILENAME_ALLOW:
+        return True
+    lowered = name.lower()
+    if any(token in lowered for token in SECRET_NAME_SUBSTRINGS):
+        return True
+    for part in target.parts:
+        if part in SECRET_DIR_NAMES:
+            return True
+    return False
 
 
 @mcp.tool("docs_overview")
@@ -127,6 +153,8 @@ async def read_file(path: str) -> str:
             kind = "dir/" if p.is_dir() else f"{p.stat().st_size:,}b"
             entries.append(f"  {p.name:40s}  {kind}")
         return f"Directory: {path}/\n" + "\n".join(entries)
+    if _is_secret_path(target):
+        return f"Error: refusing to read secret file {path}. Use docs_env_manifest for non-secret env config."
     return target.read_text(errors="replace")[:50_000]
 
 
@@ -172,13 +200,26 @@ async def search(query: str, file_pattern: str = "") -> str:
     cmd = ["grep", "-rnI", "--color=never", "-m", "50"]
     for skip in SKIP_DIRS:
         cmd += [f"--exclude-dir={skip}"]
+    for secret_dir in SECRET_DIR_NAMES:
+        cmd += [f"--exclude-dir={secret_dir}"]
+    cmd += ["--exclude=.env"]
     if file_pattern:
         cmd += [f"--include={file_pattern}"]
     cmd += [query, str(REPOS)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        lines = r.stdout.replace(str(REPOS) + "/", "").splitlines()[:50]
-        return "\n".join(lines) if lines else "No results."
+        root_prefix = str(REPOS) + "/"
+        filtered: list[str] = []
+        for line in r.stdout.splitlines():
+            rel = line.removeprefix(root_prefix)
+            path_part = rel.split(":", 1)[0] if ":" in rel else rel
+            candidate = REPOS / path_part
+            if _is_secret_path(candidate):
+                continue
+            filtered.append(rel)
+            if len(filtered) >= 50:
+                break
+        return "\n".join(filtered) if filtered else "No results."
     except subprocess.TimeoutExpired:
         return "Search timed out."
 
