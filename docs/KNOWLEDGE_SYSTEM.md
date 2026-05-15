@@ -106,6 +106,7 @@ review, and no-op.
 
 Tools:
 
+- `knowledge_curation_create`
 - `knowledge_curation_list`
 - `knowledge_curation_get`
 - `knowledge_curation_apply`

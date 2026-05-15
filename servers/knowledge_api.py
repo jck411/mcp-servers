@@ -47,6 +47,7 @@ from servers.knowledge import (
     KnowledgeVectorStore,
     _ingest_file_at_path,
     apply_curation_item,
+    create_curation_queue_item,
     delete_source_record,
     delete_sources_for_overwrite,
     extract_source_facts_single_shot,
@@ -556,20 +557,22 @@ async def create_curation_item(
     if missing:
         raise HTTPException(status_code=422, detail=f"Missing required field(s): {missing}")
 
-    item_id = await db.curation_upsert(
+    result = await create_curation_queue_item(
+        db=db,
+        actions=body.get("proposed_actions") or body.get("actions") or [],
         kind=str(body["kind"]),
         title=str(body["title"]),
-        summary=str(body.get("summary") or ""),
+        notes=str(body.get("summary") or body.get("notes") or ""),
         source_refs=body.get("source_refs") or [],
-        proposed_actions=body.get("proposed_actions") or [],
         risk=str(body.get("risk") or "medium"),
         confidence=float(body.get("confidence", 0.0)),
         item_id=body.get("id"),
         status=str(body.get("status") or "pending"),
         created_at=body.get("created_at"),
     )
-    item = await db.curation_get(item_id)
-    return {"id": item_id, "item": item}
+    if not result["success"]:
+        raise HTTPException(status_code=422, detail=result["error"])
+    return {"id": result["item_id"], "item": result["item"]}
 
 
 @app.get("/api/curation/{item_id}")

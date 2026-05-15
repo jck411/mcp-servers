@@ -2375,7 +2375,9 @@ async def extract_source_facts_single_shot(
             }
         parse_step["status"] = "ok"
         warn_note = f", {len(warnings)} warning(s)" if warnings else ""
-        parse_step["note"] = f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}{warn_note}"
+        parse_step["note"] = (
+            f"{len(facts)} fact(s), caption={'yes' if caption else 'no'}{warn_note}"
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         parse_step["status"] = "failed"
         parse_step["note"] = f"JSON parse error: {exc} | raw[:200]: {raw_output[:200]}"
@@ -2477,12 +2479,80 @@ def _require_ready() -> (
     return _settings, _embeddings, _sparse_encoder, _vectors, _db
 
 
+SUPPORTED_CURATION_ACTIONS = {
+    "archive_domain",
+    "delete_source",
+    "domain_archive",
+    "fact_delete",
+    "fact_set",
+    "fact_update_validity",
+    "flag_for_review",
+    "ingest_text",
+    "no_action",
+}
+
 DESTRUCTIVE_CURATION_ACTIONS = {
     "archive_domain",
     "delete_source",
     "domain_archive",
     "fact_delete",
 }
+
+
+def validate_curation_actions(actions: list[dict[str, Any]]) -> str | None:
+    """Return an error string when proposed curation actions are malformed."""
+    if not actions:
+        return "At least one proposed action is required"
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            return f"Action {index} must be an object"
+        action_type = str(action.get("action") or action.get("type") or "").strip()
+        if not action_type:
+            return f"Action {index} is missing 'action' or 'type'"
+        if action_type not in SUPPORTED_CURATION_ACTIONS:
+            supported = ", ".join(sorted(SUPPORTED_CURATION_ACTIONS))
+            return f"Unsupported curation action '{action_type}'. Supported: {supported}"
+    return None
+
+
+def _curation_title(kind: str, notes: str) -> str:
+    cleaned = " ".join(notes.split())
+    if cleaned:
+        return cleaned[:77] + "..." if len(cleaned) > 80 else cleaned
+    return kind.replace("_", " ").title()
+
+
+async def create_curation_queue_item(
+    *,
+    db: KnowledgeDB,
+    actions: list[dict[str, Any]],
+    notes: str,
+    kind: str = "uncertain_fact",
+    title: str | None = None,
+    source_refs: list[dict[str, Any]] | None = None,
+    risk: str = "medium",
+    confidence: float = 0.0,
+    item_id: str | None = None,
+    status: str = "pending",
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    error = validate_curation_actions(actions)
+    if error:
+        return {"success": False, "error": error}
+
+    curation_id = await db.curation_upsert(
+        kind=kind,
+        title=title or _curation_title(kind, notes),
+        summary=notes,
+        source_refs=source_refs or [],
+        proposed_actions=actions,
+        risk=risk,
+        confidence=confidence,
+        item_id=item_id,
+        status=status,
+        created_at=created_at,
+    )
+    return {"success": True, "item_id": curation_id, "item": await db.curation_get(curation_id)}
 
 
 def curation_item_has_destructive_actions(item: dict[str, Any]) -> bool:
@@ -3396,6 +3466,47 @@ async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, An
 # ---------------------------------------------------------------------------
 # MCP Tools — Curation Queue
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_curation_create")
+@logged_tool(log)
+async def knowledge_curation_create(
+    actions: list[dict[str, Any]],
+    notes: str,
+    kind: str = "uncertain_fact",
+    title: str | None = None,
+    source_refs: list[dict[str, Any]] | None = None,
+    risk: str = "medium",
+    confidence: float = 0.0,
+    item_id: str | None = None,
+) -> dict[str, Any]:
+    """Queue a proposed Knowledge change for human review.
+
+    Use this instead of direct writes when Jack hedges, contradicts stored facts,
+    mentions something in passing, or when the agent is inferring.
+
+    Args:
+        actions: Proposed actions. Each action must include "action" or "type".
+        notes: Reviewer-facing context explaining why this is queued.
+        kind: Queue item kind, e.g. "uncertain_fact" or "contradiction".
+        title: Optional short title. Defaults to a compact version of notes.
+        source_refs: Optional source/chat references.
+        risk: low, medium, or high.
+        confidence: Agent confidence from 0.0 to 1.0.
+        item_id: Optional deterministic id for upsert/replace.
+    """
+    _, _, _, _, db = _require_ready()
+    return await create_curation_queue_item(
+        db=db,
+        actions=actions,
+        notes=notes,
+        kind=kind,
+        title=title,
+        source_refs=source_refs,
+        risk=risk,
+        confidence=confidence,
+        item_id=item_id,
+    )
 
 
 @mcp.tool("knowledge_curation_list")

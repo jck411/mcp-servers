@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Knowledge Curation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --panel-2: #1f232c;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #8b93a4;
+    --accent: #4f8cff;
+    --ok: #3fb978;
+    --warn: #d8a32d;
+    --err: #e85d6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  a { color: var(--accent); text-decoration: none; }
+  button, select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  button { cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ok { border-color: var(--ok); color: var(--ok); }
+  button.warn { border-color: var(--warn); color: var(--warn); }
+  button.err { border-color: var(--err); color: var(--err); }
+  pre { margin: 8px 0 0; padding: 10px; overflow-x: auto; white-space: pre-wrap;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    margin-bottom: 16px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+  .toolbar select { width: 150px; }
+  .spacer { flex: 1; }
+  #count { color: var(--muted); font-size: 12px; }
+  #items { display: flex; flex-direction: column; gap: 10px; }
+  .item { background: var(--panel); border: 1px solid var(--border);
+    border-left: 4px solid var(--accent); border-radius: 8px; padding: 14px; }
+  .item.high { border-left-color: var(--err); }
+  .item.low { border-left-color: var(--ok); }
+  .head { display: flex; justify-content: space-between; gap: 16px; }
+  .title { font-weight: 650; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .summary { margin-top: 8px; color: var(--text); }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 4px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    font-size: 11px; font-weight: 600; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .empty { color: var(--muted); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 24px; text-align: center; }
+  .error { color: var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>Knowledge Curation</h1>
+    <a href="/ui/upload.html">Upload</a>
+  </div>
+
+  <div class="toolbar">
+    <select id="status">
+      <option value="pending">pending</option>
+      <option value="snoozed">snoozed</option>
+      <option value="rejected">rejected</option>
+      <option value="applied">applied</option>
+      <option value="">all</option>
+    </select>
+    <button id="refresh">Refresh</button>
+    <span class="spacer"></span>
+    <span id="count"></span>
+  </div>
+
+  <div id="items"></div>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[ch]));
+  }
+
+  function pretty(value) {
+    return escapeHtml(JSON.stringify(value || [], null, 2));
+  }
+
+  function messageFrom(json, fallback) {
+    const detail = json && json.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object") return detail.error || detail.detail || JSON.stringify(detail);
+    return (json && (json.error || json.message)) || fallback;
+  }
+
+  function destructive(item) {
+    const dangerous = new Set(["archive_domain", "delete_source", "domain_archive", "fact_delete"]);
+    return (item.proposed_actions || []).some((a) => dangerous.has(a.action || a.type));
+  }
+
+  async function mutate(item, action) {
+    const body = {};
+    if (action === "apply" && destructive(item)) {
+      const ok = confirm(`Apply destructive item ${item.id}?\n\nThis requires confirmation.`);
+      if (!ok) return;
+      body.confirmation = item.id;
+    }
+
+    const options = { method: "POST" };
+    if (body.confirmation) {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = JSON.stringify(body);
+    }
+
+    const r = await fetch(`/api/curation/${encodeURIComponent(item.id)}/${action}`, options);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      alert(messageFrom(j, `HTTP ${r.status}`));
+      return;
+    }
+    await load();
+  }
+
+  function renderItem(item) {
+    const el = document.createElement("div");
+    el.className = `item ${escapeHtml(item.risk || "")}`;
+    const created = item.created_at ? new Date(item.created_at).toLocaleString() : "";
+    const reviewed = item.reviewed_at ? new Date(item.reviewed_at).toLocaleString() : "";
+    const disabled = item.status !== "pending";
+    el.innerHTML = `
+      <div class="head">
+        <div>
+          <div class="title">${escapeHtml(item.title || item.kind || item.id)}</div>
+          <div class="meta">${escapeHtml(item.id)} · ${escapeHtml(created)}</div>
+        </div>
+        <div class="meta">${escapeHtml(reviewed)}</div>
+      </div>
+      ${item.summary ? `<div class="summary">${escapeHtml(item.summary)}</div>` : ""}
+      <div class="badges">
+        <span class="badge">${escapeHtml(item.status)}</span>
+        <span class="badge">${escapeHtml(item.kind)}</span>
+        <span class="badge">${escapeHtml(item.risk)}</span>
+        <span class="badge">${Number(item.confidence || 0).toFixed(2)}</span>
+      </div>
+      <details>
+        <summary>proposed actions</summary>
+        <pre>${pretty(item.proposed_actions)}</pre>
+      </details>
+      ${(item.source_refs || []).length ? `<details>
+        <summary>source refs</summary>
+        <pre>${pretty(item.source_refs)}</pre>
+      </details>` : ""}
+      <div class="actions">
+        <button class="ok" data-action="apply" ${disabled ? "disabled" : ""}>Apply</button>
+        <button class="err" data-action="reject" ${disabled ? "disabled" : ""}>Reject</button>
+        <button class="warn" data-action="snooze" ${disabled ? "disabled" : ""}>Snooze</button>
+      </div>`;
+
+    el.querySelectorAll("button[data-action]").forEach((button) => {
+      button.onclick = () => mutate(item, button.dataset.action);
+    });
+    return el;
+  }
+
+  async function load() {
+    $("items").innerHTML = "";
+    $("count").textContent = "loading";
+    const status = $("status").value;
+    const url = `/api/curation?limit=200${status ? `&status=${encodeURIComponent(status)}` : ""}`;
+    try {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (!r.ok) throw new Error(messageFrom(j, `HTTP ${r.status}`));
+      $("count").textContent = `${j.count || 0} item(s)`;
+      if (!j.items || !j.items.length) {
+        $("items").innerHTML = `<div class="empty">No ${escapeHtml(status || "matching")} items.</div>`;
+        return;
+      }
+      for (const item of j.items) $("items").appendChild(renderItem(item));
+    } catch (e) {
+      $("count").textContent = "";
+      $("items").innerHTML = `<div class="empty error">${escapeHtml(String(e))}</div>`;
+    }
+  }
+
+  $("refresh").onclick = load;
+  $("status").onchange = load;
+  load();
+})();
+</script>
+</body>
+</html>

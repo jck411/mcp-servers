@@ -7,6 +7,7 @@ from servers.knowledge import (
     KnowledgeDB,
     apply_curation_item,
     chunk_text,
+    create_curation_queue_item,
     curation_item_has_destructive_actions,
     delete_source_record,
     delete_sources_for_overwrite,
@@ -49,6 +50,39 @@ async def test_curation_queue_round_trip(knowledge_db: KnowledgeDB):
     assert [item["id"] for item in listed] == ["curation-test"]
     assert listed[0]["source_refs"][0]["conversationId"] == "conv-1"
     assert not curation_item_has_destructive_actions(listed[0])
+
+
+async def test_create_curation_queue_item_accepts_type_alias(knowledge_db: KnowledgeDB):
+    result = await create_curation_queue_item(
+        db=knowledge_db,
+        kind="uncertain_fact",
+        notes="Jack might prefer terse updates.",
+        actions=[{
+            "type": "fact_set",
+            "domain": "core",
+            "key": "test.preference",
+            "value": "Might prefer terse updates",
+        }],
+        confidence=0.4,
+        item_id="create-helper-test",
+    )
+
+    assert result["success"] is True
+    item = await knowledge_db.curation_get("create-helper-test")
+    assert item["title"] == "Jack might prefer terse updates."
+    assert item["proposed_actions"][0]["type"] == "fact_set"
+
+
+async def test_create_curation_queue_item_rejects_unknown_action(knowledge_db: KnowledgeDB):
+    result = await create_curation_queue_item(
+        db=knowledge_db,
+        notes="Bad action should not enter the review queue.",
+        actions=[{"type": "launch_confetti"}],
+    )
+
+    assert result["success"] is False
+    assert "Unsupported curation action" in result["error"]
+    assert await knowledge_db.curation_list(status="pending") == []
 
 
 async def test_apply_non_destructive_curation_item_sets_fact(knowledge_db: KnowledgeDB):
