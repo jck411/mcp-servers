@@ -156,7 +156,9 @@ From inside the container:
 
 ```bash
 # Knowledge MCP
+source /opt/mcp-servers/.env
 curl -s http://127.0.0.1:9017/mcp \
+  -H "Authorization: Bearer ${MCP_KNOWLEDGE_BEARER_TOKEN}" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -m json.tool
@@ -169,7 +171,9 @@ From your **dev machine** (Dell XPS / 192.168.1.19):
 
 ```bash
 # Test connectivity across the network
+source ~/REPOS/symlinked-env/.env
 curl -s http://192.168.1.110:9017/mcp \
+  -H "Authorization: Bearer ${MCP_KNOWLEDGE_BEARER_TOKEN}" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
@@ -285,10 +289,12 @@ Add to your tunnel config on 192.168.1.11:
 
 ```yaml
 ingress:
-  - hostname: mcp-knowledge.jackshome.com
+  - hostname: mcp-knowledge-bearer.jackshome.com
     service: http://192.168.1.110:9017
   - hostname: api-knowledge.jackshome.com
     service: http://192.168.1.110:9018
 ```
+
+Clients must send `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>`.
 
 Then restart: `systemctl restart cloudflared`

@@ -119,6 +119,7 @@ curl -s http://127.0.0.1:<port>/mcp \
 ```
 
 Or point any MCP client at `http://127.0.0.1:<port>/mcp`.
+Knowledge adds the same `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>` header when you test it locally.
 
 ### 3. Iterate
 
@@ -202,7 +203,7 @@ sudo systemctl restart mcp-server@knowledge
 
 ## Security
 
-Servers bind `0.0.0.0` with **no built-in HTTP authentication**. Security is enforced at the network level.
+The Knowledge MCP endpoint uses a shared bearer token. Raw MCP ports stay network-restricted.
 
 ### LAN access
 
@@ -210,35 +211,36 @@ Raw MCP ports are internal backend ports. LXC firewalls should allow only truste
 
 ### Remote access (Cloudflare Tunnel)
 
-Use a **Cloudflare Tunnel** — never port-forward `9003–9018` through your router. The tunnel gives each server a public HTTPS endpoint without opening firewall holes.
+Use a **Cloudflare Tunnel** — never port-forward `9003–9018` through your router. The tunnel gives Knowledge a public HTTPS endpoint without opening firewall holes.
 
-### Locking down the public tunnel (for ChatGPT, etc.)
+### Authentication
 
-Add a **Cloudflare Zero Trust Access policy** to the tunnel hostname — zero server code changes required:
+Use the same bearer token from every client that connects to Knowledge:
 
-1. Cloudflare Zero Trust → Access → Service Auth → **Create Service Token**
-2. Attach an Access policy to the tunnel hostname requiring that token
-3. Clients pass two headers with every request:
-   ```
-   CF-Access-Client-Id: <client-id>
-   CF-Access-Client-Secret: <client-secret>
-   ```
-   For `mcp-knowledge.jackshome.com`, the generated values are stored in the
-   master env as `MCP_KNOWLEDGE_CF_ACCESS_CLIENT_ID` and
-   `MCP_KNOWLEDGE_CF_ACCESS_CLIENT_SECRET`.
-4. All enforcement happens at the Cloudflare edge — the servers themselves are unchanged
+`Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>`
 
-For clients on your local network, skip Zero Trust and use the direct LAN URL.
+The public Knowledge endpoint is `https://mcp-knowledge-bearer.jackshome.com/mcp`.
+For Codex, source `~/REPOS/symlinked-env/.env` before launching so `bearer_token_env_var` can read it.
 
 ## Client Integration
 
-Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextprotocol.io). Any MCP client that supports HTTP can connect.
+Servers speak the [MCP streamable-HTTP transport](https://spec.modelcontextprotocol.io). Any MCP client that supports HTTP can connect with the bearer token.
 
 | Access | Base URL |
 |--------|----------|
 | LAN (knowledge) | `http://192.168.1.110:<port>/mcp` |
 | LAN (private/home) | `http://192.168.1.117:<port>/mcp` |
-| Remote (Cloudflare Tunnel) | `https://<tunnel-hostname>/mcp` |
+| Remote (knowledge) | `https://mcp-knowledge-bearer.jackshome.com/mcp` |
+
+### Codex
+
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.jack-knowledge]
+url = "https://mcp-knowledge-bearer.jackshome.com/mcp"
+bearer_token_env_var = "MCP_KNOWLEDGE_BEARER_TOKEN"
+```
 
 ### VS Code Copilot
 
@@ -283,14 +285,14 @@ it does not need direct firewall access to the raw MCP ports.
 
 ### ChatGPT
 
-ChatGPT → Settings → Connected Apps → Add custom MCP server. Use the Cloudflare Tunnel URL:
+ChatGPT → Settings → Connected Apps → Add custom MCP server. Use the Knowledge endpoint:
 
 ```
-https://<tunnel-hostname>/mcp
+https://mcp-knowledge-bearer.jackshome.com/mcp
 ```
 
-If the tunnel is protected by Zero Trust, add the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers in the custom action’s auth settings.
+Add `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>` in the custom action’s auth settings.
 
 ### Generic (any MCP client)
 
-Point any MCP client at the server's URL. Knowledge uses `http://192.168.1.110:<port>/mcp`; private/account/home-control servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
+Point any MCP client at the server's URL. Knowledge uses `https://mcp-knowledge-bearer.jackshome.com/mcp` and requires the bearer token; private/account/home-control servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).

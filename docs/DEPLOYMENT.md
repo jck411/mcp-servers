@@ -44,14 +44,16 @@ Force a specific mode with `--local`, `--tunnel`, or `--remote`.
 
 ---
 
-## What deploy does (steps 1–5)
+## What deploy does (steps 1–6)
 
 1. **Push** — commits any dirty local files and runs `git push origin master` (skip with `--no-push`)
 2. **Reset code** — SSHs into CT 110, runs `git fetch origin master`, resets tracked files to `origin/master`, then runs `uv sync --extra all`. Runtime/untracked folders such as `credentials/`, `logs/`, `data/`, and `knowledge/` are left alone.
 3. **Port file** — writes `/opt/mcp-servers/.env.<server>` containing `MCP_PORT=<port>`
 4. **Orphan kill** — `fuser -k <port>/tcp` to free the port before restart
 5. **Restart + poll** — `systemctl restart mcp-server@<server>`, polls up to 20 s for `active`
-6. **Backend refresh** — pokes LXC 111 to refresh its MCP server discovery list
+6. **Backend refresh** — pokes LXC 111 to refresh the chat-backend MCP discovery list. If this fails, deploy exits non-zero because chat-backend may still have a stale tool list.
+
+LibreChat is separate: it connects directly from LXC 115 using `librechat-config/librechat.yaml`. Restart LibreChat's `api` container after Knowledge MCP tool changes.
 
 ---
 
@@ -195,10 +197,23 @@ ssh proxmox-tunnel 'pct exec 110 -- journalctl -u mcp-server@knowledge -n 50 --n
 
 **Smoke-test a server's tool list:**
 ```bash
-ssh root@192.168.1.11 'pct exec 110 -- curl -s http://127.0.0.1:9017/mcp \
-  -X POST -H "Content-Type: application/json" \
+ssh root@192.168.1.11 'pct exec 110 -- bash -lc '\''source /opt/mcp-servers/.env && curl -s http://127.0.0.1:9017/mcp \
+  -X POST -H "Authorization: Bearer ${MCP_KNOWLEDGE_BEARER_TOKEN}" \
+  -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"'
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"'\'''
+```
+
+**Verify chat-backend sees the refreshed Knowledge tools:**
+```bash
+ssh proxmox-tunnel "pct exec 111 -- bash -lc \
+  'curl -sk https://127.0.0.1:8000/api/mcp/servers/ | grep -o knowledge_curation_create'"
+```
+
+**Verify LibreChat sees the refreshed Knowledge tools:**
+```bash
+ssh proxmox-tunnel "pct exec 115 -- bash -lc \
+  'cd /opt/LibreChat && docker logs LibreChat --since 10m 2>&1 | grep knowledge_curation_create'"
 ```
 
 **Shell escaping rules for manual `pct exec` commands:**

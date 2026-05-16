@@ -30,6 +30,7 @@ import binascii
 import contextlib
 import hashlib
 import json
+import os
 import re
 import secrets
 import uuid
@@ -41,6 +42,7 @@ from typing import Any
 import aiosqlite
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from qdrant_client import AsyncQdrantClient
@@ -78,7 +80,15 @@ DEFAULT_HTTP_PORT = 9017
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-mcp = FastMCP("knowledge")
+
+def _auth_provider() -> StaticTokenVerifier | None:
+    token = os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN")
+    if not token:
+        return None
+    return StaticTokenVerifier({token: {"client_id": "knowledge", "scopes": []}})
+
+
+mcp = FastMCP("knowledge", auth=_auth_provider())
 
 
 # ---------------------------------------------------------------------------
@@ -3661,6 +3671,10 @@ def run(
 ) -> None:
     """Run the Knowledge MCP server."""
     import asyncio
+
+    mcp.auth = _auth_provider()
+    if transport == "streamable-http" and mcp.auth is None:
+        raise RuntimeError("MCP_KNOWLEDGE_BEARER_TOKEN is required for streamable-http")
 
     asyncio.get_event_loop().run_until_complete(_startup())
 
