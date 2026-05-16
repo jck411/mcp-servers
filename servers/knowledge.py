@@ -82,10 +82,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _auth_provider() -> StaticTokenVerifier | None:
-    token = os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN")
-    if not token:
+    tokens = {
+        token: {"client_id": "knowledge", "scopes": []}
+        for token in (
+            os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN"),
+            os.environ.get("KNOWLEDGE_AUTH_TOKEN"),
+        )
+        if token
+    }
+    if not tokens:
         return None
-    return StaticTokenVerifier({token: {"client_id": "knowledge", "scopes": []}})
+    return StaticTokenVerifier(tokens)
 
 
 mcp = FastMCP("knowledge", auth=_auth_provider())
@@ -3674,7 +3681,9 @@ def run(
 
     mcp.auth = _auth_provider()
     if transport == "streamable-http" and mcp.auth is None:
-        raise RuntimeError("MCP_KNOWLEDGE_BEARER_TOKEN is required for streamable-http")
+        raise RuntimeError(
+            "MCP_KNOWLEDGE_BEARER_TOKEN or KNOWLEDGE_AUTH_TOKEN is required for streamable-http"
+        )
 
     asyncio.get_event_loop().run_until_complete(_startup())
 
