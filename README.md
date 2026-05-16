@@ -215,12 +215,8 @@ Use a **Cloudflare Tunnel** — never port-forward `9003–9018` through your ro
 
 ### Authentication
 
-Use the same bearer token from every client that connects to Knowledge:
-
-`Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>`
-
-The public Knowledge endpoint is `https://mcp-knowledge-bearer.jackshome.com/mcp`.
-For Codex, source `~/REPOS/symlinked-env/.env` before launching so `bearer_token_env_var` can read it.
+Use `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>` with `https://mcp-knowledge-bearer.jackshome.com/mcp`.
+For Codex, start it from a shell that has sourced `~/REPOS/symlinked-env/.env` so `MCP_KNOWLEDGE_BEARER_TOKEN` is present at launch.
 
 ## Client Integration
 
@@ -262,7 +258,13 @@ bearer_token_env_var = "MCP_KNOWLEDGE_BEARER_TOKEN"
 ```json
 {
   "mcp": {
-    "knowledge": { "type": "http", "url": "http://192.168.1.110:9017/mcp" }
+    "knowledge": {
+      "type": "http",
+      "url": "http://192.168.1.110:9017/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_KNOWLEDGE_BEARER_TOKEN}"
+      }
+    }
   }
 }
 ```
