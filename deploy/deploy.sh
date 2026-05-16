@@ -185,9 +185,17 @@ deploy_via() {
     _pct_exec "$ssh_host" "$run_cmd"
 
     banner "Refreshing backend discovery (CT ${LXC_BACKEND})"
-    _pct_exec_backend "$ssh_host" \
-        "curl -sk --max-time 15 -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'" \
-        | python3 -m json.tool 2>/dev/null || true
+    local refresh_output
+    if ! refresh_output="$(_pct_exec_backend "$ssh_host" \
+        "curl -skS --fail --max-time 30 -X POST ${BACKEND_REFRESH_URL} -H 'Content-Type: application/json' -H 'Accept: application/json'")"; then
+        echo "Backend MCP refresh failed. LibreChat may still have a stale tool list." >&2
+        return 1
+    fi
+    if [[ -n "$refresh_output" ]]; then
+        printf '%s\n' "$refresh_output" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$refresh_output"
+    else
+        info "  Refresh succeeded with an empty response."
+    fi
 
     echo ""
     echo -e "${GREEN}${BOLD}Deploy complete — ${#SERVERS[@]} server(s)${RESET}"
