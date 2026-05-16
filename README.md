@@ -244,8 +244,22 @@ bearer_token_env_var = "MCP_KNOWLEDGE_BEARER_TOKEN"
 
 ```json
 {
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "mcp-knowledge-token",
+      "description": "MCP Knowledge bearer token",
+      "password": true
+    }
+  ],
   "servers": {
-    "knowledge": { "type": "http", "url": "http://192.168.1.110:9017/mcp" },
+    "knowledge": {
+      "type": "http",
+      "url": "http://192.168.1.110:9017/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:mcp-knowledge-token}"
+      }
+    },
     "spotify":   { "type": "http", "url": "http://192.168.1.117:9010/mcp" }
   }
 }
@@ -297,4 +311,4 @@ Add `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>` in the custom action’
 
 ### Generic (any MCP client)
 
-Point any MCP client at the server's URL. Knowledge uses `https://mcp-knowledge-bearer.jackshome.com/mcp` and requires the bearer token; private/account/home-control servers use `http://192.168.1.117:<port>/mcp`. The server responds to all standard MCP methods (`tools/list`, `tools/call`, etc.).
+Use `https://mcp-knowledge-bearer.jackshome.com/mcp` with `Authorization: Bearer <MCP_KNOWLEDGE_BEARER_TOKEN>`; private/account/home-control servers stay on `http://192.168.1.117:<port>/mcp`.
