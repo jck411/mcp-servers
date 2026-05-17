@@ -320,6 +320,13 @@ class KnowledgeDB:
         "s.id, s.source_type, s.filename, s.content_hash, s.chunk_count, "
         "s.ingested_at, s.stored_path, s.media_type, s.size_bytes"
     )
+    _WIKI_PAGE_COLUMNS = (
+        "slug, domain, title, kind, status, body_md, frontmatter_json, "
+        "fact_count, source_count, created_at, updated_at"
+    )
+    _WIKI_PAGE_LIST_COLUMNS = (
+        "slug, domain, title, kind, status, fact_count, source_count, created_at, updated_at"
+    )
 
     def __init__(self, db_path: Path) -> None:
         self._path = db_path
@@ -334,6 +341,17 @@ class KnowledgeDB:
             "created_at": row["created_at"],
             "archived": bool(row["archived"]),
         }
+
+    @staticmethod
+    def _decode_wiki_page_row(row: aiosqlite.Row) -> dict[str, Any]:
+        page = dict(row)
+        raw_frontmatter = str(page.pop("frontmatter_json") or "{}")
+        try:
+            page["frontmatter"] = json.loads(raw_frontmatter)
+        except json.JSONDecodeError:
+            page["frontmatter"] = {}
+            page["frontmatter_json_error"] = raw_frontmatter
+        return page
 
     async def initialize(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -978,6 +996,74 @@ class KnowledgeDB:
         row = await cursor.fetchone()
         await self._conn.commit()
         return dict(row) if row else None
+
+    # -- Wiki Pages --
+
+    async def wiki_get(self, slug: str) -> dict[str, Any] | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            f"SELECT {self._WIKI_PAGE_COLUMNS} FROM wiki_pages WHERE slug = ?",  # noqa: S608
+            (slug,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        page = self._decode_wiki_page_row(row)
+        cursor = await self._conn.execute(
+            """
+            SELECT source_id, chat_date, contribution
+            FROM wiki_page_sources
+            WHERE page_slug = ?
+            ORDER BY COALESCE(source_id, ''), COALESCE(chat_date, ''), contribution
+            """,
+            (slug,),
+        )
+        page["sources"] = [dict(source) for source in await cursor.fetchall()]
+        return page
+
+    async def wiki_list(
+        self,
+        *,
+        domain: str | None = None,
+        kind: str | None = None,
+        status: str = "active",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        limit = max(1, min(int(limit or 50), 200))
+        conditions: list[str] = []
+        params: list[Any] = []
+        if domain:
+            conditions.append("domain = ?")
+            params.append(domain)
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if status != "all":
+            conditions.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {self._WIKI_PAGE_LIST_COLUMNS}
+            FROM wiki_pages
+            {where}
+            ORDER BY updated_at DESC, slug
+            LIMIT ?
+            """,  # noqa: S608
+            [*params, limit],
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def wiki_set_status(self, slug: str, status: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "UPDATE wiki_pages SET status = ?, updated_at = ? WHERE slug = ?",
+            (status, datetime.now(UTC).isoformat(), slug),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
 
     # -- Curation Queue --
 
@@ -2618,6 +2704,10 @@ def _require_ready() -> (
     return _settings, _embeddings, _sparse_encoder, _vectors, _db
 
 
+WIKI_PAGE_STATUSES = frozenset({"candidate", "active", "archived"})
+WIKI_PAGE_LIST_STATUSES = WIKI_PAGE_STATUSES | frozenset({"all"})
+WIKI_PAGE_KINDS = frozenset({"entity", "concept", "source_summary", "index"})
+
 SUPPORTED_CURATION_ACTIONS = {
     "archive_domain",
     "delete_source",
@@ -3614,6 +3704,82 @@ async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, An
     """
     settings, _, _, vectors, db = _require_ready()
     return await rename_source_record(settings, vectors, db, source_id, filename)
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Wiki Pages
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_wiki_get")
+@logged_tool(log)
+async def knowledge_wiki_get(slug: str) -> dict[str, Any]:
+    """Get one wiki page by slug, including frontmatter and sources."""
+    _, _, _, _, db = _require_ready()
+    clean_slug = slug.strip()
+    if not clean_slug:
+        return {"success": False, "error": "slug is required"}
+    page = await db.wiki_get(clean_slug)
+    if not page:
+        return {"success": False, "error": f"Wiki page '{clean_slug}' not found"}
+    return {"success": True, "page": page}
+
+
+@mcp.tool("knowledge_wiki_list")
+@logged_tool(log)
+async def knowledge_wiki_list(
+    domain: str | None = None,
+    kind: str | None = None,
+    status: str = "active",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List wiki pages. status is active, candidate, archived, or all."""
+    _, _, _, _, db = _require_ready()
+    clean_status = str(status or "active").strip()
+    if clean_status not in WIKI_PAGE_LIST_STATUSES:
+        return {"success": False, "error": "status must be active, candidate, archived, or all"}
+
+    clean_kind = kind.strip() if kind else None
+    if clean_kind and clean_kind not in WIKI_PAGE_KINDS:
+        return {"success": False, "error": "kind must be entity, concept, source_summary, or index"}
+
+    pages = await db.wiki_list(
+        domain=domain.strip() if domain else None,
+        kind=clean_kind,
+        status=clean_status,
+        limit=limit,
+    )
+    return {"success": True, "count": len(pages), "pages": pages}
+
+
+@mcp.tool("knowledge_wiki_set_status")
+@logged_tool(log)
+async def knowledge_wiki_set_status(
+    slug: str,
+    status: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Promote a candidate page to active, or archive/reactivate a page."""
+    _, _, _, _, db = _require_ready()
+    clean_slug = slug.strip()
+    clean_status = str(status or "").strip()
+    if not clean_slug:
+        return {"success": False, "error": "slug is required"}
+    if clean_status not in WIKI_PAGE_STATUSES:
+        return {"success": False, "error": "status must be candidate, active, or archived"}
+
+    if not await db.wiki_set_status(clean_slug, clean_status):
+        return {"success": False, "error": f"Wiki page '{clean_slug}' not found"}
+
+    result: dict[str, Any] = {
+        "success": True,
+        "slug": clean_slug,
+        "status": clean_status,
+        "page": await db.wiki_get(clean_slug),
+    }
+    if notes:
+        result["notes"] = notes
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -421,6 +421,104 @@ async def test_wiki_rebuild_run_status_constraint(tmp_path: Path):
         await db.close()
 
 
+async def test_wiki_page_helpers_get_list_and_set_status(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_pages.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db._conn.executescript("""
+            INSERT INTO wiki_pages
+                (slug, domain, title, kind, status, body_md, frontmatter_json, source_count)
+            VALUES
+                (
+                    'family/dad', 'family', 'Dad', 'entity', 'active', 'Dad body',
+                    '{"schema_version":1,"slug":"family/dad","title":"Dad"}', 2
+                ),
+                (
+                    'family/mom', 'family', 'Mom', 'entity', 'candidate', 'Mom body',
+                    '{"schema_version":1,"slug":"family/mom","title":"Mom"}', 0
+                );
+            INSERT INTO wiki_page_sources
+                (page_slug, source_id, chat_date, contribution)
+            VALUES
+                ('family/dad', 'source-a', NULL, 'uploaded note'),
+                ('family/dad', NULL, '2026-05-17', 'chat note');
+        """)
+        await db._conn.commit()
+
+        page = await db.wiki_get("family/dad")
+        assert page is not None
+        assert page["frontmatter"]["slug"] == "family/dad"
+        assert page["sources"] == [
+            {"source_id": None, "chat_date": "2026-05-17", "contribution": "chat note"},
+            {"source_id": "source-a", "chat_date": None, "contribution": "uploaded note"},
+        ]
+
+        assert [p["slug"] for p in await db.wiki_list()] == ["family/dad"]
+        assert [p["slug"] for p in await db.wiki_list(status="candidate")] == ["family/mom"]
+        assert {p["slug"] for p in await db.wiki_list(domain="family", status="all")} == {
+            "family/dad", "family/mom",
+        }
+        assert await db.wiki_set_status("family/mom", "active") is True
+        assert (await db.wiki_get("family/mom"))["status"] == "active"
+        assert await db.wiki_set_status("family/missing", "archived") is False
+    finally:
+        await db.close()
+
+
+async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import servers.knowledge as knowledge
+
+    db = KnowledgeDB(tmp_path / "wiki_tools.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db._conn.execute(
+            """
+            INSERT INTO wiki_pages
+                (slug, domain, title, kind, status, body_md, frontmatter_json)
+            VALUES (
+                'family/dad', 'family', 'Dad', 'entity', 'candidate', 'Dad body',
+                '{"schema_version":1,"slug":"family/dad"}'
+            )
+            """
+        )
+        await db._conn.commit()
+
+        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(knowledge, "_settings", object())
+        monkeypatch.setattr(knowledge, "_embeddings", object())
+        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
+        monkeypatch.setattr(knowledge, "_vectors", object())
+        monkeypatch.setattr(knowledge, "_db", db)
+
+        get_tool = (
+            knowledge.knowledge_wiki_get.fn
+            if hasattr(knowledge.knowledge_wiki_get, "fn")
+            else knowledge.knowledge_wiki_get
+        )
+        list_tool = (
+            knowledge.knowledge_wiki_list.fn
+            if hasattr(knowledge.knowledge_wiki_list, "fn")
+            else knowledge.knowledge_wiki_list
+        )
+        set_status_tool = (
+            knowledge.knowledge_wiki_set_status.fn
+            if hasattr(knowledge.knowledge_wiki_set_status, "fn")
+            else knowledge.knowledge_wiki_set_status
+        )
+
+        assert (await list_tool(status="draft"))["success"] is False
+        assert (await get_tool("family/dad"))["page"]["status"] == "candidate"
+
+        promoted = await set_status_tool("family/dad", "active", notes="reviewed")
+        assert promoted["success"] is True
+        assert promoted["page"]["status"] == "active"
+        assert (await list_tool(status="active"))["pages"][0]["slug"] == "family/dad"
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------
