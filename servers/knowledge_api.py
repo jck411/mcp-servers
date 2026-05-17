@@ -371,6 +371,8 @@ async def set_fact(
         float(body.get("confidence", 1.0)),
         body.get("valid_from"),
         body.get("valid_until"),
+        str(body.get("origin_type") or "manual"),
+        body.get("origin_ref"),
     )
 
     return {"domain": domain, "key": key, "value": value}
@@ -544,7 +546,8 @@ async def list_curation(
     """List curation queue items."""
     _, _, _, _, db = _require_ready()
     items = await db.curation_list(status=status, kind=kind, limit=limit)
-    return {"count": len(items), "items": items}
+    total_count = await db.curation_count(status=status, kind=kind)
+    return {"count": len(items), "total_count": total_count, "items": items}
 
 
 @app.post("/api/curation")

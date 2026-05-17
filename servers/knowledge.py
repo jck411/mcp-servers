@@ -360,6 +360,9 @@ class KnowledgeDB:
                 confidence REAL NOT NULL DEFAULT 1.0,
                 valid_from TEXT,
                 valid_until TEXT,
+                origin_type TEXT NOT NULL DEFAULT 'unknown',
+                origin_ref TEXT,
+                last_confirmed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -412,8 +415,25 @@ class KnowledgeDB:
                 ON download_tokens(expires_at);
 
         """)
+        await self._ensure_fact_metadata_columns()
         await self._ensure_source_metadata_columns()
         await self._conn.commit()
+
+    async def _ensure_fact_metadata_columns(self) -> None:
+        """Add fact provenance columns to older Knowledge databases."""
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(facts)")
+        existing = {str(row["name"]) for row in await cursor.fetchall()}
+        additions = {
+            "origin_type": "TEXT NOT NULL DEFAULT 'unknown'",
+            "origin_ref": "TEXT",
+            "last_confirmed_at": "TEXT",
+        }
+        for column, declaration in additions.items():
+            if column not in existing:
+                await self._conn.execute(
+                    f"ALTER TABLE facts ADD COLUMN {column} {declaration}"  # noqa: S608
+                )
 
     async def _ensure_source_metadata_columns(self) -> None:
         """Add raw-file metadata columns to older Knowledge databases."""
@@ -503,6 +523,8 @@ class KnowledgeDB:
         confidence: float = 1.0,
         valid_from: str | None = None,
         valid_until: str | None = None,
+        origin_type: str = "unknown",
+        origin_ref: str | None = None,
     ) -> str:
         """Set a fact. Upserts by (domain, key). Returns fact ID."""
         assert self._conn is not None
@@ -512,18 +534,25 @@ class KnowledgeDB:
         await self._conn.execute(
             """
             INSERT INTO facts (id, domain, key, value, source, confidence,
-                               valid_from, valid_until, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               valid_from, valid_until, origin_type, origin_ref,
+                               last_confirmed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
             ON CONFLICT(domain, key) DO UPDATE SET
+                last_confirmed_at = CASE
+                    WHEN facts.value = excluded.value THEN excluded.updated_at
+                    ELSE NULL
+                END,
                 value = excluded.value,
                 source = excluded.source,
                 confidence = excluded.confidence,
                 valid_from = excluded.valid_from,
                 valid_until = excluded.valid_until,
+                origin_type = excluded.origin_type,
+                origin_ref = excluded.origin_ref,
                 updated_at = excluded.updated_at
             """,
             (fact_id, domain, key, value, source, confidence,
-             valid_from, valid_until, now, now),
+             valid_from, valid_until, origin_type, origin_ref, now, now),
         )
         await self._conn.commit()
         return fact_id
@@ -549,7 +578,8 @@ class KnowledgeDB:
     async def facts_list(self, domain: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            "SELECT key, value, source, confidence, valid_from, valid_until, updated_at "
+            "SELECT key, value, source, confidence, valid_from, valid_until, "
+            "origin_type, origin_ref, last_confirmed_at, updated_at "
             "FROM facts WHERE domain = ? ORDER BY key",
             (domain,),
         )
@@ -575,7 +605,8 @@ class KnowledgeDB:
 
         where = " AND ".join(conditions)
         cursor = await self._conn.execute(
-            f"SELECT domain, key, value, source, confidence, valid_from, valid_until, updated_at "  # noqa: S608
+            f"SELECT domain, key, value, source, confidence, valid_from, valid_until, "  # noqa: S608
+            f"origin_type, origin_ref, last_confirmed_at, updated_at "
             f"FROM facts WHERE {where} ORDER BY domain, key",
             params,
         )
@@ -975,6 +1006,29 @@ class KnowledgeDB:
         )
         rows = await cursor.fetchall()
         return [self._decode_curation_row(row) for row in rows]
+
+    async def curation_count(
+        self,
+        *,
+        status: str | None = "pending",
+        kind: str | None = None,
+    ) -> int:
+        assert self._conn is not None
+        conditions = []
+        params: list[Any] = []
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        cursor = await self._conn.execute(
+            f"SELECT COUNT(*) FROM curation_items {where}",  # noqa: S608
+            params,
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
 
     async def curation_mark_status(self, item_id: str, status: str) -> bool:
         assert self._conn is not None
@@ -2409,6 +2463,8 @@ async def extract_source_facts_single_shot(
                 str(value),
                 source=f"extracted:{source_id}",
                 confidence=0.9,
+                origin_type="extracted",
+                origin_ref=source_id,
             )
             written_facts.append(key)
         write_step["status"] = "ok"
@@ -2635,6 +2691,7 @@ async def _ingest_curation_text(
 async def execute_curation_action(
     action: dict[str, Any],
     *,
+    curation_item_id: str,
     settings: KnowledgeSettings,
     embeddings: EmbeddingClient,
     sparse_encoder: BM25SparseEncoder,
@@ -2657,6 +2714,8 @@ async def execute_curation_action(
             float(action.get("confidence", 1.0)),
             action.get("valid_from"),
             action.get("valid_until"),
+            origin_type="curation",
+            origin_ref=curation_item_id,
         )
         return {"action": action_type, "status": "applied", "fact_id": fact_id}
 
@@ -2674,6 +2733,8 @@ async def execute_curation_action(
             float(fact.get("confidence", 1.0)),
             action.get("valid_from", fact.get("valid_from")),
             action.get("valid_until", fact.get("valid_until")),
+            origin_type="curation",
+            origin_ref=curation_item_id,
         )
         return {"action": action_type, "status": "applied", "domain": domain, "key": key}
 
@@ -2758,6 +2819,7 @@ async def apply_curation_item(
         for action in item.get("proposed_actions") or []:
             results.append(await execute_curation_action(
                 action,
+                curation_item_id=item_id,
                 settings=settings,
                 embeddings=embeddings,
                 sparse_encoder=sparse_encoder,
@@ -2999,6 +3061,8 @@ async def knowledge_fact_set(
     confidence: float = 1.0,
     valid_from: str | None = None,
     valid_until: str | None = None,
+    origin_type: str = "chat",
+    origin_ref: str | None = None,
 ) -> dict[str, Any]:
     """Store a structured fact in a domain. Upserts — same key overwrites.
 
@@ -3014,14 +3078,20 @@ async def knowledge_fact_set(
         confidence: How confident (0.0 to 1.0). Default 1.0.
         valid_from: ISO date when this fact became true.
         valid_until: ISO date when this fact expires.
+        origin_type: Provenance category. Defaults to "chat" for MCP writes.
+        origin_ref: Provenance reference. Defaults to today's date for chat writes.
     """
     _, _, _, _, db = _require_ready()
 
     if not await db.domain_exists(domain):
         return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
 
+    if origin_type == "chat" and not origin_ref:
+        origin_ref = datetime.now(UTC).date().isoformat()
+
     fact_id = await db.fact_set(
-        domain, key, value, source, confidence, valid_from, valid_until
+        domain, key, value, source, confidence, valid_from, valid_until,
+        origin_type, origin_ref,
     )
     return {
         "success": True,
@@ -3539,7 +3609,8 @@ async def knowledge_curation_list(
     """
     _, _, _, _, db = _require_ready()
     items = await db.curation_list(status=status, kind=kind, limit=limit)
-    return {"success": True, "count": len(items), "items": items}
+    total_count = await db.curation_count(status=status, kind=kind)
+    return {"success": True, "count": len(items), "total_count": total_count, "items": items}
 
 
 @mcp.tool("knowledge_curation_get")

@@ -260,6 +260,29 @@ async def test_facts_search_empty_domains_returns_empty(db_with_facts: Knowledge
     assert out == []
 
 
+async def test_fact_set_tracks_origin_and_confirmation(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "facts.db")
+    await db.initialize()
+    await db.domain_create("core", "core", [])
+    try:
+        await db.fact_set(
+            "core", "favorite_water", "sparkling", origin_type="chat", origin_ref="2026-05-17",
+        )
+        first = await db.fact_get("core", "favorite_water")
+        assert first["origin_type"] == "chat"
+        assert first["origin_ref"] == "2026-05-17"
+        assert first["last_confirmed_at"] is None
+
+        await db.fact_set(
+            "core", "favorite_water", "sparkling", origin_type="chat", origin_ref="2026-05-18",
+        )
+        second = await db.fact_get("core", "favorite_water")
+        assert second["origin_ref"] == "2026-05-18"
+        assert second["last_confirmed_at"] is not None
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------

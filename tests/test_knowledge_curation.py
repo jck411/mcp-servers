@@ -48,6 +48,7 @@ async def test_curation_queue_round_trip(knowledge_db: KnowledgeDB):
 
     listed = await knowledge_db.curation_list(status="pending")
     assert [item["id"] for item in listed] == ["curation-test"]
+    assert await knowledge_db.curation_count(status="pending") == 1
     assert listed[0]["source_refs"][0]["conversationId"] == "conv-1"
     assert not curation_item_has_destructive_actions(listed[0])
 
@@ -114,6 +115,8 @@ async def test_apply_non_destructive_curation_item_sets_fact(knowledge_db: Knowl
     assert result["success"] is True
     fact = await knowledge_db.fact_get("core", "test.preference")
     assert fact["value"] == "Likes concise answers"
+    assert fact["origin_type"] == "curation"
+    assert fact["origin_ref"] == "apply-test"
     assert (await knowledge_db.curation_get("apply-test"))["status"] == "applied"
 
 
