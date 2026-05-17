@@ -8,6 +8,7 @@ text-ingest input validator.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -279,6 +280,68 @@ async def test_fact_set_tracks_origin_and_confirmation(tmp_path: Path):
         second = await db.fact_get("core", "favorite_water")
         assert second["origin_ref"] == "2026-05-18"
         assert second["last_confirmed_at"] is not None
+    finally:
+        await db.close()
+
+
+async def test_wiki_schema_initializes_tables_and_seed_state(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        cursor = await db._conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name IN ('wiki_pages', 'wiki_page_sources', 'wiki_state')
+            """
+        )
+        assert {row["name"] for row in await cursor.fetchall()} == {
+            "wiki_pages", "wiki_page_sources", "wiki_state",
+        }
+
+        cursor = await db._conn.execute("SELECT key, value FROM wiki_state")
+        state = {row["key"]: row["value"] for row in await cursor.fetchall()}
+        assert state == {
+            "last_wiki_run": "1970-01-01T00:00:00Z",
+            "manual_rebuild_requires_confirmation": "true",
+        }
+    finally:
+        await db.close()
+
+
+async def test_wiki_schema_source_uniqueness_and_page_cascade(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_sources.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db._conn.execute(
+            """
+            INSERT INTO wiki_pages
+                (slug, domain, title, kind, body_md, frontmatter_json)
+            VALUES ('family/dad', 'family', 'Dad', 'entity', 'body', '{}')
+            """
+        )
+        await db._conn.execute(
+            """
+            INSERT INTO wiki_page_sources
+                (page_slug, source_id, chat_date, contribution)
+            VALUES ('family/dad', NULL, '2026-05-17', 'chat note')
+            """
+        )
+        await db._conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await db._conn.execute(
+                """
+                INSERT INTO wiki_page_sources
+                    (page_slug, source_id, chat_date, contribution)
+                VALUES ('family/dad', NULL, '2026-05-17', 'duplicate')
+                """
+            )
+
+        await db._conn.execute("DELETE FROM wiki_pages WHERE slug = 'family/dad'")
+        cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_page_sources")
+        assert (await cursor.fetchone())[0] == 0
     finally:
         await db.close()
 

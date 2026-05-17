@@ -414,7 +414,47 @@ class KnowledgeDB:
             CREATE INDEX IF NOT EXISTS idx_download_tokens_expires
                 ON download_tokens(expires_at);
 
+            CREATE TABLE IF NOT EXISTS wiki_pages (
+                slug TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (
+                    kind IN ('entity', 'concept', 'source_summary', 'index', 'log')
+                ),
+                body_md TEXT NOT NULL,
+                frontmatter_json TEXT NOT NULL,
+                fact_count INTEGER NOT NULL DEFAULT 0,
+                source_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_wiki_pages_domain
+                ON wiki_pages(domain);
+            CREATE INDEX IF NOT EXISTS idx_wiki_pages_kind
+                ON wiki_pages(kind);
+
+            CREATE TABLE IF NOT EXISTS wiki_page_sources (
+                page_slug TEXT NOT NULL REFERENCES wiki_pages(slug) ON DELETE CASCADE,
+                source_id TEXT,
+                chat_date TEXT,
+                contribution TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_page_sources_unique
+                ON wiki_page_sources(page_slug, COALESCE(source_id, ''), COALESCE(chat_date, ''));
+
+            CREATE TABLE IF NOT EXISTS wiki_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
         """)
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO wiki_state (key, value) VALUES (?, ?)",
+            (
+                ("last_wiki_run", "1970-01-01T00:00:00Z"),
+                ("manual_rebuild_requires_confirmation", "true"),
+            ),
+        )
         await self._ensure_fact_metadata_columns()
         await self._ensure_source_metadata_columns()
         await self._conn.commit()
