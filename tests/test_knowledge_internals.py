@@ -292,12 +292,17 @@ async def test_wiki_schema_initializes_tables_and_seed_state(tmp_path: Path):
         cursor = await db._conn.execute(
             """
             SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name IN ('wiki_pages', 'wiki_page_sources', 'wiki_state')
+            WHERE type = 'table'
+              AND name IN ('wiki_pages', 'wiki_page_sources', 'wiki_state', 'wiki_rebuild_runs')
             """
         )
         assert {row["name"] for row in await cursor.fetchall()} == {
-            "wiki_pages", "wiki_page_sources", "wiki_state",
+            "wiki_pages", "wiki_page_sources", "wiki_state", "wiki_rebuild_runs",
         }
+
+        cursor = await db._conn.execute("PRAGMA table_info(wiki_pages)")
+        columns = {row["name"]: row for row in await cursor.fetchall()}
+        assert columns["status"]["dflt_value"] == "'candidate'"
 
         cursor = await db._conn.execute("SELECT key, value FROM wiki_state")
         state = {row["key"]: row["value"] for row in await cursor.fetchall()}
@@ -329,6 +334,18 @@ async def test_wiki_schema_source_uniqueness_and_page_cascade(tmp_path: Path):
             """
         )
         await db._conn.commit()
+        cursor = await db._conn.execute("SELECT status FROM wiki_pages WHERE slug = 'family/dad'")
+        assert (await cursor.fetchone())["status"] == "candidate"
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await db._conn.execute(
+                """
+                INSERT INTO wiki_pages
+                    (slug, domain, title, kind, status, body_md, frontmatter_json)
+                VALUES ('family/bad', 'family', 'Bad', 'entity', 'draft', 'body', '{}')
+                """
+            )
+        await db._conn.rollback()
 
         with pytest.raises(sqlite3.IntegrityError):
             await db._conn.execute(
@@ -342,6 +359,64 @@ async def test_wiki_schema_source_uniqueness_and_page_cascade(tmp_path: Path):
         await db._conn.execute("DELETE FROM wiki_pages WHERE slug = 'family/dad'")
         cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_page_sources")
         assert (await cursor.fetchone())[0] == 0
+    finally:
+        await db.close()
+
+
+async def test_wiki_schema_migrates_existing_pages_to_candidate_status(tmp_path: Path):
+    db_path = tmp_path / "old_wiki.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE wiki_pages (
+                slug TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (
+                    kind IN ('entity', 'concept', 'source_summary', 'index', 'log')
+                ),
+                body_md TEXT NOT NULL,
+                frontmatter_json TEXT NOT NULL,
+                fact_count INTEGER NOT NULL DEFAULT 0,
+                source_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO wiki_pages
+                (slug, domain, title, kind, body_md, frontmatter_json)
+            VALUES ('family/dad', 'family', 'Dad', 'entity', 'body', '{}');
+        """)
+
+    db = KnowledgeDB(db_path)
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        cursor = await db._conn.execute("PRAGMA table_info(wiki_pages)")
+        assert "status" in {row["name"] for row in await cursor.fetchall()}
+
+        cursor = await db._conn.execute("SELECT status FROM wiki_pages WHERE slug = 'family/dad'")
+        assert (await cursor.fetchone())["status"] == "candidate"
+
+        cursor = await db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_wiki_pages_status'"
+        )
+        assert await cursor.fetchone() is not None
+    finally:
+        await db.close()
+
+
+async def test_wiki_rebuild_run_status_constraint(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_runs.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db._conn.execute(
+            "INSERT INTO wiki_rebuild_runs (status, scope_json) VALUES ('running', '{}')"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await db._conn.execute(
+                "INSERT INTO wiki_rebuild_runs (status, scope_json) VALUES ('paused', '{}')"
+            )
     finally:
         await db.close()
 

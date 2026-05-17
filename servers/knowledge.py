@@ -419,7 +419,10 @@ class KnowledgeDB:
                 domain TEXT NOT NULL,
                 title TEXT NOT NULL,
                 kind TEXT NOT NULL CHECK (
-                    kind IN ('entity', 'concept', 'source_summary', 'index', 'log')
+                    kind IN ('entity', 'concept', 'source_summary', 'index')
+                ),
+                status TEXT NOT NULL DEFAULT 'candidate' CHECK (
+                    status IN ('candidate', 'active', 'archived')
                 ),
                 body_md TEXT NOT NULL,
                 frontmatter_json TEXT NOT NULL,
@@ -447,6 +450,21 @@ class KnowledgeDB:
                 value TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS wiki_rebuild_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TEXT,
+                status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed')),
+                scope_json TEXT NOT NULL,
+                touched_slugs_json TEXT NOT NULL DEFAULT '[]',
+                pages_touched INTEGER NOT NULL DEFAULT 0,
+                token_estimate INTEGER NOT NULL DEFAULT 0,
+                model TEXT,
+                error_summary TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_wiki_rebuild_runs_started_at
+                ON wiki_rebuild_runs(started_at);
+
         """)
         await self._conn.executemany(
             "INSERT OR IGNORE INTO wiki_state (key, value) VALUES (?, ?)",
@@ -457,6 +475,7 @@ class KnowledgeDB:
         )
         await self._ensure_fact_metadata_columns()
         await self._ensure_source_metadata_columns()
+        await self._ensure_wiki_metadata_columns()
         await self._conn.commit()
 
     async def _ensure_fact_metadata_columns(self) -> None:
@@ -490,6 +509,20 @@ class KnowledgeDB:
                 await self._conn.execute(
                     f"ALTER TABLE sources ADD COLUMN {column} {declaration}"  # noqa: S608
                 )
+
+    async def _ensure_wiki_metadata_columns(self) -> None:
+        """Add wiki lifecycle columns to older Knowledge databases."""
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(wiki_pages)")
+        existing = {str(row["name"]) for row in await cursor.fetchall()}
+        if "status" not in existing:
+            await self._conn.execute(
+                "ALTER TABLE wiki_pages ADD COLUMN status TEXT NOT NULL DEFAULT 'candidate' "
+                "CHECK (status IN ('candidate', 'active', 'archived'))"
+            )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wiki_pages_status ON wiki_pages(status)"
+        )
 
     # -- Domains --
 
