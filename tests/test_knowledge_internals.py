@@ -9,6 +9,7 @@ text-ingest input validator.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -515,6 +516,88 @@ async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.Mon
         assert promoted["success"] is True
         assert promoted["page"]["status"] == "active"
         assert (await list_tool(status="active"))["pages"][0]["slug"] == "family/dad"
+    finally:
+        await db.close()
+
+
+async def test_wiki_rebuild_dry_run_estimates_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import servers.knowledge as knowledge
+
+    db = KnowledgeDB(tmp_path / "wiki_rebuild.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db.domain_create("family", "family", [])
+        now = datetime.now(UTC)
+        last_run = (now - timedelta(days=1)).isoformat()
+        await db._conn.execute(
+            "UPDATE wiki_state SET value = ? WHERE key = 'last_wiki_run'",
+            (last_run,),
+        )
+        await db._conn.executemany(
+            """
+            INSERT INTO facts
+                (id, domain, key, value, source, confidence, valid_from, valid_until,
+                 origin_type, origin_ref, last_confirmed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, NULL, 1.0, NULL, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    "fact-dad",
+                    "family",
+                    "dad_heart_history",
+                    "stable",
+                    "manual",
+                    None,
+                    None,
+                    (now - timedelta(hours=2)).isoformat(),
+                    now.isoformat(),
+                ),
+                (
+                    "fact-quiet",
+                    "family",
+                    "mom_phone",
+                    "unconfirmed",
+                    "chat",
+                    now.date().isoformat(),
+                    None,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            ),
+        )
+        await db._conn.commit()
+        await db.source_add("source-dad", "family", "note", "Dad notes.md", "hash-dad", 2)
+
+        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(knowledge, "_settings", SimpleNamespace(extraction_model="test-model"))
+        monkeypatch.setattr(knowledge, "_embeddings", object())
+        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
+        monkeypatch.setattr(knowledge, "_vectors", object())
+        monkeypatch.setattr(knowledge, "_db", db)
+
+        rebuild_tool = (
+            knowledge.knowledge_wiki_rebuild.fn
+            if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
+            else knowledge.knowledge_wiki_rebuild
+        )
+        result = await rebuild_tool(dry_run=True)
+
+        assert result["success"] is True
+        assert result["writes_performed"] is False
+        assert result["scope"]["since"] == last_run
+        assert result["estimated_pages"] == 2
+        assert result["changed_entities"][0]["slug"] == "family/dad"
+        assert result["changed_entities"][0]["fact_keys"] == ["dad_heart_history"]
+        assert result["changed_entities"][0]["source_ids"] == ["source-dad"]
+        assert result["latency_class"] == "quick"
+
+        cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_rebuild_runs")
+        assert (await cursor.fetchone())[0] == 0
+        assert (await rebuild_tool(dry_run=False))["success"] is False
     finally:
         await db.close()
 

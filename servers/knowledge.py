@@ -35,7 +35,7 @@ import re
 import secrets
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1064,6 +1064,65 @@ class KnowledgeDB:
         )
         await self._conn.commit()
         return cursor.rowcount > 0
+
+    async def wiki_state_get(self, key: str, default: str | None = None) -> str | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute("SELECT value FROM wiki_state WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return str(row["value"]) if row else default
+
+    async def wiki_rebuild_inputs(
+        self,
+        *,
+        since: str,
+        domain: str | None = None,
+        force_full: bool = False,
+        quiet_after: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        assert self._conn is not None
+        fact_conditions: list[str] = []
+        source_conditions: list[str] = []
+        fact_params: list[Any] = []
+        source_params: list[Any] = []
+        if domain:
+            fact_conditions.append("domain = ?")
+            source_conditions.append("domain = ?")
+            fact_params.append(domain)
+            source_params.append(domain)
+        if not force_full:
+            fact_conditions.append("updated_at > ?")
+            source_conditions.append("ingested_at > ?")
+            fact_params.append(since)
+            source_params.append(since)
+        if quiet_after:
+            fact_conditions.append(
+                "NOT (origin_type = 'chat' AND created_at > ? AND last_confirmed_at IS NULL)"
+            )
+            fact_params.append(quiet_after)
+
+        fact_where = f"WHERE {' AND '.join(fact_conditions)}" if fact_conditions else ""
+        source_where = f"WHERE {' AND '.join(source_conditions)}" if source_conditions else ""
+        cursor = await self._conn.execute(
+            f"""
+            SELECT domain, key, origin_type, origin_ref, last_confirmed_at, created_at, updated_at
+            FROM facts
+            {fact_where}
+            ORDER BY domain, key
+            """,  # noqa: S608
+            fact_params,
+        )
+        facts = [dict(row) for row in await cursor.fetchall()]
+
+        cursor = await self._conn.execute(
+            f"""
+            SELECT id, domain, source_type, filename, chunk_count, ingested_at
+            FROM sources
+            {source_where}
+            ORDER BY domain, filename, id
+            """,  # noqa: S608
+            source_params,
+        )
+        return {"facts": facts, "sources": [dict(row) for row in await cursor.fetchall()]}
 
     # -- Curation Queue --
 
@@ -2707,6 +2766,150 @@ def _require_ready() -> (
 WIKI_PAGE_STATUSES = frozenset({"candidate", "active", "archived"})
 WIKI_PAGE_LIST_STATUSES = WIKI_PAGE_STATUSES | frozenset({"all"})
 WIKI_PAGE_KINDS = frozenset({"entity", "concept", "source_summary", "index"})
+WIKI_REBUILD_QUIET_WINDOW = timedelta(hours=1)
+WIKI_REBUILD_STOPWORDS = frozenset({
+    "a", "an", "and", "chat", "current", "doc", "document", "file", "for", "from",
+    "latest", "log", "manual", "my", "note", "notes", "of", "pdf", "record", "records",
+    "report", "source", "summary", "the", "upload",
+})
+
+
+def _wiki_slug_for_change(domain: str, text: str) -> str:
+    terms = [
+        term for term in re.findall(r"[a-z0-9]+", text.lower())
+        if term not in WIKI_REBUILD_STOPWORDS
+    ]
+    if not terms:
+        return f"{domain}/index"
+    tail = f"{terms[0]}-{terms[1]}" if len(terms) > 1 and terms[1].isdigit() else terms[0]
+    return f"{domain}/{tail}"
+
+
+def _wiki_title_from_slug(slug: str) -> str:
+    return " ".join(part.upper() if part.isdigit() else part.title()
+                    for part in slug.rsplit("/", 1)[-1].split("-"))
+
+
+def _wiki_row_matches_slug(slug: str, domain: str, text: str) -> bool:
+    if not slug.startswith(f"{domain}/"):
+        return False
+    tail = slug.rsplit("/", 1)[-1]
+    terms = re.findall(r"[a-z0-9]+", text.lower())
+    return _wiki_slug_for_change(domain, text) == slug or tail.replace("-", " ") in " ".join(terms)
+
+
+def _wiki_latency_class(pages: int, tokens: int) -> str:
+    if pages <= 5 and tokens < 20_000:
+        return "quick"
+    if pages <= 20 and tokens < 80_000:
+        return "medium"
+    return "slow"
+
+
+async def preview_wiki_rebuild(
+    settings: KnowledgeSettings,
+    db: KnowledgeDB,
+    *,
+    domain: str | None = None,
+    entity_slug: str | None = None,
+    force_full: bool = False,
+) -> dict[str, Any]:
+    clean_domain = domain.strip() if domain else None
+    clean_entity = entity_slug.strip() if entity_slug else None
+    if clean_entity:
+        if "/" not in clean_entity:
+            return {"success": False, "error": "entity_slug must use '<domain>/<slug>'"}
+        entity_domain = clean_entity.split("/", 1)[0]
+        if clean_domain and clean_domain != entity_domain:
+            return {"success": False, "error": "domain must match entity_slug domain"}
+        clean_domain = entity_domain
+
+    since = "1970-01-01T00:00:00Z" if force_full else await db.wiki_state_get(
+        "last_wiki_run", "1970-01-01T00:00:00Z"
+    )
+    quiet_after = (datetime.now(UTC) - WIKI_REBUILD_QUIET_WINDOW).isoformat()
+    inputs = await db.wiki_rebuild_inputs(
+        since=since or "1970-01-01T00:00:00Z",
+        domain=clean_domain,
+        force_full=force_full,
+        quiet_after=quiet_after,
+    )
+    entities: dict[str, dict[str, Any]] = {}
+
+    def ensure_entity(slug: str, item_domain: str) -> dict[str, Any]:
+        return entities.setdefault(slug, {
+            "slug": slug,
+            "domain": item_domain,
+            "title": _wiki_title_from_slug(slug),
+            "fact_count": 0,
+            "source_count": 0,
+            "fact_keys": [],
+            "source_ids": [],
+        })
+
+    for fact in inputs["facts"]:
+        item_domain = str(fact["domain"])
+        text = str(fact["key"])
+        if clean_entity and not _wiki_row_matches_slug(clean_entity, item_domain, text):
+            continue
+        slug = clean_entity or _wiki_slug_for_change(item_domain, text)
+        entity = ensure_entity(slug, item_domain)
+        entity["fact_count"] += 1
+        entity["fact_keys"].append(text)
+
+    for source in inputs["sources"]:
+        item_domain = str(source["domain"])
+        text = str(source.get("filename") or source["id"])
+        if clean_entity and not _wiki_row_matches_slug(clean_entity, item_domain, text):
+            continue
+        slug = clean_entity or _wiki_slug_for_change(item_domain, text)
+        entity = ensure_entity(slug, item_domain)
+        entity["source_count"] += 1
+        entity["source_ids"].append(source["id"])
+
+    if clean_entity:
+        page = await db.wiki_get(clean_entity)
+        entity = ensure_entity(clean_entity, clean_domain or clean_entity.split("/", 1)[0])
+        if page:
+            entity["title"] = page["title"]
+    elif force_full:
+        for page in await db.wiki_list(domain=clean_domain, status="all", limit=200):
+            if page["kind"] != "index":
+                ensure_entity(str(page["slug"]), str(page["domain"]))["title"] = page["title"]
+
+    changed_entities = sorted(entities.values(), key=lambda item: item["slug"])
+    entity_pages = len(changed_entities)
+    index_pages = len({item["domain"] for item in changed_entities}) if entity_pages else 0
+    token_estimate = sum(
+        1_200 + item["fact_count"] * 180 + item["source_count"] * 650
+        for item in changed_entities
+    ) + index_pages * 500
+    estimated_pages = entity_pages + index_pages
+    return {
+        "success": True,
+        "dry_run": True,
+        "writes_performed": False,
+        "scope": {
+            "domain": clean_domain,
+            "entity_slug": clean_entity,
+            "force_full": force_full,
+            "since": since,
+            "quiet_window_hours": WIKI_REBUILD_QUIET_WINDOW.total_seconds() / 3600,
+        },
+        "changed_entities": changed_entities,
+        "estimated_entity_pages": entity_pages,
+        "estimated_index_pages": index_pages,
+        "estimated_pages": estimated_pages,
+        "token_estimate": token_estimate,
+        "estimated_cost": {
+            "currency": "USD",
+            "low": None,
+            "high": None,
+            "note": "model pricing is not configured; use token_estimate for cost planning",
+        },
+        "latency_class": _wiki_latency_class(estimated_pages, token_estimate),
+        "model": settings.extraction_model,
+    }
 
 SUPPORTED_CURATION_ACTIONS = {
     "archive_domain",
@@ -3780,6 +3983,30 @@ async def knowledge_wiki_set_status(
     if notes:
         result["notes"] = notes
     return result
+
+
+@mcp.tool("knowledge_wiki_rebuild")
+@logged_tool(log)
+async def knowledge_wiki_rebuild(
+    domain: str | None = None,
+    entity_slug: str | None = None,
+    force_full: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Estimate a wiki rebuild. Real rebuild writes arrive in the next phase."""
+    settings, _, _, _, db = _require_ready()
+    if not dry_run:
+        return {
+            "success": False,
+            "error": "real wiki rebuilds are not implemented yet; call with dry_run=True",
+        }
+    return await preview_wiki_rebuild(
+        settings,
+        db,
+        domain=domain,
+        entity_slug=entity_slug,
+        force_full=force_full,
+    )
 
 
 # ---------------------------------------------------------------------------
