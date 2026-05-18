@@ -602,6 +602,45 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
         await db.close()
 
 
+async def test_wiki_rebuild_manual_run_requires_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import servers.knowledge as knowledge
+
+    db = KnowledgeDB(tmp_path / "wiki_rebuild_confirmation.db")
+    await db.initialize()
+    try:
+        await db.domain_create("family", "family", [])
+        await db.fact_set("family", "dad_heart_history", "stable", origin_type="manual")
+
+        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(knowledge, "_settings", SimpleNamespace(extraction_model="test-model"))
+        monkeypatch.setattr(knowledge, "_embeddings", object())
+        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
+        monkeypatch.setattr(knowledge, "_vectors", object())
+        monkeypatch.setattr(knowledge, "_db", db)
+
+        rebuild_tool = (
+            knowledge.knowledge_wiki_rebuild.fn
+            if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
+            else knowledge.knowledge_wiki_rebuild
+        )
+        result = await rebuild_tool(entity_slug="family/dad")
+
+        assert result["success"] is False
+        assert result["requires_confirmation"] is True
+        assert result["writes_performed"] is False
+        assert result["target"] == "family/dad"
+        assert result["estimated_pages"] == 2
+
+        assert db._conn is not None
+        cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_rebuild_runs")
+        assert (await cursor.fetchone())[0] == 0
+    finally:
+        await db.close()
+
+
 async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -706,7 +745,7 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
             if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
             else knowledge.knowledge_wiki_rebuild
         )
-        result = await rebuild_tool(entity_slug="family/dad")
+        result = await rebuild_tool(entity_slug="family/dad", confirmed=True)
 
         assert result["success"] is True
         assert result["writes_performed"] is True
@@ -794,7 +833,7 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
             if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
             else knowledge.knowledge_wiki_rebuild
         )
-        result = await rebuild_tool(entity_slug="tech/framework-13")
+        result = await rebuild_tool(entity_slug="tech/framework-13", confirmed=True)
 
         assert result["success"] is True
         page = await db.wiki_get("tech/framework-13")
@@ -903,6 +942,7 @@ async def test_search_knowledge_returns_ids_truncates_and_searches_facts(tmp_pat
     assert vectors.call["domains"] == ["health", "finance", "core"]
     assert response["searched_domains"] == ["health", "finance", "core"]
     assert response["results"] == [{
+        "result_type": "chunk",
         "content": "abcd\u2026",
         "domain": "health",
         "source_id": "source-1",
@@ -912,5 +952,131 @@ async def test_search_knowledge_returns_ids_truncates_and_searches_facts(tmp_pat
         "chunk_index": 2,
         "similarity": 0.8765,
     }]
+    assert response["route"] == "synthesis"
+    assert response["wiki_count"] == 0
+    assert response["chunk_count"] == 1
     assert response["fact_count"] == 1
     assert response["facts"][0]["key"] == "ldl_2024_12"
+
+
+async def test_search_knowledge_routes_synthesis_to_active_wiki(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_search.db")
+    await db.initialize()
+    await db.domain_create("family", "family", [])
+    try:
+        await db.wiki_upsert_page(
+            slug="family/dad",
+            domain="family",
+            title="Dad",
+            kind="entity",
+            status="active",
+            body_md="Dad heart history overview.",
+            frontmatter={
+                "schema_version": 1,
+                "slug": "family/dad",
+                "title": "Dad",
+                "kind": "entity",
+                "domain": "family",
+                "aliases": ["Dad"],
+            },
+            sources=[],
+            fact_count=1,
+        )
+        await db.wiki_upsert_page(
+            slug="family/dad-candidate",
+            domain="family",
+            title="Candidate Dad",
+            kind="entity",
+            status="candidate",
+            body_md="Dad heart history candidate.",
+            frontmatter={},
+            sources=[],
+            fact_count=1,
+        )
+
+        class FakeEmbeddings:
+            async def embed(self, query: str) -> list[float]:
+                return [0.1]
+
+        class FakeSparseEncoder:
+            def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+                return [1], [1.0]
+
+        class FakeVectors:
+            async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+                return [SimpleNamespace(
+                    id="chunk-dad",
+                    score=0.5,
+                    payload={
+                        "content": "Dad source chunk.",
+                        "domain": "family",
+                        "source_id": "source-dad",
+                        "source_name": "dad.pdf",
+                        "source_type": "pdf",
+                        "chunk_index": 0,
+                    },
+                )]
+
+        response = await search_knowledge(
+            embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+            sparse_encoder=FakeSparseEncoder(),  # type: ignore[arg-type]
+            vectors=FakeVectors(),  # type: ignore[arg-type]
+            db=db,
+            query="dad heart history",
+            domain="family",
+            limit=5,
+        )
+    finally:
+        await db.close()
+
+    assert response["route"] == "synthesis"
+    assert [result["result_type"] for result in response["results"]] == ["wiki", "chunk"]
+    assert response["results"][0]["slug"] == "family/dad"
+    assert response["wiki_count"] == 1
+
+
+async def test_search_knowledge_routes_exact_fact_before_chunks(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "fact_route.db")
+    await db.initialize()
+    await db.domain_create("health", "health", [])
+    await db.fact_set("health", "dentist", "Dr. Smith", source="manual")
+    try:
+        class FakeEmbeddings:
+            async def embed(self, query: str) -> list[float]:
+                return [0.1]
+
+        class FakeSparseEncoder:
+            def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+                return [], []
+
+        class FakeVectors:
+            async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+                return [SimpleNamespace(
+                    id="chunk-dentist",
+                    score=0.4,
+                    payload={
+                        "content": "A chunk about dental care.",
+                        "domain": "health",
+                        "source_id": "source-dentist",
+                        "source_name": "dentist.md",
+                        "source_type": "note",
+                        "chunk_index": 0,
+                    },
+                )]
+
+        response = await search_knowledge(
+            embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+            sparse_encoder=FakeSparseEncoder(),  # type: ignore[arg-type]
+            vectors=FakeVectors(),  # type: ignore[arg-type]
+            db=db,
+            query="What is my dentist?",
+            domain="health",
+            limit=5,
+        )
+    finally:
+        await db.close()
+
+    assert response["route"] == "fact"
+    assert response["results"][0]["result_type"] == "fact"
+    assert response["results"][0]["key"] == "dentist"
+    assert response["results"][1]["result_type"] == "chunk"

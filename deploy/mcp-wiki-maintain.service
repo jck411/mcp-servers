@@ -1,0 +1,20 @@
+[Unit]
+Description=Knowledge wiki rebuild
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mcp
+Group=mcp
+WorkingDirectory=/opt/mcp-servers
+EnvironmentFile=/opt/mcp-servers/.env
+ExecStart=/opt/mcp-servers/.venv/bin/python -m maintain_wiki
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-wiki-maintain
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data /opt/mcp-servers/knowledge
+PrivateTmp=true

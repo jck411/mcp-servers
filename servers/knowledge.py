@@ -1056,6 +1056,61 @@ class KnowledgeDB:
         )
         return [dict(row) for row in await cursor.fetchall()]
 
+    async def wiki_search(
+        self,
+        domains: list[str],
+        query: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search active wiki pages with a lightweight local ranker."""
+        assert self._conn is not None
+        terms = search_fact_keywords(query)
+        if not terms:
+            return []
+        conditions = ["status = 'active'"]
+        params: list[Any] = []
+        if domains:
+            placeholders = ",".join("?" for _ in domains)
+            conditions.append(f"domain IN ({placeholders})")
+            params.extend(domains)
+
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {self._WIKI_PAGE_COLUMNS}
+            FROM wiki_pages
+            WHERE {' AND '.join(conditions)}
+            ORDER BY updated_at DESC
+            LIMIT 500
+            """,  # noqa: S608
+            params,
+        )
+        ranked = []
+        phrase = query.lower().strip()
+        for row in await cursor.fetchall():
+            page = self._decode_wiki_page_row(row)
+            frontmatter = page.get("frontmatter") or {}
+            aliases = " ".join(str(a) for a in frontmatter.get("aliases") or [])
+            title_text = f"{page['slug']} {page['title']} {aliases}".lower()
+            body_text = str(page.get("body_md") or "").lower()
+            score = 0
+            if phrase and phrase in title_text:
+                score += 30
+            if phrase and phrase in body_text:
+                score += 6
+            for term in terms:
+                if term in title_text:
+                    score += 10
+                if term in body_text:
+                    score += 1
+            if page["kind"] == "index":
+                score -= 3
+            if score > 0:
+                page["score"] = score
+                ranked.append(page)
+        ranked.sort(key=lambda page: (-int(page["score"]), str(page["slug"])))
+        return ranked[:max(1, min(limit, 20))]
+
     async def wiki_set_status(self, slug: str, status: str) -> bool:
         assert self._conn is not None
         cursor = await self._conn.execute(
@@ -3494,6 +3549,10 @@ async def rebuild_wiki(
         await db.wiki_rebuild_run_finish(
             run_id, status="success", touched_slugs=touched, token_estimate=final_tokens,
         )
+        log.info(
+            "wiki_rebuild_success run_id=%s pages=%s tokens=%s touched=%s",
+            run_id, len(touched), final_tokens, touched,
+        )
         return {
             "success": True,
             "dry_run": False,
@@ -3515,6 +3574,7 @@ async def rebuild_wiki(
             token_estimate=final_tokens,
             error_summary=str(exc)[:500],
         )
+        log.exception("wiki_rebuild_failed run_id=%s touched=%s", run_id, touched)
         return {
             "success": False,
             "error": f"wiki rebuild failed: {exc}",
@@ -3847,9 +3907,44 @@ async def resolve_search_domains(
     return result
 
 
+SEARCH_STOPWORDS = frozenset({
+    "about", "and", "are", "can", "current", "did", "does", "for", "from", "give",
+    "have", "how", "is", "latest", "me", "my", "of", "on", "show", "tell", "the",
+    "to", "was", "what", "when", "where", "which", "who", "with",
+})
+FACT_QUERY_HINTS = frozenset({
+    "account", "address", "birthday", "date", "dentist", "doctor", "dose", "email",
+    "id", "label", "med", "medication", "number", "phone", "preference", "rate",
+})
+EVIDENCE_QUERY_HINTS = frozenset({
+    "citation", "cite", "conflict", "contradict", "disagree", "document", "evidence",
+    "original", "pdf", "proof", "source", "stale", "upload",
+})
+
+
 def search_fact_keywords(query: str) -> list[str]:
     """Extract fact-search keywords from a free-form search query."""
-    return re.findall(r"\b\w{2,}\b", query.lower())
+    return [
+        term for term in re.findall(r"\b\w{2,}\b", query.lower())
+        if term not in SEARCH_STOPWORDS
+    ]
+
+
+def classify_search_route(query: str, facts: list[dict[str, Any]]) -> str:
+    """Pick the result ordering for facts, wiki pages, and source chunks."""
+    terms = set(search_fact_keywords(query))
+    lowered = query.lower()
+    if terms & EVIDENCE_QUERY_HINTS or re.search(r"\b(where did|show .*source)", lowered):
+        return "evidence"
+    if facts and (
+        terms & FACT_QUERY_HINTS
+        or re.search(
+            r"\b(what'?s|what is|who is|when is|where is|which is|how many|how much)\b",
+            lowered,
+        )
+    ):
+        return "fact"
+    return "synthesis"
 
 
 async def search_knowledge(
@@ -3868,6 +3963,13 @@ async def search_knowledge(
 ) -> dict[str, Any]:
     """Run the shared Knowledge search path used by MCP and REST."""
     resolved_domains = await resolve_search_domains(db, domain, domains)
+    keywords = search_fact_keywords(query)
+    facts = (
+        await db.facts_search(resolved_domains, keywords)
+        if include_facts and keywords else []
+    )
+    route = classify_search_route(query, facts)
+    wiki_matches = await db.wiki_search(resolved_domains, query, limit=min(limit, 5))
 
     query_embedding = await embeddings.embed(query)
     sparse_query = sparse_encoder.encode_query(query)
@@ -3880,13 +3982,14 @@ async def search_knowledge(
         min_score=min_similarity,
     )
 
-    formatted = []
+    chunk_results = []
     for r in results:
         p = r.payload or {}
         content = str(p.get("content", ""))
         if max_chars is not None and max_chars > 0 and len(content) > max_chars:
             content = content[:max_chars] + "…"
-        formatted.append({
+        chunk_results.append({
+            "result_type": "chunk",
             "content": content,
             "domain": p.get("domain", ""),
             "source_id": p.get("source_id", ""),
@@ -3897,17 +4000,67 @@ async def search_knowledge(
             "similarity": round(r.score, 4),
         })
 
+    fact_results = [{
+        "result_type": "fact",
+        "content": f"{fact['key']}: {fact['value']}",
+        "domain": fact["domain"],
+        "source_id": "",
+        "source_name": fact.get("source") or "",
+        "source_type": "fact",
+        "chunk_id": f"{fact['domain']}/{fact['key']}",
+        "chunk_index": 0,
+        "similarity": 1.0,
+        "key": fact["key"],
+        "value": fact["value"],
+        "origin_type": fact.get("origin_type"),
+        "origin_ref": fact.get("origin_ref"),
+        "last_confirmed_at": fact.get("last_confirmed_at"),
+    } for fact in facts]
+    wiki_results = []
+    for page in wiki_matches:
+        content = str(page.get("body_md") or "")
+        if max_chars is not None and max_chars > 0 and len(content) > max_chars:
+            content = content[:max_chars] + "…"
+        wiki_results.append({
+            "result_type": "wiki",
+            "content": content,
+            "domain": page["domain"],
+            "source_id": "",
+            "source_name": page["title"],
+            "source_type": "wiki_page",
+            "chunk_id": page["slug"],
+            "chunk_index": 0,
+            "similarity": round(float(page.get("score") or 0), 4),
+            "slug": page["slug"],
+            "title": page["title"],
+            "kind": page["kind"],
+            "status": page["status"],
+            "frontmatter": page.get("frontmatter") or {},
+        })
+    if route == "fact":
+        ordered_results = [
+            *fact_results,
+            *(wiki_results if not fact_results else []),
+            *chunk_results,
+        ]
+    elif route == "evidence":
+        ordered_results = [*chunk_results, *wiki_results]
+    else:
+        ordered_results = [*wiki_results, *chunk_results]
+    formatted = ordered_results[:max(1, limit)]
+
     response: dict[str, Any] = {
         "success": True,
         "query": query,
+        "route": route,
         "searched_domains": resolved_domains,
         "count": len(formatted),
         "results": formatted,
+        "wiki_count": len(wiki_results),
+        "chunk_count": len(chunk_results),
     }
 
     if include_facts:
-        keywords = search_fact_keywords(query)
-        facts = await db.facts_search(resolved_domains, keywords) if keywords else []
         response["facts"] = facts
         response["fact_count"] = len(facts)
 
@@ -4604,13 +4757,36 @@ async def knowledge_wiki_rebuild(
     entity_slug: str | None = None,
     force_full: bool = False,
     dry_run: bool = False,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Estimate or run a wiki rebuild."""
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-    if dry_run:
-        return await preview_wiki_rebuild(
-            settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
-        )
+    preview = await preview_wiki_rebuild(
+        settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
+    )
+    if dry_run or not preview.get("success"):
+        return preview
+    if not confirmed:
+        scope = preview["scope"]
+        target = scope["entity_slug"] or scope["domain"] or "full wiki"
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "writes_performed": False,
+            "confirmation": (
+                "Manual wiki rebuilds write pages and run rows. Ask Jack first unless he "
+                "explicitly requested this rebuild, then call again with confirmed=true."
+            ),
+            "scope": scope,
+            "target": target,
+            "estimated_pages": preview["estimated_pages"],
+            "estimated_entity_pages": preview["estimated_entity_pages"],
+            "estimated_index_pages": preview["estimated_index_pages"],
+            "token_estimate": preview["token_estimate"],
+            "estimated_cost": preview["estimated_cost"],
+            "latency_class": preview["latency_class"],
+            "changed_entities": preview["changed_entities"],
+        }
     return await rebuild_wiki(
         settings, embeddings, sparse_encoder, vectors, db,
         domain=domain, entity_slug=entity_slug, force_full=force_full,
