@@ -2,7 +2,7 @@
 Description=Run Knowledge wiki rebuild nightly
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 03:00:00 America/New_York
 Persistent=true
 
 [Install]
