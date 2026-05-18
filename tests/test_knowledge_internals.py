@@ -8,6 +8,7 @@ text-ingest input validator.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -597,7 +598,208 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
 
         cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_rebuild_runs")
         assert (await cursor.fetchone())[0] == 0
-        assert (await rebuild_tool(dry_run=False))["success"] is False
+    finally:
+        await db.close()
+
+
+async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import servers.knowledge as knowledge
+
+    db = KnowledgeDB(tmp_path / "wiki_rebuild_real.db")
+    await db.initialize()
+    try:
+        assert db._conn is not None
+        await db.domain_create("family", "family", [])
+        now = datetime.now(UTC)
+        await db._conn.execute(
+            "UPDATE wiki_state SET value = ? WHERE key = 'last_wiki_run'",
+            ((now - timedelta(days=1)).isoformat(),),
+        )
+        await db.fact_set(
+            "family",
+            "dad_heart_history",
+            "stable",
+            origin_type="chat",
+            origin_ref="2026-05-16",
+        )
+        await db.source_add("source-dad", "family", "note", "Dad notes.md", "hash-dad", 1)
+
+        class FakeEmbeddings:
+            async def embed(self, query: str) -> list[float]:
+                return [0.1]
+
+        class FakeSparseEncoder:
+            def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+                return [1], [1.0]
+
+        class FakeVectors:
+            async def chunks_by_source(self, source_id: str, limit: int = 4) -> list[dict]:
+                return [{
+                    "id": "chunk-source",
+                    "domain": "family",
+                    "source_id": source_id,
+                    "source_name": "Dad notes.md",
+                    "chunk_index": 0,
+                    "content": "Dad heart history notes.",
+                }]
+
+            async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+                return [SimpleNamespace(
+                    id="chunk-search",
+                    score=0.9,
+                    payload={
+                        "id": "chunk-search",
+                        "domain": "family",
+                        "source_id": "source-dad",
+                        "source_name": "Dad notes.md",
+                        "chunk_index": 1,
+                        "content": "Dad has stable heart history.",
+                    },
+                )]
+
+        async def fake_call_wiki_llm(settings, context):
+            assert context["facts"][0]["key"] == "dad_heart_history"
+            assert context["chunks"]
+            return {
+                "title": "Dad",
+                "kind": "entity",
+                "body_md": "Dad overview.\n\n## Known Facts\n- Heart history is stable.",
+                "frontmatter": {
+                    "entity_type": "person",
+                    "aliases": ["Dad"],
+                    "related_slugs": [],
+                },
+                "sources": [
+                    {
+                        "source_id": "source-dad",
+                        "chat_date": None,
+                        "contribution": "heart history note",
+                    },
+                    {
+                        "source_id": None,
+                        "chat_date": "2026-05-16",
+                        "contribution": "chat confirmation",
+                    },
+                ],
+                "confidence": "high",
+                "duplicate_concerns": [],
+                "split_concerns": [],
+            }, 321
+
+        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(
+            knowledge,
+            "_settings",
+            SimpleNamespace(extraction_model="test-model", openrouter_api_key="test"),
+        )
+        monkeypatch.setattr(knowledge, "_embeddings", FakeEmbeddings())
+        monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
+        monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
+        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(knowledge, "_call_wiki_llm", fake_call_wiki_llm)
+
+        rebuild_tool = (
+            knowledge.knowledge_wiki_rebuild.fn
+            if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
+            else knowledge.knowledge_wiki_rebuild
+        )
+        result = await rebuild_tool(entity_slug="family/dad")
+
+        assert result["success"] is True
+        assert result["writes_performed"] is True
+        assert result["touched_slugs"] == ["family/dad", "family/index"]
+
+        page = await db.wiki_get("family/dad")
+        assert page["status"] == "active"
+        assert page["frontmatter"]["source_ids"] == ["source-dad"]
+        assert page["frontmatter"]["chat_dates"] == ["2026-05-16"]
+        assert "## Sources" in page["body_md"]
+        assert {
+            (source["source_id"], source["chat_date"]) for source in page["sources"]
+        } == {("source-dad", None), (None, "2026-05-16")}
+
+        index = await db.wiki_get("family/index")
+        assert index["status"] == "active"
+        assert index["frontmatter"]["related_slugs"] == ["family/dad"]
+
+        cursor = await db._conn.execute(
+            "SELECT status, pages_touched, token_estimate, touched_slugs_json "
+            "FROM wiki_rebuild_runs"
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "success"
+        assert row["pages_touched"] == 2
+        assert row["token_estimate"] == 321
+        assert json.loads(row["touched_slugs_json"]) == ["family/dad", "family/index"]
+    finally:
+        await db.close()
+
+
+async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import servers.knowledge as knowledge
+
+    db = KnowledgeDB(tmp_path / "wiki_rebuild_candidate.db")
+    await db.initialize()
+    try:
+        await db.domain_create("tech", "tech", [])
+        await db.fact_set("tech", "framework_13_notes", "maybe relevant", origin_type="manual")
+
+        class FakeEmbeddings:
+            async def embed(self, query: str) -> list[float]:
+                return [0.1]
+
+        class FakeSparseEncoder:
+            def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+                return [], []
+
+        class FakeVectors:
+            async def chunks_by_source(self, source_id: str, limit: int = 4) -> list[dict]:
+                return []
+
+            async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+                return []
+
+        async def fake_call_wiki_llm(settings, context):
+            return {
+                "title": "Framework 13",
+                "kind": "entity",
+                "body_md": "Framework 13 notes are tentative.",
+                "frontmatter": {"entity_type": "device", "aliases": [], "related_slugs": []},
+                "sources": [],
+                "confidence": "low",
+                "duplicate_concerns": [],
+                "split_concerns": [],
+            }, 100
+
+        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(
+            knowledge,
+            "_settings",
+            SimpleNamespace(extraction_model="test-model", openrouter_api_key="test"),
+        )
+        monkeypatch.setattr(knowledge, "_embeddings", FakeEmbeddings())
+        monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
+        monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
+        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(knowledge, "_call_wiki_llm", fake_call_wiki_llm)
+
+        rebuild_tool = (
+            knowledge.knowledge_wiki_rebuild.fn
+            if hasattr(knowledge.knowledge_wiki_rebuild, "fn")
+            else knowledge.knowledge_wiki_rebuild
+        )
+        result = await rebuild_tool(entity_slug="tech/framework-13")
+
+        assert result["success"] is True
+        page = await db.wiki_get("tech/framework-13")
+        assert page["status"] == "candidate"
+        assert await db.wiki_list(status="active") == []
     finally:
         await db.close()
 

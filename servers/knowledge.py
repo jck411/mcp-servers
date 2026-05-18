@@ -1065,11 +1065,123 @@ class KnowledgeDB:
         await self._conn.commit()
         return cursor.rowcount > 0
 
+    async def wiki_upsert_page(
+        self,
+        *,
+        slug: str,
+        domain: str,
+        title: str,
+        kind: str,
+        status: str,
+        body_md: str,
+        frontmatter: dict[str, Any],
+        sources: list[dict[str, Any]],
+        fact_count: int,
+    ) -> None:
+        assert self._conn is not None
+        now = datetime.now(UTC).isoformat()
+        await self._conn.execute(
+            """
+            INSERT INTO wiki_pages
+                (slug, domain, title, kind, status, body_md, frontmatter_json,
+                 fact_count, source_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(slug) DO UPDATE SET
+                domain = excluded.domain,
+                title = excluded.title,
+                kind = excluded.kind,
+                status = excluded.status,
+                body_md = excluded.body_md,
+                frontmatter_json = excluded.frontmatter_json,
+                fact_count = excluded.fact_count,
+                source_count = excluded.source_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                slug, domain, title, kind, status, body_md,
+                json.dumps(frontmatter, sort_keys=True), fact_count, len(sources), now, now,
+            ),
+        )
+        await self._conn.execute("DELETE FROM wiki_page_sources WHERE page_slug = ?", (slug,))
+        seen: set[tuple[str, str]] = set()
+        rows = []
+        for source in sources:
+            source_id = str(source.get("source_id") or "").strip() or None
+            chat_date = str(source.get("chat_date") or "").strip() or None
+            key = (source_id or "", chat_date or "")
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            rows.append((
+                slug,
+                source_id,
+                chat_date,
+                str(source.get("contribution") or "cited evidence").strip()[:200],
+            ))
+        await self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO wiki_page_sources
+                (page_slug, source_id, chat_date, contribution)
+            VALUES (?, ?, ?, ?)
+            """,
+            rows,
+        )
+        await self._conn.commit()
+
     async def wiki_state_get(self, key: str, default: str | None = None) -> str | None:
         assert self._conn is not None
         cursor = await self._conn.execute("SELECT value FROM wiki_state WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return str(row["value"]) if row else default
+
+    async def wiki_state_set(self, key: str, value: str) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            """
+            INSERT INTO wiki_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        await self._conn.commit()
+
+    async def wiki_rebuild_run_start(
+        self, *, scope: dict[str, Any], token_estimate: int, model: str | None
+    ) -> int:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO wiki_rebuild_runs (status, scope_json, token_estimate, model)
+            VALUES ('running', ?, ?, ?)
+            """,
+            (json.dumps(scope, sort_keys=True), token_estimate, model),
+        )
+        await self._conn.commit()
+        return int(cursor.lastrowid)
+
+    async def wiki_rebuild_run_finish(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        touched_slugs: list[str],
+        token_estimate: int,
+        error_summary: str | None = None,
+    ) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            """
+            UPDATE wiki_rebuild_runs
+            SET finished_at = ?, status = ?, touched_slugs_json = ?,
+                pages_touched = ?, token_estimate = ?, error_summary = ?
+            WHERE id = ?
+            """,
+            (
+                datetime.now(UTC).isoformat(), status, json.dumps(touched_slugs),
+                len(touched_slugs), token_estimate, error_summary, run_id,
+            ),
+        )
+        await self._conn.commit()
 
     async def wiki_rebuild_inputs(
         self,
@@ -1750,6 +1862,21 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- Output only valid JSON. No markdown fences, no commentary.\n"
     "Output format: {\"facts\": {\"key\": \"value\", ...}, \"caption\": null, \"warnings\": []}"
 )
+
+
+def _decode_llm_json_object(raw_output: str) -> dict[str, Any]:
+    clean = raw_output.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+        clean = re.sub(r"\n?```$", "", clean.rstrip())
+    if not clean.startswith("{"):
+        match = re.search(r"\{[\s\S]*\}", clean)
+        if match:
+            clean = match.group(0)
+    decoded, _ = json.JSONDecoder().raw_decode(clean)
+    if not isinstance(decoded, dict):
+        raise ValueError("JSON root must be an object")
+    return decoded
 
 
 async def _vision_ocr_bytes(
@@ -2619,20 +2746,9 @@ async def extract_source_facts_single_shot(
     pipeline.append(llm_step)
 
     # --- Step 3: parse JSON ---
-    clean = raw_output.strip()
-    if clean.startswith("```"):
-        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
-        clean = re.sub(r"\n?```$", "", clean.rstrip())
-    if not clean.startswith("{"):
-        match = re.search(r"\{[\s\S]*\}", clean)
-        if match:
-            clean = match.group(0)
     parse_step: dict[str, Any] = {"step": "parse_json", "model": None}
     try:
-        extracted, _ = json.JSONDecoder().raw_decode(clean)
-        if not isinstance(extracted, dict):
-            raise ValueError("JSON root must be an object")
-
+        extracted = _decode_llm_json_object(raw_output)
         raw_caption = extracted.get("caption")
         caption: str | None = str(raw_caption) if raw_caption not in (None, "") else None
         raw_warnings = extracted.get("warnings") or []
@@ -2772,6 +2888,13 @@ WIKI_REBUILD_STOPWORDS = frozenset({
     "latest", "log", "manual", "my", "note", "notes", "of", "pdf", "record", "records",
     "report", "source", "summary", "the", "upload",
 })
+WIKI_PAGE_SYSTEM_PROMPT = (
+    "You maintain concise personal knowledge wiki pages. Return only the forced "
+    "tool call. Write traceable markdown from the supplied facts and chunks only. "
+    "Do not invent missing details. Use Open Questions for gaps or conflicts. "
+    "Every concrete claim should be covered by a source_id or chat_date citation. "
+    "Flag duplicate or split concerns instead of resolving identity silently."
+)
 
 
 def _wiki_slug_for_change(domain: str, text: str) -> str:
@@ -2910,6 +3033,495 @@ async def preview_wiki_rebuild(
         "latency_class": _wiki_latency_class(estimated_pages, token_estimate),
         "model": settings.extraction_model,
     }
+
+
+def _wiki_slug_terms(slug: str) -> list[str]:
+    tail = slug.rsplit("/", 1)[-1]
+    return [
+        term for term in re.findall(r"[a-z0-9]+", tail.lower())
+        if term not in WIKI_REBUILD_STOPWORDS
+    ]
+
+
+def _wiki_iso_date(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
+
+
+def _wiki_fact_source_id(fact: dict[str, Any]) -> str | None:
+    origin_ref = str(fact.get("origin_ref") or "").strip()
+    if origin_ref and not _wiki_iso_date(origin_ref):
+        return origin_ref
+    source = str(fact.get("source") or "")
+    return source.split(":", 1)[1].strip() if source.startswith("extracted:") else None
+
+
+def _wiki_source_rows(
+    facts: list[dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add(
+        *,
+        source_id: str | None = None,
+        chat_date: str | None = None,
+        contribution: str = "cited evidence",
+    ) -> None:
+        key = (source_id or "", chat_date or "")
+        if any(key) and key not in rows:
+            rows[key] = {
+                "source_id": source_id,
+                "chat_date": chat_date,
+                "contribution": contribution[:200],
+            }
+
+    for fact in facts:
+        contribution = f"fact: {fact.get('key')}"
+        if fact.get("origin_type") == "chat" and (
+            chat_date := _wiki_iso_date(fact.get("origin_ref"))
+        ):
+            add(chat_date=chat_date, contribution=contribution)
+        elif (source_id := _wiki_fact_source_id(fact)) and source_id in sources:
+            add(source_id=source_id, contribution=contribution)
+
+    for source_id, source in sources.items():
+        add(
+            source_id=source_id,
+            contribution=str(source.get("filename") or source.get("source_type") or "source"),
+        )
+
+    for chunk in chunks:
+        source_id = str(chunk.get("source_id") or "").strip()
+        if source_id:
+            add(
+                source_id=source_id,
+                contribution=str(chunk.get("source_name") or "matched source chunk"),
+            )
+    return list(rows.values())
+
+
+def _wiki_merge_source_rows(
+    rows: list[dict[str, Any]],
+    *,
+    allowed_source_ids: set[str],
+    allowed_chat_dates: set[str],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        source_id = str(row.get("source_id") or "").strip() or None
+        chat_date = _wiki_iso_date(row.get("chat_date"))
+        if source_id and source_id not in allowed_source_ids:
+            continue
+        if chat_date and chat_date not in allowed_chat_dates:
+            continue
+        key = (source_id or "", chat_date or "")
+        if any(key) and key not in merged:
+            merged[key] = {
+                "source_id": source_id,
+                "chat_date": chat_date,
+                "contribution": str(row.get("contribution") or "cited evidence").strip()[:200],
+            }
+    return list(merged.values())
+
+
+def _wiki_citation_lines(
+    rows: list[dict[str, Any]], sources: dict[str, dict[str, Any]]
+) -> list[str]:
+    lines = []
+    for row in rows:
+        if row.get("source_id"):
+            source_id = str(row["source_id"])
+            title = sources.get(source_id, {}).get("filename")
+            label = f"Source: {source_id}" + (f" - {title}" if title else "")
+        else:
+            label = f"Chat: {row.get('chat_date')}"
+        contribution = str(row.get("contribution") or "").strip()
+        lines.append(label + (f" ({contribution})" if contribution else ""))
+    return lines
+
+
+def _wiki_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return [str(value)] if value else []
+
+
+def _wiki_generated_page(
+    raw_page: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    slug = str(context["slug"])
+    domain = str(context["domain"])
+    existing = context.get("existing_page") or {}
+    title = str(raw_page.get("title") or context["title"]).strip()[:200]
+    kind = str(raw_page.get("kind") or "entity").strip()
+    kind = kind if kind in WIKI_PAGE_KINDS - {"index"} else "entity"
+    raw_frontmatter = raw_page.get("frontmatter")
+    frontmatter = dict(raw_frontmatter) if isinstance(raw_frontmatter, dict) else {}
+    confidence = str(
+        raw_page.get("confidence") or frontmatter.get("confidence") or "medium"
+    ).lower()
+    confidence = confidence if confidence in {"high", "medium", "low"} else "medium"
+
+    default_rows = _wiki_source_rows(context["facts"], context["sources"], context["chunks"])
+    llm_rows = raw_page.get("sources") if isinstance(raw_page.get("sources"), list) else []
+    source_rows = _wiki_merge_source_rows(
+        [*llm_rows, *default_rows],
+        allowed_source_ids=set(context["sources"]) | {
+            str(c.get("source_id")) for c in context["chunks"] if c.get("source_id")
+        },
+        allowed_chat_dates={
+            date for f in context["facts"] if (date := _wiki_iso_date(f.get("origin_ref")))
+        },
+    )
+    source_ids = sorted({str(row["source_id"]) for row in source_rows if row.get("source_id")})
+    chat_dates = sorted({str(row["chat_date"]) for row in source_rows if row.get("chat_date")})
+
+    body = str(raw_page.get("body_md") or "").strip()
+    if not body:
+        body = f"{title} is tracked as a {domain} wiki page."
+    if source_rows and "## Sources" not in body:
+        body += "\n\n## Sources\n" + "\n".join(
+            f"- {line}" for line in _wiki_citation_lines(source_rows, context["sources"])
+        )
+
+    frontmatter.update({
+        "schema_version": 1,
+        "slug": slug,
+        "title": title,
+        "kind": kind,
+        "domain": domain,
+        "entity_type": str(frontmatter.get("entity_type") or "unknown"),
+        "aliases": _wiki_str_list(frontmatter.get("aliases")),
+        "related_slugs": _wiki_str_list(frontmatter.get("related_slugs")),
+        "source_ids": source_ids,
+        "chat_dates": chat_dates,
+        "confidence": confidence,
+        "orphan": bool(frontmatter.get("orphan", False)),
+    })
+
+    concerns = {
+        "merge_candidate": _wiki_str_list(raw_page.get("duplicate_concerns")),
+        "split_candidate": _wiki_str_list(raw_page.get("split_concerns")),
+    }
+    status = existing.get("status")
+    if status not in WIKI_PAGE_STATUSES:
+        status = (
+            "active"
+            if confidence == "high" and source_rows and not any(concerns.values())
+            else "candidate"
+        )
+    return {
+        "slug": slug,
+        "domain": domain,
+        "title": title,
+        "kind": kind,
+        "status": status,
+        "body_md": body,
+        "frontmatter": frontmatter,
+        "sources": source_rows,
+        "fact_count": len(context["facts"]),
+        "concerns": concerns,
+    }
+
+
+async def _wiki_context(
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    entity: dict[str, Any],
+) -> dict[str, Any]:
+    slug = str(entity["slug"])
+    domain = str(entity["domain"])
+    title = str(entity.get("title") or _wiki_title_from_slug(slug))
+    fact_keys = set(entity.get("fact_keys") or [])
+    terms = _wiki_slug_terms(slug)
+    facts = [
+        fact for fact in await db.facts_list(domain)
+        if fact.get("key") in fact_keys
+        or any(term in f"{fact.get('key', '')} {fact.get('value', '')}".lower() for term in terms)
+    ]
+
+    chunks: list[dict[str, Any]] = []
+    for source_id in entity.get("source_ids") or []:
+        with contextlib.suppress(Exception):
+            chunks.extend(await vectors.chunks_by_source(str(source_id), limit=4))
+
+    with contextlib.suppress(Exception):
+        query = " ".join([title, *terms])
+        query_embedding = await embeddings.embed(query)
+        sparse_query = sparse_encoder.encode_query(query)
+        for point in await vectors.search(
+            query_embedding,
+            sparse_query=sparse_query,
+            domains=[domain],
+            limit=8,
+            min_score=0.15,
+        ):
+            chunks.append(dict(point.payload or {}))
+
+    unique_chunks: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for chunk in chunks:
+        key = (
+            str(chunk.get("source_id") or ""),
+            int(chunk.get("chunk_index") or 0),
+            str(chunk.get("id") or ""),
+        )
+        if key not in unique_chunks:
+            copy = dict(chunk)
+            copy["content"] = str(copy.get("content") or "")[:1400]
+            unique_chunks[key] = copy
+
+    source_ids = set(entity.get("source_ids") or [])
+    source_ids.update(str(c.get("source_id")) for c in unique_chunks.values() if c.get("source_id"))
+    source_ids.update(sid for f in facts if (sid := _wiki_fact_source_id(f)))
+    sources = {}
+    for source_id in sorted(str(s) for s in source_ids if s):
+        source = await db.source_get(source_id)
+        if source:
+            sources[source_id] = source
+
+    return {
+        "slug": slug,
+        "domain": domain,
+        "title": title,
+        "facts": facts,
+        "chunks": list(unique_chunks.values())[:12],
+        "sources": sources,
+        "existing_page": await db.wiki_get(slug),
+    }
+
+
+async def _call_wiki_llm(
+    settings: KnowledgeSettings,
+    context: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    if not settings.extraction_model:
+        raise RuntimeError("KNOWLEDGE_EXTRACTION_MODEL not configured")
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "write_wiki_page",
+            "description": "Return one generated wiki page with citations and concerns.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["entity", "concept", "source_summary"]},
+                    "body_md": {"type": "string"},
+                    "frontmatter": {"type": "object"},
+                    "sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_id": {"type": ["string", "null"]},
+                                "chat_date": {"type": ["string", "null"]},
+                                "contribution": {"type": "string"},
+                            },
+                        },
+                    },
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "duplicate_concerns": {"type": "array", "items": {"type": "string"}},
+                    "split_concerns": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["title", "kind", "body_md", "frontmatter", "sources", "confidence"],
+            },
+        },
+    }
+    payload: dict[str, Any] = {
+        "model": settings.extraction_model,
+        "messages": [{
+            "role": "user",
+            "content": json.dumps({
+                "slug": context["slug"],
+                "domain": context["domain"],
+                "title": context["title"],
+                "facts": context["facts"],
+                "sources": list(context["sources"].values()),
+                "chunks": context["chunks"],
+                "existing_page": context["existing_page"],
+            }, default=str),
+        }],
+        "temperature": 0,
+        "max_tokens": 4096,
+        "tools": [tool],
+        "tool_choice": {"type": "function", "function": {"name": "write_wiki_page"}},
+    }
+    if "claude" in settings.extraction_model or "anthropic" in settings.extraction_model:
+        payload["system"] = [{
+            "type": "text",
+            "text": WIKI_PAGE_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    else:
+        payload["system"] = WIKI_PAGE_SYSTEM_PROMPT
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+    msg = data["choices"][0]["message"]
+    tool_calls = msg.get("tool_calls") or []
+    raw_output = (
+        tool_calls[0]["function"]["arguments"]
+        if tool_calls else (msg.get("content") or "").strip()
+    )
+    usage = data.get("usage") or {}
+    return _decode_llm_json_object(raw_output), int(usage.get("total_tokens") or 0)
+
+
+async def _queue_wiki_concerns(db: KnowledgeDB, page: dict[str, Any]) -> None:
+    for kind, concerns in page["concerns"].items():
+        if not concerns:
+            continue
+        await db.curation_upsert(
+            item_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"wiki:{kind}:{page['slug']}:{concerns}")),
+            kind=kind,
+            title=f"Review wiki identity: {page['title']}",
+            summary="\n".join(concerns),
+            source_refs=page["sources"],
+            proposed_actions=[{
+                "type": "flag_for_review",
+                "slug": page["slug"],
+                "concerns": concerns,
+            }],
+            risk="medium",
+            confidence=0.7,
+        )
+
+
+async def _rebuild_wiki_index(db: KnowledgeDB, domain: str) -> str:
+    pages = [
+        page for page in await db.wiki_list(domain=domain, status="active", limit=200)
+        if page["kind"] != "index"
+    ]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for page in pages:
+        grouped.setdefault(str(page["kind"]), []).append(page)
+    lines = [f"# {domain.replace('_', ' ').title()} Index"]
+    for kind, items in sorted(grouped.items()):
+        lines.extend(["", f"## {kind.replace('_', ' ').title()}"])
+        lines.extend(f"- `{item['slug']}` - {item['title']}" for item in items)
+    slug = f"{domain}/index"
+    await db.wiki_upsert_page(
+        slug=slug,
+        domain=domain,
+        title=f"{domain.replace('_', ' ').title()} Index",
+        kind="index",
+        status="active" if pages else "candidate",
+        body_md="\n".join(lines),
+        frontmatter={
+            "schema_version": 1,
+            "slug": slug,
+            "title": f"{domain.replace('_', ' ').title()} Index",
+            "kind": "index",
+            "domain": domain,
+            "entity_type": "index",
+            "aliases": [],
+            "related_slugs": [str(page["slug"]) for page in pages],
+            "source_ids": [],
+            "chat_dates": [],
+            "confidence": "high" if pages else "medium",
+            "orphan": False,
+        },
+        sources=[],
+        fact_count=0,
+    )
+    return slug
+
+
+async def rebuild_wiki(
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    *,
+    domain: str | None = None,
+    entity_slug: str | None = None,
+    force_full: bool = False,
+) -> dict[str, Any]:
+    started_at = datetime.now(UTC).isoformat()
+    preview = await preview_wiki_rebuild(
+        settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
+    )
+    if not preview["success"]:
+        return preview
+
+    run_id = await db.wiki_rebuild_run_start(
+        scope=preview["scope"],
+        token_estimate=preview["token_estimate"],
+        model=preview["model"],
+    )
+    touched: list[str] = []
+    usage_tokens = 0
+    try:
+        for entity in preview["changed_entities"]:
+            context = await _wiki_context(embeddings, sparse_encoder, vectors, db, entity)
+            raw_page, tokens = await _call_wiki_llm(settings, context)
+            usage_tokens += tokens
+            page = _wiki_generated_page(raw_page, context)
+            await db.wiki_upsert_page(
+                slug=page["slug"],
+                domain=page["domain"],
+                title=page["title"],
+                kind=page["kind"],
+                status=page["status"],
+                body_md=page["body_md"],
+                frontmatter=page["frontmatter"],
+                sources=page["sources"],
+                fact_count=page["fact_count"],
+            )
+            await _queue_wiki_concerns(db, page)
+            touched.append(page["slug"])
+
+        for touched_domain in sorted({str(item["domain"]) for item in preview["changed_entities"]}):
+            touched.append(await _rebuild_wiki_index(db, touched_domain))
+
+        await db.wiki_state_set("last_wiki_run", started_at)
+        final_tokens = usage_tokens or preview["token_estimate"]
+        await db.wiki_rebuild_run_finish(
+            run_id, status="success", touched_slugs=touched, token_estimate=final_tokens,
+        )
+        return {
+            "success": True,
+            "dry_run": False,
+            "writes_performed": True,
+            "run_id": run_id,
+            "scope": preview["scope"],
+            "changed_entities": preview["changed_entities"],
+            "pages_touched": len(touched),
+            "touched_slugs": touched,
+            "token_estimate": final_tokens,
+            "model": preview["model"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        final_tokens = usage_tokens or preview["token_estimate"]
+        await db.wiki_rebuild_run_finish(
+            run_id,
+            status="failed",
+            touched_slugs=touched,
+            token_estimate=final_tokens,
+            error_summary=str(exc)[:500],
+        )
+        return {
+            "success": False,
+            "error": f"wiki rebuild failed: {exc}",
+            "run_id": run_id,
+            "touched_slugs": touched,
+        }
+
 
 SUPPORTED_CURATION_ACTIONS = {
     "archive_domain",
@@ -3993,19 +4605,15 @@ async def knowledge_wiki_rebuild(
     force_full: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Estimate a wiki rebuild. Real rebuild writes arrive in the next phase."""
-    settings, _, _, _, db = _require_ready()
-    if not dry_run:
-        return {
-            "success": False,
-            "error": "real wiki rebuilds are not implemented yet; call with dry_run=True",
-        }
-    return await preview_wiki_rebuild(
-        settings,
-        db,
-        domain=domain,
-        entity_slug=entity_slug,
-        force_full=force_full,
+    """Estimate or run a wiki rebuild."""
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    if dry_run:
+        return await preview_wiki_rebuild(
+            settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
+        )
+    return await rebuild_wiki(
+        settings, embeddings, sparse_encoder, vectors, db,
+        domain=domain, entity_slug=entity_slug, force_full=force_full,
     )
 
 
