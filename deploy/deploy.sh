@@ -183,6 +183,7 @@ deploy_via() {
 
     banner "Deploying to CT ${LXC_MCP} via ${label}"
     _pct_exec "$ssh_host" "$run_cmd"
+    sleep 3
 
     banner "Refreshing backend discovery (CT ${LXC_BACKEND})"
     local refresh_output
