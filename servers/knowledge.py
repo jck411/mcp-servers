@@ -1341,6 +1341,7 @@ class KnowledgeDB:
                     WHEN excluded.status = 'pending' THEN NULL
                     ELSE curation_items.reviewed_at
                 END
+            WHERE curation_items.status = 'pending' OR excluded.status != 'pending'
             """,
             (
                 curation_id,

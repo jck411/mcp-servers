@@ -86,6 +86,29 @@ async def test_create_curation_queue_item_rejects_unknown_action(knowledge_db: K
     assert await knowledge_db.curation_list(status="pending") == []
 
 
+async def test_pending_upsert_does_not_reopen_reviewed_item(knowledge_db: KnowledgeDB):
+    await knowledge_db.curation_upsert(
+        kind="split_candidate",
+        title="Review schedule split",
+        summary="Original concern",
+        proposed_actions=[{"type": "flag_for_review"}],
+        item_id="reviewed-item",
+    )
+    assert await knowledge_db.curation_mark_status("reviewed-item", "rejected")
+
+    await knowledge_db.curation_upsert(
+        kind="split_candidate",
+        title="Review schedule split again",
+        summary="Nightly found the same concern again",
+        proposed_actions=[{"type": "flag_for_review"}],
+        item_id="reviewed-item",
+    )
+
+    item = await knowledge_db.curation_get("reviewed-item")
+    assert item["status"] == "rejected"
+    assert item["summary"] == "Original concern"
+
+
 async def test_apply_non_destructive_curation_item_sets_fact(knowledge_db: KnowledgeDB):
     await knowledge_db.curation_upsert(
         kind="conversation_distill",
