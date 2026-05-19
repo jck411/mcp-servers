@@ -6,14 +6,15 @@
 # composition, so we use EnvironmentFile=/opt/mcp-servers/.env.<instance>
 #
 # Usage:
-#   sudo ./deploy/setup-systemd.sh            # Install Knowledge services
-#   sudo ./deploy/setup-systemd.sh knowledge  # Install a specific service
+#   sudo ./deploy/setup-systemd.sh                           # Install services + disabled timer
+#   sudo ENABLE_NIGHTLY=1 ./deploy/setup-systemd.sh knowledge # Enable timer after smoke tests
 #
 # NOTE: Private/account/home-control servers live on LXC 117 (mcp-accounts).
 
 set -euo pipefail
 
 REPO_DIR="/opt/mcp-servers"
+ENABLE_NIGHTLY="${ENABLE_NIGHTLY:-0}"
 
 # Ensure dependencies are installed before starting servers
 echo "=== Syncing dependencies ==="
@@ -36,23 +37,11 @@ else
     SERVERS=("${DEFAULT_SERVERS[@]}")
 fi
 
-INSTALL_WIKI_TIMER=false
-if [[ $# -eq 0 ]]; then
-    INSTALL_WIKI_TIMER=true
-else
-    for server in "${SERVERS[@]}"; do
-        if [[ "$server" == "knowledge" ]]; then
-            INSTALL_WIKI_TIMER=true
-        fi
-    done
-fi
-
 echo "=== Installing systemd template ==="
 cp "${REPO_DIR}/deploy/mcp-server@.service" /etc/systemd/system/
-if [[ "$INSTALL_WIKI_TIMER" == true ]]; then
-    cp "${REPO_DIR}/deploy/mcp-wiki-maintain.service" /etc/systemd/system/
-    cp "${REPO_DIR}/deploy/mcp-wiki-maintain.timer" /etc/systemd/system/
-fi
+cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.service" /etc/systemd/system/
+cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.timer" /etc/systemd/system/
+chmod +x "${REPO_DIR}/deploy/backup.sh" "${REPO_DIR}/deploy/healthcheck.sh"
 systemctl daemon-reload
 
 echo "=== Creating per-server environment files ==="
@@ -78,13 +67,31 @@ for server in "${SERVERS[@]}"; do
     fi
 
     unit="mcp-server@${server}"
-    echo "  Enabling ${unit} (port ${port})..."
-    systemctl enable --now "$unit"
+    echo "  Enabling and restarting ${unit} (port ${port})..."
+    systemctl enable "$unit"
+    systemctl restart "$unit"
 done
-if [[ "$INSTALL_WIKI_TIMER" == true ]]; then
-    echo "  Enabling mcp-wiki-maintain.timer..."
-    systemctl enable --now mcp-wiki-maintain.timer
+systemctl disable --now mcp-wiki-maintain.timer 2>/dev/null || true
+if [[ "$ENABLE_NIGHTLY" == 1 ]]; then
+    echo "  Enabling mcp-knowledge-nightly.timer..."
+    systemctl enable --now mcp-knowledge-nightly.timer
+else
+    echo "  Installing mcp-knowledge-nightly.timer disabled until smoke tests pass..."
+    systemctl disable --now mcp-knowledge-nightly.timer 2>/dev/null || true
 fi
+
+echo ""
+echo "=== Removing legacy cron entries ==="
+tmp_cron="$(mktemp)"
+if crontab -l > "$tmp_cron" 2>/dev/null; then
+    grep -Ev '/opt/mcp-servers/deploy/(backup|healthcheck)\.sh|mcp-wiki-maintain' \
+        "$tmp_cron" > "${tmp_cron}.new" || true
+    crontab "${tmp_cron}.new"
+    echo "  Removed old backup/healthcheck/wiki cron entries"
+else
+    echo "  No root crontab found"
+fi
+rm -f "$tmp_cron" "${tmp_cron}.new"
 
 echo ""
 echo "=== Status ==="
@@ -97,14 +104,12 @@ for server in "${SERVERS[@]}"; do
         journalctl -u "$unit" -n 5 --no-pager 2>/dev/null || true
     fi
 done
-if [[ "$INSTALL_WIKI_TIMER" == true ]]; then
-    if systemctl is-active --quiet mcp-wiki-maintain.timer 2>/dev/null; then
-        echo "  ✅ mcp-wiki-maintain.timer — active"
-    else
-        echo "  ❌ mcp-wiki-maintain.timer — not active"
-        journalctl -u mcp-wiki-maintain.timer -n 5 --no-pager 2>/dev/null || true
-    fi
+if systemctl is-active --quiet mcp-knowledge-nightly.timer 2>/dev/null; then
+    echo "  ✅ mcp-knowledge-nightly.timer — active"
+else
+    echo "  mcp-knowledge-nightly.timer — installed, not active"
+    journalctl -u mcp-knowledge-nightly.timer -n 5 --no-pager 2>/dev/null || true
 fi
 
 echo ""
-echo "Done. Verify with: systemctl list-units 'mcp-server@*'; systemctl list-timers 'mcp-wiki-*'"
+echo "Done. Verify with: systemctl list-units 'mcp-server@*'; systemctl list-timers --all '*knowledge*'"
