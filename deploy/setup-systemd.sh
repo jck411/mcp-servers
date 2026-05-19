@@ -6,15 +6,15 @@
 # composition, so we use EnvironmentFile=/opt/mcp-servers/.env.<instance>
 #
 # Usage:
-#   sudo ./deploy/setup-systemd.sh                           # Install services + disabled timer
-#   sudo ENABLE_NIGHTLY=1 ./deploy/setup-systemd.sh knowledge # Enable timer after smoke tests
+#   sudo ./deploy/setup-systemd.sh                           # Install services + enabled timer
+#   sudo ENABLE_NIGHTLY=0 ./deploy/setup-systemd.sh knowledge # Install without starting nightly timer
 #
 # NOTE: Private/account/home-control servers live on LXC 117 (mcp-accounts).
 
 set -euo pipefail
 
 REPO_DIR="/opt/mcp-servers"
-ENABLE_NIGHTLY="${ENABLE_NIGHTLY:-0}"
+ENABLE_NIGHTLY="${ENABLE_NIGHTLY:-1}"
 
 # Ensure dependencies are installed before starting servers
 echo "=== Syncing dependencies ==="
@@ -76,7 +76,7 @@ if [[ "$ENABLE_NIGHTLY" == 1 ]]; then
     echo "  Enabling mcp-knowledge-nightly.timer..."
     systemctl enable --now mcp-knowledge-nightly.timer
 else
-    echo "  Installing mcp-knowledge-nightly.timer disabled until smoke tests pass..."
+    echo "  Installing mcp-knowledge-nightly.timer disabled because ENABLE_NIGHTLY=0..."
     systemctl disable --now mcp-knowledge-nightly.timer 2>/dev/null || true
 fi
 
