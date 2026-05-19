@@ -568,6 +568,17 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
                     now.isoformat(),
                     now.isoformat(),
                 ),
+                (
+                    "fact-shirt",
+                    "family",
+                    "shirt_color",
+                    "purple",
+                    "extracted",
+                    "source-photo",
+                    None,
+                    (now - timedelta(hours=2)).isoformat(),
+                    now.isoformat(),
+                ),
             ),
         )
         await db._conn.commit()
@@ -594,6 +605,7 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
         assert result["changed_entities"][0]["slug"] == "family/dad"
         assert result["changed_entities"][0]["fact_keys"] == ["dad_heart_history"]
         assert result["changed_entities"][0]["source_ids"] == ["source-dad"]
+        assert "family/shirt" not in {item["slug"] for item in result["changed_entities"]}
         assert result["latency_class"] == "quick"
 
         cursor = await db._conn.execute("SELECT COUNT(*) FROM wiki_rebuild_runs")
@@ -812,7 +824,7 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
                 "frontmatter": {"entity_type": "device", "aliases": [], "related_slugs": []},
                 "sources": [],
                 "confidence": "low",
-                "duplicate_concerns": [],
+                "duplicate_concerns": ["Could overlap with another Framework page."],
                 "split_concerns": [],
             }, 100
 
@@ -838,6 +850,10 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
         assert result["success"] is True
         page = await db.wiki_get("tech/framework-13")
         assert page["status"] == "candidate"
+        assert page["frontmatter"]["audit_notes"] == {
+            "merge_candidate": ["Could overlap with another Framework page."]
+        }
+        assert await db.curation_count(status="pending") == 0
         assert await db.wiki_list(status="active") == []
     finally:
         await db.close()

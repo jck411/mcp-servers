@@ -1896,8 +1896,8 @@ VISION_OCR_PROMPT = (
 
 IMAGE_DESCRIPTION_PROMPT = (
     "Describe this image in 2-4 sentences for a personal knowledge base. "
-    "Cover the main subject, setting, notable objects or people (no names needed), "
-    "colors, any visible text, and specific details that would help someone find this "
+    "Cover the main subject, setting, notable people (no names needed), "
+    "any visible text, and specific details that would help someone find this "
     "image when searching. Be concrete and factual. Output only the description."
 )
 
@@ -1911,7 +1911,8 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- For dates use ISO format: YYYY-MM-DD.\n"
     "- For currency include the number only (no $ sign): 94200.00\n"
     "- For images with no document structure (photos, pets, scenery): set 'caption' "
-    "to a 2-3 sentence description, set 'facts' to {}.\n"
+    "to a 2-3 sentence description and set 'facts' to {}; do not create facts for "
+    "visible clothing, background objects, sky, seating, hair, or similar photo details.\n"
     "- For documents: set 'facts' to all extracted key/value pairs, set 'caption' to null.\n"
     "- Omit fields that are not legible or not present — do not set null or 'unknown'.\n"
     "- Put brief uncertainty notes in 'warnings', e.g. unreadable or partially obscured fields.\n"
@@ -2827,6 +2828,11 @@ async def extract_source_facts_single_shot(
                 str(k): str(v) for k, v in extracted.items()
                 if k not in {"caption", "warnings"} and v is not None and v != ""
             }
+        if is_image and caption and facts and not hint:
+            warnings.append(
+                f"Skipped {len(facts)} photo-detail fact(s); ordinary photos use captions."
+            )
+            facts = {}
         parse_step["status"] = "ok"
         warn_note = f", {len(warnings)} warning(s)" if warnings else ""
         parse_step["note"] = (
@@ -2944,12 +2950,19 @@ WIKI_REBUILD_STOPWORDS = frozenset({
     "latest", "log", "manual", "my", "note", "notes", "of", "pdf", "record", "records",
     "report", "source", "summary", "the", "upload",
 })
+WIKI_PHOTO_DETAIL_PREFIXES = frozenset({
+    "bleacher", "clothing", "hair", "pants", "photo", "railing", "seating",
+    "shirt", "shoe", "sky",
+})
 WIKI_PAGE_SYSTEM_PROMPT = (
     "You maintain concise personal knowledge wiki pages. Return only the forced "
     "tool call. Write traceable markdown from the supplied facts and chunks only. "
     "Do not invent missing details. Use Open Questions for gaps or conflicts. "
     "Every concrete claim should be covered by a source_id or chat_date citation. "
-    "Flag duplicate or split concerns instead of resolving identity silently."
+    "Flag duplicate or split concerns instead of resolving identity silently. "
+    "Do not create standalone wiki pages for ordinary photo details such as clothing, "
+    "hair, seating, sky, background objects, or other visible incidental objects; keep "
+    "those details in source captions or a person/event page."
 )
 
 
@@ -2967,6 +2980,10 @@ def _wiki_slug_for_change(domain: str, text: str) -> str:
 def _wiki_title_from_slug(slug: str) -> str:
     return " ".join(part.upper() if part.isdigit() else part.title()
                     for part in slug.rsplit("/", 1)[-1].split("-"))
+
+
+def _wiki_fact_can_seed_page(key: str) -> bool:
+    return key.split("_", 1)[0].lower() not in WIKI_PHOTO_DETAIL_PREFIXES
 
 
 def _wiki_row_matches_slug(slug: str, domain: str, text: str) -> bool:
@@ -3029,6 +3046,8 @@ async def preview_wiki_rebuild(
     for fact in inputs["facts"]:
         item_domain = str(fact["domain"])
         text = str(fact["key"])
+        if not _wiki_fact_can_seed_page(text):
+            continue
         if clean_entity and not _wiki_row_matches_slug(clean_entity, item_domain, text):
             continue
         slug = clean_entity or _wiki_slug_for_change(item_domain, text)
@@ -3243,6 +3262,12 @@ def _wiki_generated_page(
             f"- {line}" for line in _wiki_citation_lines(source_rows, context["sources"])
         )
 
+    concerns = {
+        "merge_candidate": _wiki_str_list(raw_page.get("duplicate_concerns")),
+        "split_candidate": _wiki_str_list(raw_page.get("split_concerns")),
+    }
+    audit_notes = {kind: values for kind, values in concerns.items() if values}
+
     frontmatter.update({
         "schema_version": 1,
         "slug": slug,
@@ -3256,12 +3281,9 @@ def _wiki_generated_page(
         "chat_dates": chat_dates,
         "confidence": confidence,
         "orphan": bool(frontmatter.get("orphan", False)),
+        "audit_notes": audit_notes,
     })
 
-    concerns = {
-        "merge_candidate": _wiki_str_list(raw_page.get("duplicate_concerns")),
-        "split_candidate": _wiki_str_list(raw_page.get("split_concerns")),
-    }
     status = existing.get("status")
     if status not in WIKI_PAGE_STATUSES:
         status = (
@@ -3437,26 +3459,6 @@ async def _call_wiki_llm(
     return _decode_llm_json_object(raw_output), int(usage.get("total_tokens") or 0)
 
 
-async def _queue_wiki_concerns(db: KnowledgeDB, page: dict[str, Any]) -> None:
-    for kind, concerns in page["concerns"].items():
-        if not concerns:
-            continue
-        await db.curation_upsert(
-            item_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"wiki:{kind}:{page['slug']}:{concerns}")),
-            kind=kind,
-            title=f"Review wiki identity: {page['title']}",
-            summary="\n".join(concerns),
-            source_refs=page["sources"],
-            proposed_actions=[{
-                "type": "flag_for_review",
-                "slug": page["slug"],
-                "concerns": concerns,
-            }],
-            risk="medium",
-            confidence=0.7,
-        )
-
-
 async def _rebuild_wiki_index(db: KnowledgeDB, domain: str) -> str:
     pages = [
         page for page in await db.wiki_list(domain=domain, status="active", limit=200)
@@ -3539,7 +3541,6 @@ async def rebuild_wiki(
                 sources=page["sources"],
                 fact_count=page["fact_count"],
             )
-            await _queue_wiki_concerns(db, page)
             touched.append(page["slug"])
 
         for touched_domain in sorted({str(item["domain"]) for item in preview["changed_entities"]}):
@@ -3667,6 +3668,341 @@ def curation_item_has_destructive_actions(item: dict[str, Any]) -> bool:
         if action_type in DESTRUCTIVE_CURATION_ACTIONS:
             return True
     return False
+
+
+CURATION_PACK_STATUSES = frozenset({"applied", "rejected", "snoozed"})
+CURATION_PACK_ITEM_LIMIT = 200
+CURATION_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def _curation_action_type(action: dict[str, Any]) -> str:
+    return str(action.get("action") or action.get("type") or "unknown").strip() or "unknown"
+
+
+def _curation_item_action_types(item: dict[str, Any]) -> list[str]:
+    actions = item.get("proposed_actions") or []
+    return [_curation_action_type(action) for action in actions if isinstance(action, dict)]
+
+
+def _curation_item_domain(item: dict[str, Any]) -> str | None:
+    for action in item.get("proposed_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        domain = str(action.get("domain") or "").strip()
+        if domain:
+            return domain
+        slug = str(action.get("slug") or "").strip()
+        if "/" in slug:
+            return slug.split("/", 1)[0]
+    for ref in item.get("source_refs") or []:
+        if isinstance(ref, dict):
+            domain = str(ref.get("domain") or "").strip()
+            if domain:
+                return domain
+    return None
+
+
+def _curation_item_text(item: dict[str, Any]) -> str:
+    return " ".join((
+        str(item.get("kind") or ""),
+        str(item.get("title") or ""),
+        str(item.get("summary") or ""),
+        json.dumps(item.get("source_refs") or [], sort_keys=True),
+        json.dumps(item.get("proposed_actions") or [], sort_keys=True),
+    )).lower()
+
+
+def _curation_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "unknown"
+
+
+def _curation_title_topic(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or "").strip()
+    if ":" in title:
+        title = title.split(":", 1)[1].strip()
+    return _curation_slug(title)
+
+
+def _curation_group_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    kind = str(item.get("kind") or "unknown")
+    domain = _curation_item_domain(item) or "unknown"
+    text = _curation_item_text(item)
+    action = (_curation_item_action_types(item) or ["unknown"])[0]
+
+    if any(token in text for token in ("andison", "coverage_", "shift_swap", "schedule_change")):
+        return ("schedule_cleanup", "work_schedule", "coverage_exchange")
+    if kind == "temporal_fact_cleanup":
+        return ("temporal_fact_cleanup", domain, "validity_review")
+    if kind == "maintenance_action":
+        if action in {"archive_domain", "domain_archive"}:
+            return ("maintenance_action", "domains", "archive_empty_domain")
+        if action == "delete_source":
+            return ("maintenance_action", "sources", "verified_duplicate_delete")
+        if "missing-vector" in text or "missing vector" in text:
+            return ("maintenance_action", "sources", "missing_vectors")
+        return ("maintenance_action", domain, action)
+    if kind in {"merge_candidate", "split_candidate"}:
+        return ("wiki_identity", domain, _curation_title_topic(item))
+    return (kind, domain, action)
+
+
+def _curation_pack_id(group_key: tuple[str, str, str]) -> str:
+    return "pack-" + "-".join(_curation_slug(part) for part in group_key)
+
+
+def _curation_pack_prompt(group_key: tuple[str, str, str], count: int) -> tuple[str, str, str]:
+    pack_kind, domain, topic = group_key
+    if group_key == ("schedule_cleanup", "work_schedule", "coverage_exchange"):
+        return (
+            "Jack/Andison coverage exchange cleanup",
+            "Should I treat these as one set of 2026 coverage-exchange events, "
+            "resolve matching 2025 rows as extraction/OCR errors, and keep split "
+            "shifts as one event with multiple segments?",
+            "Normalize the schedule interpretation, preserve source evidence, "
+            "and resolve the related review rows.",
+        )
+    if pack_kind == "temporal_fact_cleanup":
+        return (
+            f"{domain} time-bound fact review",
+            f"Should I treat these {count} {domain} facts as historical/current "
+            "based on their dates and only add valid_until when it changes current truth?",
+            "Resolve time-bound review rows without deleting historical evidence.",
+        )
+    if topic == "archive_empty_domain":
+        return (
+            "Empty domain archive suggestions",
+            "Current policy says empty domains are allowed. Should I reject these "
+            "empty-domain archive suggestions?",
+            "Reject empty-domain archive suggestions unless Jack explicitly asks to archive them.",
+        )
+    if topic == "verified_duplicate_delete":
+        return (
+            "Verified duplicate source cleanup",
+            "Should I verify these duplicate source records and only delete rows/files "
+            "that are proven redundant?",
+            "Keep this pack pending until duplicate verification succeeds.",
+        )
+    if topic == "missing_vectors":
+        return (
+            "Missing-vector source repair",
+            "Should I keep these source/vector mismatches as repair work instead of "
+            "deleting source history?",
+            "Snooze or keep pending until a repair pass can reindex or explain the "
+            "missing vectors.",
+        )
+    if pack_kind == "wiki_identity":
+        topic_label = topic.replace("-", " ")
+        return (
+            f"{domain} wiki identity review: {topic_label}",
+            f"Should I treat these {count} {domain} wiki identity concerns about "
+            f"{topic_label} as audit notes unless you want page changes?",
+            "Resolve weak speculative merge/split rows and keep useful context in "
+            "wiki audit notes.",
+        )
+    return (
+        f"{pack_kind.replace('_', ' ').title()}: {topic.replace('_', ' ')}",
+        f"How should I resolve these {count} related {pack_kind.replace('_', ' ')} items?",
+        "Resolve the grouped curation rows according to Jack's answer.",
+    )
+
+
+def _curation_pack_from_items(
+    group_key: tuple[str, str, str],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    title, question, suggested = _curation_pack_prompt(group_key, len(items))
+    action_counts = Counter(
+        action
+        for item in items
+        for action in (_curation_item_action_types(item) or ["unknown"])
+    )
+    kind_counts = Counter(str(item.get("kind") or "unknown") for item in items)
+    risks = [str(item.get("risk") or "medium") for item in items]
+    risk = max(risks, key=lambda value: CURATION_RISK_ORDER.get(value, 1), default="medium")
+    destructive_ids = [
+        str(item["id"]) for item in items
+        if curation_item_has_destructive_actions(item)
+    ]
+    return {
+        "id": _curation_pack_id(group_key),
+        "title": title,
+        "question": question,
+        "kind": group_key[0],
+        "domain": group_key[1],
+        "topic": group_key[2],
+        "risk": risk,
+        "count": len(items),
+        "affected_item_ids": [str(item["id"]) for item in items],
+        "suggested_resolution": suggested,
+        "requires_confirmation": bool(destructive_ids),
+        "destructive_item_ids": destructive_ids,
+        "action_counts": dict(sorted(action_counts.items())),
+        "kind_counts": dict(sorted(kind_counts.items())),
+        "sample_items": [
+            {
+                "id": item["id"],
+                "kind": item["kind"],
+                "title": item["title"],
+                "summary": item.get("summary", "")[:240],
+                "actions": _curation_item_action_types(item),
+            }
+            for item in items[:5]
+        ],
+    }
+
+
+async def build_curation_question_packs(
+    db: KnowledgeDB,
+    *,
+    limit: int = 10,
+    kind: str | None = None,
+    domain: str | None = None,
+) -> list[dict[str, Any]]:
+    """Group pending curation rows into chat-friendly question packs."""
+    rows = await db.curation_list(status="pending", kind=kind, limit=CURATION_PACK_ITEM_LIMIT)
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in rows:
+        item_domain = _curation_item_domain(item)
+        group_key = _curation_group_key(item)
+        if domain and item_domain != domain and group_key[1] != domain:
+            continue
+        groups.setdefault(group_key, []).append(item)
+
+    packs = [_curation_pack_from_items(group_key, items) for group_key, items in groups.items()]
+    packs.sort(key=lambda pack: (-pack["count"], pack["risk"], pack["title"]))
+    return packs[:max(1, min(limit, 50))]
+
+
+async def get_curation_question_pack(
+    db: KnowledgeDB,
+    pack_id: str,
+) -> dict[str, Any] | None:
+    for pack in await build_curation_question_packs(db, limit=50):
+        if pack["id"] == pack_id:
+            return pack
+    return None
+
+
+def _validate_curation_pack_resolution_status(status: str) -> str | None:
+    if status not in CURATION_PACK_STATUSES:
+        return f"resolution_status must be one of {', '.join(sorted(CURATION_PACK_STATUSES))}"
+    return None
+
+
+async def preview_curation_pack_resolution(
+    db: KnowledgeDB,
+    *,
+    pack_id: str,
+    answer: str,
+    resolution_status: str = "applied",
+) -> dict[str, Any]:
+    clean_answer = " ".join(str(answer or "").split())
+    if not clean_answer:
+        return {"success": False, "error": "answer is required"}
+    if error := _validate_curation_pack_resolution_status(resolution_status):
+        return {"success": False, "error": error}
+    pack = await get_curation_question_pack(db, pack_id)
+    if not pack:
+        return {"success": False, "error": f"Curation question pack '{pack_id}' not found"}
+
+    blocked = pack["destructive_item_ids"] if resolution_status == "applied" else []
+    status_updates = [
+        {"item_id": item_id, "from": "pending", "to": resolution_status}
+        for item_id in pack["affected_item_ids"]
+    ]
+    note_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"curation-resolution:{pack_id}:{clean_answer}"))
+    return {
+        "success": True,
+        "pack": pack,
+        "answer": clean_answer,
+        "resolution_status": resolution_status,
+        "requires_confirmation": pack_id if blocked else None,
+        "blocked_destructive_item_ids": blocked,
+        "status_updates": status_updates,
+        "data_writes": [],
+        "resolution_note": {
+            "item_id": note_id,
+            "kind": "curation_resolution",
+            "title": f"Resolved curation pack: {pack['title']}",
+            "summary": (
+                f"Question: {pack['question']}\n"
+                f"Answer: {clean_answer}\n"
+                f"Resolution status for affected rows: {resolution_status}"
+            ),
+            "source_refs": [
+                {"type": "curation_item", "id": item_id}
+                for item_id in pack["affected_item_ids"]
+            ],
+            "proposed_actions": [{
+                "action": "no_action",
+                "description": "Batch curation resolution note; no direct data mutation.",
+            }],
+        },
+    }
+
+
+async def apply_curation_pack_resolution(
+    db: KnowledgeDB,
+    *,
+    pack_id: str,
+    answer: str,
+    resolution_status: str = "applied",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    preview = await preview_curation_pack_resolution(
+        db,
+        pack_id=pack_id,
+        answer=answer,
+        resolution_status=resolution_status,
+    )
+    if not preview["success"]:
+        return preview
+    if preview["blocked_destructive_item_ids"]:
+        if not confirmed:
+            return {
+                "success": False,
+                "error": (
+                    "Pack contains destructive actions; inspect and apply those items "
+                    "individually after verification."
+                ),
+                "requires_confirmation": pack_id,
+                "preview": preview,
+            }
+        return {
+            "success": False,
+            "error": (
+                "Batch apply for destructive curation packs is not supported yet; "
+                "use individual curation apply."
+            ),
+            "preview": preview,
+        }
+
+    updated = []
+    for update in preview["status_updates"]:
+        if await db.curation_mark_status(update["item_id"], update["to"]):
+            updated.append(update["item_id"])
+
+    note = preview["resolution_note"]
+    note_id = await db.curation_upsert(
+        kind=note["kind"],
+        title=note["title"],
+        summary=note["summary"],
+        source_refs=note["source_refs"],
+        proposed_actions=note["proposed_actions"],
+        risk=preview["pack"]["risk"],
+        confidence=1.0,
+        item_id=note["item_id"],
+        status="applied",
+    )
+    await db.curation_mark_status(note_id, "applied")
+    return {
+        "success": True,
+        "pack_id": pack_id,
+        "updated_item_ids": updated,
+        "resolution_note_id": note_id,
+        "resolution_status": resolution_status,
+    }
 
 
 async def _ingest_curation_text(
@@ -4873,6 +5209,78 @@ async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
     if not item:
         return {"success": False, "error": f"Curation item '{item_id}' not found"}
     return {"success": True, "item": item}
+
+
+@mcp.tool("knowledge_curation_question_packs")
+@logged_tool(log)
+async def knowledge_curation_question_packs(
+    limit: int = 10,
+    kind: str | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
+    """Group pending curation rows into chat-friendly question packs.
+
+    Use this when Jack wants to clean up curation from normal chat. Packs turn
+    many raw rows into a few questions that can be answered and resolved in bulk.
+    """
+    _, _, _, _, db = _require_ready()
+    packs = await build_curation_question_packs(db, limit=limit, kind=kind, domain=domain)
+    return {"success": True, "count": len(packs), "packs": packs}
+
+
+@mcp.tool("knowledge_curation_question_pack_get")
+@logged_tool(log)
+async def knowledge_curation_question_pack_get(pack_id: str) -> dict[str, Any]:
+    """Get one curation question pack by id."""
+    _, _, _, _, db = _require_ready()
+    pack = await get_curation_question_pack(db, pack_id)
+    if not pack:
+        return {"success": False, "error": f"Curation question pack '{pack_id}' not found"}
+    return {"success": True, "pack": pack}
+
+
+@mcp.tool("knowledge_curation_pack_preview")
+@logged_tool(log)
+async def knowledge_curation_pack_preview(
+    pack_id: str,
+    answer: str,
+    resolution_status: str = "applied",
+) -> dict[str, Any]:
+    """Preview resolving a curation question pack from Jack's chat answer.
+
+    This does not write data. It returns affected rows, the proposed status
+    change, and a durable resolution note that would be recorded on apply.
+    """
+    _, _, _, _, db = _require_ready()
+    return await preview_curation_pack_resolution(
+        db,
+        pack_id=pack_id,
+        answer=answer,
+        resolution_status=resolution_status,
+    )
+
+
+@mcp.tool("knowledge_curation_pack_apply")
+@logged_tool(log)
+async def knowledge_curation_pack_apply(
+    pack_id: str,
+    answer: str,
+    resolution_status: str = "applied",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Resolve a non-destructive curation question pack after preview/confirmation.
+
+    Destructive packs are blocked in this first version; verify and apply their
+    individual queue items instead.
+    """
+    _, _, _, _, db = _require_ready()
+    return await apply_curation_pack_resolution(
+        db,
+        pack_id=pack_id,
+        answer=answer,
+        resolution_status=resolution_status,
+        confirmed=confirmed,
+    )
 
 
 @mcp.tool("knowledge_curation_apply")

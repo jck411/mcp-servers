@@ -24,11 +24,10 @@ cd "$REPO_DIR" && uv sync --extra all
 # Port map
 declare -A PORT_MAP=(
     [knowledge]=9017
-    [knowledge_api]=9018
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("knowledge" "knowledge_api")
+DEFAULT_SERVERS=("knowledge")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then
@@ -39,6 +38,7 @@ fi
 
 echo "=== Installing systemd template ==="
 cp "${REPO_DIR}/deploy/mcp-server@.service" /etc/systemd/system/
+cp "${REPO_DIR}/deploy/mcp-knowledge-api.service" /etc/systemd/system/
 cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.service" /etc/systemd/system/
 cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.timer" /etc/systemd/system/
 chmod +x "${REPO_DIR}/deploy/backup.sh" "${REPO_DIR}/deploy/healthcheck.sh"
@@ -71,6 +71,8 @@ for server in "${SERVERS[@]}"; do
     systemctl enable "$unit"
     systemctl restart "$unit"
 done
+systemctl disable --now mcp-server@knowledge_api.service 2>/dev/null || true
+systemctl enable --now mcp-knowledge-api.service
 systemctl disable --now mcp-wiki-maintain.timer 2>/dev/null || true
 if [[ "$ENABLE_NIGHTLY" == 1 ]]; then
     echo "  Enabling mcp-knowledge-nightly.timer..."
@@ -104,6 +106,12 @@ for server in "${SERVERS[@]}"; do
         journalctl -u "$unit" -n 5 --no-pager 2>/dev/null || true
     fi
 done
+if systemctl is-active --quiet mcp-knowledge-api.service 2>/dev/null; then
+    echo "  ✅ mcp-knowledge-api.service — running"
+else
+    echo "  ❌ mcp-knowledge-api.service — not running"
+    journalctl -u mcp-knowledge-api.service -n 5 --no-pager 2>/dev/null || true
+fi
 if systemctl is-active --quiet mcp-knowledge-nightly.timer 2>/dev/null; then
     echo "  ✅ mcp-knowledge-nightly.timer — active"
 else

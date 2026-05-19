@@ -6,6 +6,8 @@ import pytest
 from servers.knowledge import (
     KnowledgeDB,
     apply_curation_item,
+    apply_curation_pack_resolution,
+    build_curation_question_packs,
     chunk_text,
     create_curation_queue_item,
     curation_item_has_destructive_actions,
@@ -107,6 +109,138 @@ async def test_pending_upsert_does_not_reopen_reviewed_item(knowledge_db: Knowle
     item = await knowledge_db.curation_get("reviewed-item")
     assert item["status"] == "rejected"
     assert item["summary"] == "Original concern"
+
+
+async def test_question_packs_group_schedule_items(knowledge_db: KnowledgeDB):
+    for item_id, kind, title, summary in (
+        (
+            "schedule-merge",
+            "merge_candidate",
+            "Review wiki identity: Coverage 8",
+            "coverage_8 and shift_swap_8 describe the same Andison coverage event.",
+        ),
+        (
+            "schedule-split",
+            "split_candidate",
+            "Review wiki identity: Shift",
+            "Shift swap records for Jack and Andison could be split into worker pages.",
+        ),
+    ):
+        await knowledge_db.curation_upsert(
+            kind=kind,
+            title=title,
+            summary=summary,
+            source_refs=[{"type": "source", "domain": "work_schedule", "id": item_id}],
+            proposed_actions=[{
+                "type": "flag_for_review",
+                "slug": "work_schedule/coverage-8",
+            }],
+            item_id=item_id,
+        )
+
+    packs = await build_curation_question_packs(knowledge_db)
+
+    assert len(packs) == 1
+    pack = packs[0]
+    assert pack["id"] == "pack-schedule-cleanup-work-schedule-coverage-exchange"
+    assert pack["count"] == 2
+    assert set(pack["affected_item_ids"]) == {"schedule-merge", "schedule-split"}
+    assert "2026 coverage-exchange" in pack["question"]
+
+
+async def test_question_packs_split_wiki_identity_by_title(knowledge_db: KnowledgeDB):
+    for item_id, title in (
+        ("family-sky", "Review wiki identity: Sky"),
+        ("family-zoe", "Review wiki identity: Zoe Frankowicz"),
+    ):
+        await knowledge_db.curation_upsert(
+            kind="merge_candidate",
+            title=title,
+            summary="Potential family page cleanup.",
+            proposed_actions=[{
+                "type": "flag_for_review",
+                "slug": "family/example",
+            }],
+            item_id=item_id,
+        )
+
+    packs = await build_curation_question_packs(knowledge_db, limit=10)
+
+    assert {pack["id"] for pack in packs} == {
+        "pack-wiki-identity-family-sky",
+        "pack-wiki-identity-family-zoe-frankowicz",
+    }
+
+
+async def test_apply_question_pack_records_resolution_note(knowledge_db: KnowledgeDB):
+    await knowledge_db.curation_upsert(
+        kind="split_candidate",
+        title="Review wiki identity: Shift",
+        summary="Shift swap records for Jack and Andison could be split.",
+        source_refs=[{"type": "source", "domain": "work_schedule", "id": "schedule-source"}],
+        proposed_actions=[{
+            "type": "flag_for_review",
+            "slug": "work_schedule/shift",
+        }],
+        item_id="schedule-item",
+    )
+
+    result = await apply_curation_pack_resolution(
+        knowledge_db,
+        pack_id="pack-schedule-cleanup-work-schedule-coverage-exchange",
+        answer="Treat these as one coverage-exchange event and preserve history.",
+        resolution_status="applied",
+    )
+
+    assert result["success"] is True
+    assert result["updated_item_ids"] == ["schedule-item"]
+    assert (await knowledge_db.curation_get("schedule-item"))["status"] == "applied"
+    note = await knowledge_db.curation_get(result["resolution_note_id"])
+    assert note["kind"] == "curation_resolution"
+    assert note["status"] == "applied"
+    assert "coverage-exchange event" in note["summary"]
+
+
+async def test_question_pack_apply_blocks_destructive_items(knowledge_db: KnowledgeDB):
+    await knowledge_db.curation_upsert(
+        kind="maintenance_action",
+        title="Domain 'yard' has zero sources and facts",
+        summary="Archive empty domain.",
+        proposed_actions=[{"action": "archive_domain", "target_id": "yard"}],
+        item_id="archive-yard",
+    )
+
+    result = await apply_curation_pack_resolution(
+        knowledge_db,
+        pack_id="pack-maintenance-action-domains-archive-empty-domain",
+        answer="Archive the empty domain.",
+        resolution_status="applied",
+    )
+
+    assert result["success"] is False
+    assert result["requires_confirmation"] == "pack-maintenance-action-domains-archive-empty-domain"
+    assert (await knowledge_db.curation_get("archive-yard"))["status"] == "pending"
+
+
+async def test_question_pack_can_reject_destructive_suggestions(knowledge_db: KnowledgeDB):
+    await knowledge_db.curation_upsert(
+        kind="maintenance_action",
+        title="Domain 'yard' has zero sources and facts",
+        summary="Archive empty domain.",
+        proposed_actions=[{"action": "archive_domain", "target_id": "yard"}],
+        item_id="archive-yard",
+    )
+
+    result = await apply_curation_pack_resolution(
+        knowledge_db,
+        pack_id="pack-maintenance-action-domains-archive-empty-domain",
+        answer="Empty domains are allowed; ask Jack before archiving.",
+        resolution_status="rejected",
+    )
+
+    assert result["success"] is True
+    assert result["updated_item_ids"] == ["archive-yard"]
+    assert (await knowledge_db.curation_get("archive-yard"))["status"] == "rejected"
 
 
 async def test_apply_non_destructive_curation_item_sets_fact(knowledge_db: KnowledgeDB):

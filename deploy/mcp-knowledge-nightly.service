@@ -1,6 +1,6 @@
 [Unit]
 Description=Knowledge backup, maintenance, and wiki pipeline
-After=network-online.target mcp-server@knowledge.service mcp-server@knowledge_api.service
+After=network-online.target mcp-server@knowledge.service mcp-knowledge-api.service
 Wants=network-online.target
 
 [Service]

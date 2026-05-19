@@ -122,8 +122,8 @@ push_local() {
 
 # ── Status ────────────────────────────────────────────────────────────────────
 show_status() {
-    local status_cmd="for s in ${SERVERS[*]}; do printf '%-20s ' \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done"
-    local pct_cmd="pct exec ${LXC_MCP} -- bash -c 'for s in ${SERVERS[*]}; do printf \"%-20s \" \"\$s\"; systemctl is-active mcp-server@\$s 2>/dev/null || echo inactive; done'"
+    local status_cmd="for s in ${SERVERS[*]}; do unit=mcp-server@\$s; [ \"\$s\" = knowledge_api ] && unit=mcp-knowledge-api.service; printf '%-20s ' \"\$s\"; systemctl is-active \"\$unit\" 2>/dev/null || echo inactive; done"
+    local pct_cmd="pct exec ${LXC_MCP} -- bash -c 'for s in ${SERVERS[*]}; do unit=mcp-server@\$s; [ \"\$s\" = knowledge_api ] && unit=mcp-knowledge-api.service; printf \"%-20s \" \"\$s\"; systemctl is-active \"\$unit\" 2>/dev/null || echo inactive; done'"
 
     if [[ "$MODE" == "local" ]]; then
         banner "Server status (via PVE ${PVE_SSH} → CT ${LXC_MCP})"
@@ -148,7 +148,7 @@ _build_run_cmd() {
     # Write per-server port env files
     for server in "${SERVERS[@]}"; do
         local port="${PORT_MAP[$server]:-}"
-        if [[ -n "$port" ]]; then
+        if [[ -n "$port" && "$server" != "knowledge_api" ]]; then
             cmds+=" && echo MCP_PORT=${port} > ${MCP_REPO}/.env.${server}"
         fi
     done
@@ -163,14 +163,20 @@ _build_run_cmd() {
 
     # Restart services
     for server in "${SERVERS[@]}"; do
-        cmds+=" && systemctl restart mcp-server@${server}"
+        if [[ "$server" == "knowledge_api" ]]; then
+            cmds+=" && { systemctl disable --now mcp-server@knowledge_api.service 2>/dev/null || true; } && systemctl restart mcp-knowledge-api.service"
+        else
+            cmds+=" && systemctl restart mcp-server@${server}"
+        fi
     done
 
     # Poll each service up to 20s for it to become active
     for server in "${SERVERS[@]}"; do
+        local unit="mcp-server@${server}"
+        [[ "$server" == "knowledge_api" ]] && unit="mcp-knowledge-api.service"
         cmds+=" && echo '--- ${server} ---'"
-        cmds+=" && for _poll in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do state=\$(systemctl is-active mcp-server@${server} 2>/dev/null || true); [ \"\$state\" = 'activating' ] || break; sleep 1; done"
-        cmds+=" && systemctl is-active mcp-server@${server} 2>/dev/null"
+        cmds+=" && for _poll in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do state=\$(systemctl is-active ${unit} 2>/dev/null || true); [ \"\$state\" = 'activating' ] || break; sleep 1; done"
+        cmds+=" && systemctl is-active ${unit} 2>/dev/null"
     done
 
     echo "$cmds"
@@ -209,12 +215,20 @@ deploy_remote() {
     local status_cmds=""
 
     for server in "${SERVERS[@]}"; do
-        restart_cmds+="systemctl restart mcp-server@${server} && "
+        if [[ "$server" == "knowledge_api" ]]; then
+            restart_cmds+="{ systemctl disable --now mcp-server@knowledge_api.service 2>/dev/null || true; } && systemctl restart mcp-knowledge-api.service && "
+        else
+            restart_cmds+="systemctl restart mcp-server@${server} && "
+        fi
     done
     restart_cmds="${restart_cmds% && }"
 
     for server in "${SERVERS[@]}"; do
-        status_cmds+="systemctl is-active mcp-server@${server} 2>/dev/null; "
+        if [[ "$server" == "knowledge_api" ]]; then
+            status_cmds+="systemctl is-active mcp-knowledge-api.service 2>/dev/null; "
+        else
+            status_cmds+="systemctl is-active mcp-server@${server} 2>/dev/null; "
+        fi
     done
 
     echo ""
