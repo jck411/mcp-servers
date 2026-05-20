@@ -21,3 +21,5 @@ scripts. Shared workflow rules live in `/home/jack/REPOS/AGENTS.md`.
 - Compile changed service files when touching runtime code.
 - After deploy, check `mcp-server@knowledge`, `mcp-knowledge-api.service`, and relevant timers.
 - Back up `knowledge.db` before schema/data migrations, source deletion, or bulk reindexing.
+- Before the final response, explicitly verify whether this change required
+  commit/push/deploy/live checks and complete any missing step.
