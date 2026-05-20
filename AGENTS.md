@@ -7,7 +7,7 @@ control services are deployed separately.
 ## Workflow
 
 - Keep changes small, tested, and committed before deploy.
-- Work on `master` for normal changes; `deploy/deploy.sh` resets live code to `origin/master`.
+- Work on `main` for normal changes; `deploy/deploy.sh` resets live code to `origin/main`.
 - Use `uv` for Python dependency and test commands.
 - Prefer repo patterns over new abstractions.
 - Remove obsolete code, scripts, ports, and docs after replacements are verified.

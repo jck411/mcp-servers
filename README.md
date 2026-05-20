@@ -181,7 +181,7 @@ sudo ./deploy/setup-systemd.sh
 # Check Knowledge status
 ./deploy/deploy.sh --status
 
-# Deploy Knowledge updates (reset tracked source to origin/master + sync + restart)
+# Deploy Knowledge updates (reset tracked source to origin/main + sync + restart)
 ./deploy/deploy.sh
 ```
 
