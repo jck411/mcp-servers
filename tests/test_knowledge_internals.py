@@ -22,12 +22,14 @@ from servers.knowledge import (
     _is_likely_binary,
     _validate_text_ingest_inputs,
     chunk_text,
+    classify_search_temporal_intent,
     compute_text_hash,
     fact_temporal_status,
     resolve_search_domains,
     search_fact_keywords,
     search_knowledge,
 )
+from shared.time_context import EASTERN_TIMEZONE
 
 # ---------------------------------------------------------------------------
 # chunk_text
@@ -911,6 +913,13 @@ def test_search_fact_keywords_strips_punctuation():
     assert keywords == ["wages"]
 
 
+def test_search_temporal_intent_distinguishes_pto_examples():
+    now = datetime(2026, 5, 20, 12, tzinfo=EASTERN_TIMEZONE)
+
+    assert classify_search_temporal_intent("When do I have PTO?", now=now) == "current_upcoming"
+    assert classify_search_temporal_intent("When did I use PTO last year?", now=now) == "historical"
+
+
 async def test_resolve_search_domains_includes_related_and_core(tmp_path: Path):
     db = KnowledgeDB(tmp_path / "domains.db")
     await db.initialize()
@@ -923,6 +932,39 @@ async def test_resolve_search_domains_includes_related_and_core(tmp_path: Path):
         await db.close()
 
     assert domains == ["health", "finance", "core"]
+
+
+async def test_historical_search_includes_archived_domains(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "domain_archive_search.db")
+    await db.initialize()
+    await db.domain_create("current_work", "current", [])
+    await db.domain_create("old_work", "archived", [])
+    await db.domain_archive("old_work")
+    try:
+        current_domains = await resolve_search_domains(db, None, None)
+        historical_domains = await resolve_search_domains(db, None, None, include_archived=True)
+    finally:
+        await db.close()
+
+    assert "old_work" not in current_domains
+    assert "old_work" in historical_domains
+
+
+class _FakeEmbeddings:
+    async def embed(self, query: str) -> list[float]:
+        self.query = query
+        return [0.1]
+
+
+class _EmptySparseEncoder:
+    def encode_query(self, query: str) -> tuple[list[int], list[float]]:
+        self.query = query
+        return [], []
+
+
+class _EmptyVectors:
+    async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+        return []
 
 
 async def test_search_knowledge_returns_ids_truncates_and_searches_facts(tmp_path: Path):
@@ -1132,3 +1174,62 @@ async def test_search_knowledge_routes_exact_fact_before_chunks(tmp_path: Path):
     assert response["results"][0]["result_type"] == "fact"
     assert response["results"][0]["key"] == "dentist"
     assert response["results"][1]["result_type"] == "chunk"
+
+
+async def test_search_knowledge_defaults_pto_to_current_upcoming_facts(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "pto_current_search.db")
+    await db.initialize()
+    await db.domain_create("work", "work", [])
+    await db.fact_set("work", "pto_2000_used", "PTO used on 2000-01-01", as_of="2000-01-01")
+    await db.fact_set("work", "pto_upcoming", "PTO scheduled for 2999-01-01")
+    try:
+        response = await search_knowledge(
+            embeddings=_FakeEmbeddings(),  # type: ignore[arg-type]
+            sparse_encoder=_EmptySparseEncoder(),  # type: ignore[arg-type]
+            vectors=_EmptyVectors(),  # type: ignore[arg-type]
+            db=db,
+            query="When do I have PTO?",
+            domain="work",
+            limit=5,
+        )
+    finally:
+        await db.close()
+
+    assert response["temporal_intent"] == "current_upcoming"
+    assert [fact["key"] for fact in response["facts"]] == ["pto_upcoming"]
+    assert response["results"][0]["key"] == "pto_upcoming"
+
+
+async def test_search_knowledge_historical_pto_searches_archived_evidence(tmp_path: Path):
+    last_year = datetime.now(EASTERN_TIMEZONE).year - 1
+    db = KnowledgeDB(tmp_path / "pto_historical_search.db")
+    await db.initialize()
+    await db.domain_create("work", "work", [])
+    await db.domain_create("old_work", "archived work", [])
+    await db.domain_archive("old_work")
+    await db.fact_set(
+        "old_work",
+        f"pto_{last_year}_used",
+        f"PTO used on {last_year}-07-03",
+        as_of=f"{last_year}-07-03",
+    )
+    try:
+        embeddings = _FakeEmbeddings()
+        response = await search_knowledge(
+            embeddings=embeddings,  # type: ignore[arg-type]
+            sparse_encoder=_EmptySparseEncoder(),  # type: ignore[arg-type]
+            vectors=_EmptyVectors(),  # type: ignore[arg-type]
+            db=db,
+            query="When did I use PTO last year?",
+            limit=5,
+        )
+    finally:
+        await db.close()
+
+    assert response["temporal_intent"] == "historical"
+    assert response["include_archived"] is True
+    assert "old_work" in response["searched_domains"]
+    assert str(last_year) in response["expanded_queries"][-1]
+    assert response["facts"][0]["key"] == f"pto_{last_year}_used"
+    assert response["facts"][0]["temporal_status"] == "historical"
+    assert str(last_year) in embeddings.query

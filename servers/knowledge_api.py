@@ -284,6 +284,7 @@ async def search(
     min_similarity: float = 0.25,
     include_facts: bool = True,
     max_chars: int | None = None,
+    temporal_intent: str | None = None,
 ) -> dict[str, Any]:
     """Semantic + keyword search across the knowledge base."""
     _, embeddings, sparse_encoder, vectors, db = _require_ready()
@@ -300,6 +301,7 @@ async def search(
         min_similarity=min_similarity,
         include_facts=include_facts,
         max_chars=max_chars,
+        temporal_intent=temporal_intent,
     )
 
 

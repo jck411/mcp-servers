@@ -1127,14 +1127,17 @@ class KnowledgeDB:
         query: str,
         *,
         limit: int = 5,
+        statuses: set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Search active wiki pages with a lightweight local ranker."""
+        """Search wiki pages with a lightweight local ranker."""
         assert self._conn is not None
         terms = search_fact_keywords(query)
         if not terms:
             return []
-        conditions = ["status = 'active'"]
-        params: list[Any] = []
+        page_statuses = statuses or {"active"}
+        placeholders_s = ",".join("?" for _ in page_statuses)
+        conditions = [f"status IN ({placeholders_s})"]
+        params: list[Any] = sorted(page_statuses)
         if domains:
             placeholders = ",".join("?" for _ in domains)
             conditions.append(f"domain IN ({placeholders})")
@@ -4282,6 +4285,8 @@ async def resolve_search_domains(
     db: KnowledgeDB,
     domain: str | None,
     domains: list[str] | None,
+    *,
+    include_archived: bool = False,
 ) -> list[str]:
     """Resolve a domain query to a list of domains including related ones.
 
@@ -4303,9 +4308,9 @@ async def resolve_search_domains(
                 if related not in result:
                     result.append(related)
     else:
-        # All non-archived domains
+        # All non-archived domains unless a historical search asks for archives too.
         all_domains = await db.domain_list()
-        result = [d["name"] for d in all_domains if not d["archived"]]
+        result = [d["name"] for d in all_domains if include_archived or not d["archived"]]
 
     # Always include core if it exists and isn't already there
     if "core" not in result and await db.domain_exists("core"):
@@ -4315,7 +4320,7 @@ async def resolve_search_domains(
 
 
 SEARCH_STOPWORDS = frozenset({
-    "about", "and", "are", "can", "current", "did", "does", "for", "from", "give",
+    "about", "and", "are", "can", "current", "did", "do", "does", "for", "from", "give",
     "have", "how", "is", "latest", "me", "my", "of", "on", "show", "tell", "the",
     "to", "was", "what", "when", "where", "which", "who", "with",
 })
@@ -4327,6 +4332,143 @@ EVIDENCE_QUERY_HINTS = frozenset({
     "citation", "cite", "conflict", "contradict", "disagree", "document", "evidence",
     "original", "pdf", "proof", "source", "stale", "upload",
 })
+SEARCH_TEMPORAL_INTENTS = frozenset({"all", "current_upcoming", "historical"})
+TEMPORAL_TOPIC_HINTS = frozenset({
+    "appointment", "appointments", "bill", "bills", "calendar", "contract", "course",
+    "deadline", "deadlines", "event", "events", "flight", "flights", "medication",
+    "medications", "meds", "meeting", "meetings", "plan", "plans", "pto", "renewal",
+    "schedule", "scheduled", "shift", "shifts", "subscription", "subscriptions",
+    "task", "tasks", "travel", "trip", "vacation",
+})
+
+
+def _normalize_search_temporal_intent(value: str | None) -> str | None:
+    clean = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": None,
+        "auto": None,
+        "archive": "historical",
+        "archived": "historical",
+        "current": "current_upcoming",
+        "deep": "historical",
+        "future": "current_upcoming",
+        "history": "historical",
+        "past": "historical",
+        "upcoming": "current_upcoming",
+    }
+    return aliases.get(clean, clean if clean in SEARCH_TEMPORAL_INTENTS else None)
+
+
+def _relative_year_terms(query: str, now: datetime) -> list[str]:
+    lowered = query.lower()
+    terms: list[str] = []
+    if re.search(r"\blast\s+year\b", lowered):
+        terms.append(str(now.year - 1))
+    if re.search(r"\bthis\s+year\b", lowered):
+        terms.append(str(now.year))
+    if re.search(r"\bnext\s+year\b", lowered):
+        terms.append(str(now.year + 1))
+    return terms
+
+
+def _explicit_past_year(query: str, now: datetime) -> bool:
+    return any(
+        int(year) < now.year
+        for year in re.findall(r"\b(?:19|20)\d{2}\b", query)
+    )
+
+
+def classify_search_temporal_intent(
+    query: str,
+    *,
+    now: datetime | None = None,
+    override: str | None = None,
+) -> str:
+    """Infer whether retrieval should prefer current/upcoming, history, or all."""
+    explicit = _normalize_search_temporal_intent(override)
+    if explicit:
+        return explicit
+
+    lowered = query.lower()
+    now = now or datetime.now(EASTERN_TIMEZONE)
+    if (
+        re.search(r"\b(when|where|how|what)\s+did\b", lowered)
+        or re.search(
+            r"\b(ago|archived?|completed|ended|expired|former|formerly|history|"
+            r"historical|past|previous|prior|used|yesterday)\b",
+            lowered,
+        )
+        or re.search(r"\blast\s+(year|month|week|night|time|quarter)\b", lowered)
+        or _explicit_past_year(query, now)
+    ):
+        return "historical"
+
+    if re.search(
+        r"\b(active|currently|do i have|future|next|now|scheduled|today|tomorrow|"
+        r"upcoming|when do)\b",
+        lowered,
+    ):
+        return "current_upcoming"
+
+    if set(search_fact_keywords(query)) & TEMPORAL_TOPIC_HINTS:
+        return "current_upcoming"
+    return "all"
+
+
+def expand_search_query(query: str, temporal_intent: str, now: datetime) -> list[str]:
+    """Return the original query plus the compact temporal expansion used for retrieval."""
+    extras = _relative_year_terms(query, now)
+    if temporal_intent == "historical":
+        extras.extend(["historical", "archived", "past", "completed", "expired"])
+    elif temporal_intent == "current_upcoming":
+        extras.extend(["current", "upcoming", "future", "active", "scheduled"])
+
+    unique_extras = list(dict.fromkeys(extras))
+    if not unique_extras:
+        return [query]
+    return [query, f"{query} {' '.join(unique_extras)}"]
+
+
+def expanded_search_fact_keywords(query: str, now: datetime) -> list[str]:
+    keywords = search_fact_keywords(query)
+    for term in _relative_year_terms(query, now):
+        if term not in keywords:
+            keywords.append(term)
+    return keywords
+
+
+def filter_facts_for_temporal_intent(
+    facts: list[dict[str, Any]],
+    temporal_intent: str,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    ranks = {
+        "current_upcoming": {"current": 0, "future": 1, "stale": 2, "unknown": 3},
+        "historical": {
+            "historical": 0, "expired": 1, "stale": 2, "current": 3, "unknown": 4, "future": 5,
+        },
+        "all": {"current": 0, "future": 1, "stale": 2, "unknown": 3, "historical": 4, "expired": 5},
+    }[temporal_intent]
+
+    enriched = [
+        {**fact, "temporal_status": fact_temporal_status(fact, now)}
+        for fact in facts
+    ]
+    if temporal_intent == "current_upcoming":
+        enriched = [fact for fact in enriched if fact["temporal_status"] in ranks]
+    return sorted(
+        enriched,
+        key=lambda fact: (
+            ranks.get(str(fact.get("temporal_status")), 99),
+            str(fact.get("domain")),
+            str(fact.get("key")),
+        ),
+    )
+
+
+def fact_temporal_counts(facts: list[dict[str, Any]]) -> dict[str, int]:
+    counts = Counter(str(fact.get("temporal_status") or "unknown") for fact in facts)
+    return dict(sorted(counts.items()))
 
 
 def search_fact_keywords(query: str) -> list[str]:
@@ -4346,7 +4488,8 @@ def classify_search_route(query: str, facts: list[dict[str, Any]]) -> str:
     if facts and (
         terms & FACT_QUERY_HINTS
         or re.search(
-            r"\b(what'?s|what is|who is|when is|where is|which is|how many|how much)\b",
+            r"\b(what'?s|what is|who is|when is|when do|when did|where is|which is|"
+            r"how many|how much|do i have|did i)\b",
             lowered,
         )
     ):
@@ -4367,19 +4510,41 @@ async def search_knowledge(
     min_similarity: float = 0.25,
     include_facts: bool = True,
     max_chars: int | None = None,
+    temporal_intent: str | None = None,
 ) -> dict[str, Any]:
     """Run the shared Knowledge search path used by MCP and REST."""
-    resolved_domains = await resolve_search_domains(db, domain, domains)
-    keywords = search_fact_keywords(query)
+    now = datetime.now(EASTERN_TIMEZONE)
+    search_temporal_intent = classify_search_temporal_intent(
+        query,
+        now=now,
+        override=temporal_intent,
+    )
+    include_archived = search_temporal_intent == "historical"
+    expanded_queries = expand_search_query(query, search_temporal_intent, now)
+    retrieval_query = expanded_queries[-1]
+    resolved_domains = await resolve_search_domains(
+        db,
+        domain,
+        domains,
+        include_archived=include_archived,
+    )
+    keywords = expanded_search_fact_keywords(query, now)
     facts = (
         await db.facts_search(resolved_domains, keywords)
         if include_facts and keywords else []
     )
+    facts = filter_facts_for_temporal_intent(facts, search_temporal_intent, now)
     route = classify_search_route(query, facts)
-    wiki_matches = await db.wiki_search(resolved_domains, query, limit=min(limit, 5))
+    wiki_statuses = {"active", "archived"} if include_archived else {"active"}
+    wiki_matches = await db.wiki_search(
+        resolved_domains,
+        retrieval_query,
+        limit=min(limit, 5),
+        statuses=wiki_statuses,
+    )
 
-    query_embedding = await embeddings.embed(query)
-    sparse_query = sparse_encoder.encode_query(query)
+    query_embedding = await embeddings.embed(retrieval_query)
+    sparse_query = sparse_encoder.encode_query(retrieval_query)
 
     results = await vectors.search(
         query_embedding,
@@ -4465,6 +4630,9 @@ async def search_knowledge(
         "success": True,
         "query": query,
         "route": route,
+        "temporal_intent": search_temporal_intent,
+        "include_archived": include_archived,
+        "expanded_queries": expanded_queries,
         "searched_domains": resolved_domains,
         "count": len(formatted),
         "results": formatted,
@@ -4475,6 +4643,7 @@ async def search_knowledge(
     if include_facts:
         response["facts"] = facts
         response["fact_count"] = len(facts)
+        response["fact_temporal_counts"] = fact_temporal_counts(facts)
 
     return response
 
@@ -4939,6 +5108,7 @@ async def knowledge_search(
     min_similarity: float = 0.25,
     include_facts: bool = True,
     max_chars: int | None = None,
+    temporal_intent: str | None = None,
 ) -> dict[str, Any]:
     """Search knowledge base using hybrid semantic + keyword search.
 
@@ -4954,6 +5124,8 @@ async def knowledge_search(
         include_facts: Also search structured facts for relevant matches.
         max_chars: Optional cap on each result's content length to reduce
             context size. None (default) returns full chunk text.
+        temporal_intent: Optional override: auto, all, current_upcoming, or
+            historical. Auto infers from the query.
     """
     _, embeddings_client, sparse_encoder, vectors, db = _require_ready()
     return await search_knowledge(
@@ -4968,6 +5140,7 @@ async def knowledge_search(
         min_similarity=min_similarity,
         include_facts=include_facts,
         max_chars=max_chars,
+        temporal_intent=temporal_intent,
     )
 
 

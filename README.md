@@ -47,6 +47,10 @@ The `knowledge` server owns an approval-gated curation queue in SQLite for durab
 
 Destructive actions require `confirmation` equal to the queue item id.
 
+Knowledge search now infers temporal intent. Unqualified schedule/PTO-style
+questions prefer current/upcoming facts, while past-tense or "last year" queries
+include historical facts and archived domains.
+
 ## Related Repos
 
 - [`jck411/Backend_FastAPI`](https://github.com/jck411/Backend_FastAPI) (LXC 111) — MCP client; discovers LXC 110 and LXC 117

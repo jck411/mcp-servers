@@ -63,15 +63,23 @@ stored bytes.
    - A single `domain` expands to related domains.
    - No domain searches all non-archived domains.
    - `core` is appended when it exists.
-2. Embed the query and encode a sparse BM25 query.
-3. Query Qdrant with hybrid dense + sparse search using RRF fusion.
-4. Return chunk results with `source_id`, `chunk_id`, `source_name`,
+2. Infer temporal intent as `all`, `current_upcoming`, or `historical`.
+   Current/upcoming searches filter out historical and expired facts; historical
+   searches include archived domains and active/archived wiki pages.
+3. Expand relative year language such as "last year" before fact and vector
+   retrieval.
+4. Embed the expanded query and encode a sparse BM25 query.
+5. Query Qdrant with hybrid dense + sparse search using RRF fusion.
+6. Return chunk results with `source_id`, `chunk_id`, `source_name`,
    `source_type`, `chunk_index`, and similarity.
-5. Optionally search facts by regex-extracted keywords against both fact keys
+7. Optionally search facts by regex-extracted keywords against both fact keys
    and values. Fact results include `valid_from`, `valid_until`, `as_of`,
    `review_after`, and `temporal_status`.
 
-Use `max_chars` to cap returned chunk content without changing stored data.
+Responses expose `temporal_intent`, `include_archived`, `expanded_queries`, and
+fact temporal counts. Use `temporal_intent=historical` or
+`temporal_intent=current_upcoming` to override inference; use `max_chars` to cap
+returned chunk content without changing stored data.
 
 ## Source Management
 
