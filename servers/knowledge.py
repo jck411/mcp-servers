@@ -3764,10 +3764,11 @@ def _curation_pack_prompt(group_key: tuple[str, str, str], count: int) -> tuple[
         )
     if pack_kind == "temporal_fact_cleanup":
         return (
-            f"{domain} time-bound fact review",
-            f"Should I treat these {count} {domain} facts as historical/current "
-            "based on their dates and only add valid_until when it changes current truth?",
-            "Resolve time-bound review rows without deleting historical evidence.",
+            f"{domain} temporal status review",
+            f"Should I treat these {count} {domain} facts as current or historical "
+            "unless they contain a real expiry/end date that should stop them being current?",
+            "Only add valid_until for explicit expiry/end boundaries; otherwise resolve "
+            "noisy temporal review rows without changing facts.",
         )
     if topic == "archive_empty_domain":
         return (

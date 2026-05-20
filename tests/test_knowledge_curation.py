@@ -172,6 +172,30 @@ async def test_question_packs_split_wiki_identity_by_title(knowledge_db: Knowled
     }
 
 
+async def test_temporal_question_pack_asks_about_status_not_generic_time_bound(
+    knowledge_db: KnowledgeDB,
+):
+    await knowledge_db.curation_upsert(
+        kind="temporal_fact_cleanup",
+        title="Review temporal status for finances/msft_position_current_as_of_2026_05_19",
+        summary="This fact contains an explicit expiry/end cue but has no structured valid_until date.",
+        source_refs=[{
+            "type": "fact",
+            "domain": "finances",
+            "id": "fact-msft",
+        }],
+        proposed_actions=[{"action": "flag_for_review"}],
+        item_id="temporal-finance",
+    )
+
+    packs = await build_curation_question_packs(knowledge_db, limit=10)
+
+    pack = next(pack for pack in packs if pack["id"] == "pack-temporal-fact-cleanup-finances-validity-review")
+    assert pack["title"] == "finances temporal status review"
+    assert "real expiry/end date" in pack["question"]
+    assert "Only add valid_until for explicit expiry/end boundaries" in pack["suggested_resolution"]
+
+
 async def test_apply_question_pack_records_resolution_note(knowledge_db: KnowledgeDB):
     await knowledge_db.curation_upsert(
         kind="split_candidate",
