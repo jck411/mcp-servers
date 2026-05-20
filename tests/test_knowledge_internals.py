@@ -1207,6 +1207,7 @@ async def test_search_knowledge_historical_pto_searches_archived_evidence(tmp_pa
     await db.domain_create("work", "work", [])
     await db.domain_create("old_work", "archived work", [])
     await db.domain_archive("old_work")
+    await db.fact_set("work", f"tax_{last_year}", f"{last_year} tax note")
     await db.fact_set(
         "old_work",
         f"pto_{last_year}_used",
@@ -1231,5 +1232,6 @@ async def test_search_knowledge_historical_pto_searches_archived_evidence(tmp_pa
     assert "old_work" in response["searched_domains"]
     assert str(last_year) in response["expanded_queries"][-1]
     assert response["facts"][0]["key"] == f"pto_{last_year}_used"
+    assert f"tax_{last_year}" not in [fact["key"] for fact in response["facts"]]
     assert response["facts"][0]["temporal_status"] == "historical"
     assert str(last_year) in embeddings.query

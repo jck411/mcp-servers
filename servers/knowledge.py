@@ -4438,6 +4438,18 @@ def expanded_search_fact_keywords(query: str, now: datetime) -> list[str]:
     return keywords
 
 
+def filter_facts_for_required_terms(
+    facts: list[dict[str, Any]],
+    terms: set[str],
+) -> list[dict[str, Any]]:
+    if not terms:
+        return facts
+    return [
+        fact for fact in facts
+        if any(term in f"{fact.get('key', '')} {fact.get('value', '')}".lower() for term in terms)
+    ]
+
+
 def filter_facts_for_temporal_intent(
     facts: list[dict[str, Any]],
     temporal_intent: str,
@@ -4533,6 +4545,10 @@ async def search_knowledge(
     facts = (
         await db.facts_search(resolved_domains, keywords)
         if include_facts and keywords else []
+    )
+    facts = filter_facts_for_required_terms(
+        facts,
+        set(search_fact_keywords(query)) & TEMPORAL_TOPIC_HINTS,
     )
     facts = filter_facts_for_temporal_intent(facts, search_temporal_intent, now)
     route = classify_search_route(query, facts)
