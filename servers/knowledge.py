@@ -4321,8 +4321,9 @@ async def resolve_search_domains(
 
 SEARCH_STOPWORDS = frozenset({
     "about", "and", "are", "can", "current", "did", "do", "does", "for", "from", "give",
-    "have", "how", "is", "latest", "me", "my", "of", "on", "show", "tell", "the",
-    "to", "was", "what", "when", "where", "which", "who", "with",
+    "have", "how", "is", "last", "latest", "me", "my", "of", "on", "show", "tell",
+    "the", "to", "use", "used", "was", "what", "when", "where", "which", "who",
+    "with", "year",
 })
 FACT_QUERY_HINTS = frozenset({
     "account", "address", "birthday", "date", "dentist", "doctor", "dose", "email",
