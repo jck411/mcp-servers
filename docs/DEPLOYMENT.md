@@ -133,7 +133,7 @@ pct exec 110 -- bash -c 'systemctl is-active mcp-server@knowledge'
 2. Add `[name]=<port>` to `PORT_MAP` in both `deploy/deploy.sh` and `deploy/setup-systemd.sh`
 3. Add the name to `ALL_SERVERS` in `deploy/deploy.sh` and `DEFAULT_SERVERS` in `deploy/setup-systemd.sh`
 4. Add any extra pip packages to `pyproject.toml` under `[project.optional-dependencies]` and add to the `all` group
-5. Add the port to the Port Assignments table in `.github/copilot-instructions.md`
+5. Document the port in `README.md` or the relevant deploy docs if it is user-facing
 6. Deploy: `./deploy/deploy.sh <name>`
 
 For private/account/home-control MCPs, add the service to the `mcp-accounts`
