@@ -1,17 +1,15 @@
 # mcp-servers
 
-This repo is the source of truth for standalone MCP servers, the Knowledge REST
-API, and deploy scripts. Knowledge services run on LXC 110; private/account/home
-control services are deployed separately.
+This repo owns standalone MCP servers, the Knowledge REST API, and deploy
+scripts. Shared workflow rules live in `/home/jack/REPOS/AGENTS.md`.
 
-## Workflow
+## Repo Rules
 
-- Keep changes small, tested, and committed before deploy.
-- Work on `main` for normal changes; `deploy/deploy.sh` resets live code to `origin/main`.
-- Use `uv` for Python dependency and test commands.
-- Prefer repo patterns over new abstractions.
-- Remove obsolete code, scripts, ports, and docs after replacements are verified.
-- Do not edit live `/opt/mcp-servers` as the source of truth except for emergency hotfixes; commit the same change here immediately after.
+- Work on `main`; `deploy/deploy.sh` resets live tracked code to `origin/main`.
+- Use `uv` for Python dependency/test commands.
+- Keep MCP tools explicit and unsurprising; avoid hidden side effects.
+- Do not edit live `/opt/mcp-servers` as source of truth except for emergency hotfixes.
+- Commit the matching repo change immediately after any live hotfix.
 
 ## Knowledge Deploy Checks
 
@@ -19,10 +17,3 @@ control services are deployed separately.
 - Compile changed service files when touching runtime code.
 - After deploy, check `mcp-server@knowledge`, `mcp-knowledge-api.service`, and relevant timers.
 - Back up `knowledge.db` before schema/data migrations, source deletion, or bulk reindexing.
-
-## Style
-
-- Python 3.11+ with type hints on tool functions.
-- Keep MCP tools explicit and boring; avoid hidden side effects.
-- Never commit credentials, `.env`, tokens, generated OAuth files, or raw personal data.
-- Use Context7 for external library/API/framework details when needed; repo-local logic does not require external lookup.
