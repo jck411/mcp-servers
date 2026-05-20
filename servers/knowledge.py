@@ -35,7 +35,7 @@ import re
 import secrets
 import uuid
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +72,7 @@ from servers.knowledge_source_files import (
     source_relative_path,
 )
 from shared.logging_config import get_logger, logged_tool
+from shared.time_context import EASTERN_TIMEZONE
 
 log = get_logger("knowledge")
 
@@ -79,6 +80,11 @@ log = get_logger("knowledge")
 DEFAULT_HTTP_PORT = 9017
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+FACT_COLUMNS = (
+    "domain, key, value, source, confidence, valid_from, valid_until, as_of, "
+    "review_after, origin_type, origin_ref, last_confirmed_at, updated_at"
+)
 
 
 def _auth_provider() -> StaticTokenVerifier | None:
@@ -89,6 +95,60 @@ def _auth_provider() -> StaticTokenVerifier | None:
 
 
 mcp = FastMCP("knowledge", auth=_auth_provider())
+
+
+def _parse_temporal_value(value: Any) -> date | datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return date.fromisoformat(text)
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=EASTERN_TIMEZONE)
+    return parsed.astimezone(EASTERN_TIMEZONE)
+
+
+def _before_today(value: date | datetime, now: datetime, *, inclusive: bool = False) -> bool:
+    if isinstance(value, datetime):
+        return value <= now if inclusive else value < now
+    return value <= now.date() if inclusive else value < now.date()
+
+
+def _after_today(value: date | datetime, now: datetime) -> bool:
+    if isinstance(value, datetime):
+        return value > now
+    return value > now.date()
+
+
+def _before_local_date(value: date | datetime, now: datetime) -> bool:
+    value_date = value.date() if isinstance(value, datetime) else value
+    return value_date < now.date()
+
+
+def fact_temporal_status(fact: dict[str, Any], now: datetime | None = None) -> str:
+    """Classify live fact timing relative to America/New_York runtime time."""
+    now = now or datetime.now(EASTERN_TIMEZONE)
+    try:
+        valid_until = _parse_temporal_value(fact.get("valid_until"))
+        valid_from = _parse_temporal_value(fact.get("valid_from"))
+        review_after = _parse_temporal_value(fact.get("review_after"))
+        as_of = _parse_temporal_value(fact.get("as_of"))
+    except ValueError:
+        return "unknown"
+    if valid_until and _before_today(valid_until, now):
+        return "expired"
+    if valid_from and _after_today(valid_from, now):
+        return "future"
+    if review_after and _before_today(review_after, now, inclusive=True):
+        return "stale"
+    if as_of and _before_local_date(as_of, now):
+        return "historical"
+    return "current"
+
+
+def add_fact_temporal_status(fact: dict[str, Any]) -> dict[str, Any]:
+    return {**fact, "temporal_status": fact_temporal_status(fact)}
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +438,8 @@ class KnowledgeDB:
                 confidence REAL NOT NULL DEFAULT 1.0,
                 valid_from TEXT,
                 valid_until TEXT,
+                as_of TEXT,
+                review_after TEXT,
                 origin_type TEXT NOT NULL DEFAULT 'unknown',
                 origin_ref TEXT,
                 last_confirmed_at TEXT,
@@ -502,6 +564,8 @@ class KnowledgeDB:
         cursor = await self._conn.execute("PRAGMA table_info(facts)")
         existing = {str(row["name"]) for row in await cursor.fetchall()}
         additions = {
+            "as_of": "TEXT",
+            "review_after": "TEXT",
             "origin_type": "TEXT NOT NULL DEFAULT 'unknown'",
             "origin_ref": "TEXT",
             "last_confirmed_at": "TEXT",
@@ -614,6 +678,8 @@ class KnowledgeDB:
         confidence: float = 1.0,
         valid_from: str | None = None,
         valid_until: str | None = None,
+        as_of: str | None = None,
+        review_after: str | None = None,
         origin_type: str = "unknown",
         origin_ref: str | None = None,
     ) -> str:
@@ -625,9 +691,10 @@ class KnowledgeDB:
         await self._conn.execute(
             """
             INSERT INTO facts (id, domain, key, value, source, confidence,
-                               valid_from, valid_until, origin_type, origin_ref,
-                               last_confirmed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                               valid_from, valid_until, as_of, review_after,
+                               origin_type, origin_ref, last_confirmed_at,
+                               created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
             ON CONFLICT(domain, key) DO UPDATE SET
                 last_confirmed_at = CASE
                     WHEN facts.value = excluded.value THEN excluded.updated_at
@@ -638,12 +705,14 @@ class KnowledgeDB:
                 confidence = excluded.confidence,
                 valid_from = excluded.valid_from,
                 valid_until = excluded.valid_until,
+                as_of = excluded.as_of,
+                review_after = excluded.review_after,
                 origin_type = excluded.origin_type,
                 origin_ref = excluded.origin_ref,
                 updated_at = excluded.updated_at
             """,
             (fact_id, domain, key, value, source, confidence,
-             valid_from, valid_until, origin_type, origin_ref, now, now),
+             valid_from, valid_until, as_of, review_after, origin_type, origin_ref, now, now),
         )
         await self._conn.commit()
         return fact_id
@@ -669,13 +738,11 @@ class KnowledgeDB:
     async def facts_list(self, domain: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cursor = await self._conn.execute(
-            "SELECT key, value, source, confidence, valid_from, valid_until, "
-            "origin_type, origin_ref, last_confirmed_at, updated_at "
-            "FROM facts WHERE domain = ? ORDER BY key",
+            f"SELECT {FACT_COLUMNS} FROM facts WHERE domain = ? ORDER BY key",
             (domain,),
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [add_fact_temporal_status(dict(row)) for row in rows]
 
     async def facts_search(self, domains: list[str], keys: list[str]) -> list[dict[str, Any]]:
         """Search facts across multiple domains by substring match on key OR value."""
@@ -696,13 +763,11 @@ class KnowledgeDB:
 
         where = " AND ".join(conditions)
         cursor = await self._conn.execute(
-            f"SELECT domain, key, value, source, confidence, valid_from, valid_until, "  # noqa: S608
-            f"origin_type, origin_ref, last_confirmed_at, updated_at "
-            f"FROM facts WHERE {where} ORDER BY domain, key",
+            f"SELECT {FACT_COLUMNS} FROM facts WHERE {where} ORDER BY domain, key",  # noqa: S608
             params,
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [add_fact_temporal_status(dict(row)) for row in rows]
 
     # -- Sources --
 
@@ -4090,6 +4155,8 @@ async def execute_curation_action(
             float(action.get("confidence", 1.0)),
             action.get("valid_from"),
             action.get("valid_until"),
+            action.get("as_of"),
+            action.get("review_after"),
             origin_type="curation",
             origin_ref=curation_item_id,
         )
@@ -4109,6 +4176,8 @@ async def execute_curation_action(
             float(fact.get("confidence", 1.0)),
             action.get("valid_from", fact.get("valid_from")),
             action.get("valid_until", fact.get("valid_until")),
+            action.get("as_of", fact.get("as_of")),
+            action.get("review_after", fact.get("review_after")),
             origin_type="curation",
             origin_ref=curation_item_id,
         )
@@ -4350,6 +4419,11 @@ async def search_knowledge(
         "similarity": 1.0,
         "key": fact["key"],
         "value": fact["value"],
+        "valid_from": fact.get("valid_from"),
+        "valid_until": fact.get("valid_until"),
+        "as_of": fact.get("as_of"),
+        "review_after": fact.get("review_after"),
+        "temporal_status": fact.get("temporal_status") or fact_temporal_status(fact),
         "origin_type": fact.get("origin_type"),
         "origin_ref": fact.get("origin_ref"),
         "last_confirmed_at": fact.get("last_confirmed_at"),
@@ -4530,6 +4604,8 @@ async def knowledge_fact_set(
     confidence: float = 1.0,
     valid_from: str | None = None,
     valid_until: str | None = None,
+    as_of: str | None = None,
+    review_after: str | None = None,
     origin_type: str = "chat",
     origin_ref: str | None = None,
 ) -> dict[str, Any]:
@@ -4547,6 +4623,8 @@ async def knowledge_fact_set(
         confidence: How confident (0.0 to 1.0). Default 1.0.
         valid_from: ISO date when this fact became true.
         valid_until: ISO date when this fact expires.
+        as_of: ISO date/time when the source observed this claim.
+        review_after: ISO date/time when this fact should be rechecked.
         origin_type: Provenance category. Defaults to "chat" for MCP writes.
         origin_ref: Provenance reference. Defaults to today's date for chat writes.
     """
@@ -4560,7 +4638,7 @@ async def knowledge_fact_set(
 
     fact_id = await db.fact_set(
         domain, key, value, source, confidence, valid_from, valid_until,
-        origin_type, origin_ref,
+        as_of, review_after, origin_type, origin_ref,
     )
     return {
         "success": True,

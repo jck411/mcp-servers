@@ -23,6 +23,7 @@ from servers.knowledge import (
     _validate_text_ingest_inputs,
     chunk_text,
     compute_text_hash,
+    fact_temporal_status,
     resolve_search_domains,
     search_fact_keywords,
     search_knowledge,
@@ -284,6 +285,41 @@ async def test_fact_set_tracks_origin_and_confirmation(tmp_path: Path):
         assert second["last_confirmed_at"] is not None
     finally:
         await db.close()
+
+
+async def test_fact_set_stores_temporal_review_metadata(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "fact_temporal.db")
+    await db.initialize()
+    await db.domain_create("finances", "finance domain", [])
+    try:
+        await db.fact_set(
+            "finances",
+            "msft_position_snapshot",
+            "10 shares",
+            source="brokerage",
+            as_of="2026-05-19",
+            review_after="2026-06-01",
+        )
+        row = await db.fact_get("finances", "msft_position_snapshot")
+        found = await db.facts_search(["finances"], ["msft"])
+    finally:
+        await db.close()
+
+    assert row["as_of"] == "2026-05-19"
+    assert row["review_after"] == "2026-06-01"
+    assert found[0]["as_of"] == "2026-05-19"
+    assert found[0]["review_after"] == "2026-06-01"
+
+
+def test_fact_temporal_status_uses_current_time_boundaries():
+    now = datetime(2026, 5, 20, 12, tzinfo=UTC)
+
+    assert fact_temporal_status({"valid_until": "2026-05-19"}, now) == "expired"
+    assert fact_temporal_status({"valid_until": "2026-05-20"}, now) == "current"
+    assert fact_temporal_status({"valid_from": "2026-05-21"}, now) == "future"
+    assert fact_temporal_status({"review_after": "2026-05-20"}, now) == "stale"
+    assert fact_temporal_status({"as_of": "2026-05-19"}, now) == "historical"
+    assert fact_temporal_status({"as_of": "not-a-date"}, now) == "unknown"
 
 
 async def test_wiki_schema_initializes_tables_and_seed_state(tmp_path: Path):

@@ -371,6 +371,8 @@ async def set_fact(
         float(body.get("confidence", 1.0)),
         body.get("valid_from"),
         body.get("valid_until"),
+        body.get("as_of"),
+        body.get("review_after"),
         str(body.get("origin_type") or "manual"),
         body.get("origin_ref"),
     )

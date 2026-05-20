@@ -68,7 +68,8 @@ stored bytes.
 4. Return chunk results with `source_id`, `chunk_id`, `source_name`,
    `source_type`, `chunk_index`, and similarity.
 5. Optionally search facts by regex-extracted keywords against both fact keys
-   and values.
+   and values. Fact results include `valid_from`, `valid_until`, `as_of`,
+   `review_after`, and `temporal_status`.
 
 Use `max_chars` to cap returned chunk content without changing stored data.
 

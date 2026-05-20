@@ -10,6 +10,10 @@ scripts. Shared workflow rules live in `/home/jack/REPOS/AGENTS.md`.
 - Keep MCP tools explicit and unsurprising; avoid hidden side effects.
 - Do not edit live `/opt/mcp-servers` as source of truth except for emergency hotfixes.
 - Commit the matching repo change immediately after any live hotfix.
+- For normal verified changes to deployable Knowledge service code, commit and
+  push `main`, then run `deploy/deploy.sh --tunnel ...` when working remotely
+  or `deploy/deploy.sh ...` on the LAN. Do not leave deployable changes only in
+  the local checkout unless Jack explicitly asks to pause before deploy.
 
 ## Knowledge Deploy Checks
 
