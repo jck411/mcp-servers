@@ -5473,10 +5473,20 @@ async def knowledge_curation_create(
     confidence: float = 0.0,
     item_id: str | None = None,
 ) -> dict[str, Any]:
-    """Queue a proposed Knowledge change for human review.
+    """Queue a proposed Knowledge change for human review. LAST RESORT ONLY.
 
-    Use this instead of direct writes when Jack hedges, contradicts stored facts,
-    mentions something in passing, or when the agent is inferring.
+    In normal chat, prefer storing facts directly or asking Jack. This tool
+    exists for automated/batch processes that cannot ask Jack in the moment.
+    If the curation queue has items, it means something upstream needs fixing.
+
+    Do NOT use this for:
+    - Facts Jack clearly stated (store them directly with as_of dating)
+    - Things you're unsure about (ask Jack now — you're in a conversation)
+    - High-confidence observations (confidence >= 0.8 means store it)
+
+    Use this ONLY for:
+    - Automated batch processing that finds contradictions with existing data
+    - Maintenance scripts that detect structural issues needing human review
 
     Args:
         actions: Proposed actions. Each action must include "action" or "type".
