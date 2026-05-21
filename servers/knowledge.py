@@ -3564,7 +3564,14 @@ async def _call_wiki_llm(
     return _decode_llm_json_object(raw_output), int(usage.get("total_tokens") or 0)
 
 
-async def _rebuild_wiki_index(db: KnowledgeDB, domain: str) -> str:
+async def _rebuild_wiki_index(
+    db: KnowledgeDB,
+    domain: str,
+    *,
+    vectors: KnowledgeVectorStore | None = None,
+    embeddings: Any | None = None,
+    sparse_encoder: Any | None = None,
+) -> str:
     pages = [
         page for page in await db.wiki_list(domain=domain, status="active", limit=200)
         if page["kind"] != "index"
@@ -3577,17 +3584,20 @@ async def _rebuild_wiki_index(db: KnowledgeDB, domain: str) -> str:
         lines.extend(["", f"## {kind.replace('_', ' ').title()}"])
         lines.extend(f"- `{item['slug']}` - {item['title']}" for item in items)
     slug = f"{domain}/index"
+    title = f"{domain.replace('_', ' ').title()} Index"
+    status = "active" if pages else "candidate"
+    body_md = "\n".join(lines)
     await db.wiki_upsert_page(
         slug=slug,
         domain=domain,
-        title=f"{domain.replace('_', ' ').title()} Index",
+        title=title,
         kind="index",
-        status="active" if pages else "candidate",
-        body_md="\n".join(lines),
+        status=status,
+        body_md=body_md,
         frontmatter={
             "schema_version": 1,
             "slug": slug,
-            "title": f"{domain.replace('_', ' ').title()} Index",
+            "title": title,
             "kind": "index",
             "domain": domain,
             "entity_type": "index",
@@ -3601,6 +3611,18 @@ async def _rebuild_wiki_index(db: KnowledgeDB, domain: str) -> str:
         sources=[],
         fact_count=0,
     )
+    # Embed active index pages into Qdrant for semantic search.
+    if status == "active" and vectors and embeddings and sparse_encoder:
+        await vectors.embed_wiki_page(
+            slug=slug,
+            domain=domain,
+            title=title,
+            body_md=body_md,
+            embeddings=embeddings,
+            sparse_encoder=sparse_encoder,
+        )
+    elif status != "active" and vectors:
+        await vectors.delete_by_source(slug)
     return slug
 
 
@@ -3662,7 +3684,10 @@ async def rebuild_wiki(
             touched.append(page["slug"])
 
         for touched_domain in sorted({str(item["domain"]) for item in preview["changed_entities"]}):
-            touched.append(await _rebuild_wiki_index(db, touched_domain))
+            touched.append(await _rebuild_wiki_index(
+                db, touched_domain,
+                vectors=vectors, embeddings=embeddings, sparse_encoder=sparse_encoder,
+            ))
 
         await db.wiki_state_set("last_wiki_run", started_at)
         final_tokens = usage_tokens or preview["token_estimate"]

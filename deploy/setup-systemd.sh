@@ -86,7 +86,7 @@ echo ""
 echo "=== Removing legacy cron entries ==="
 tmp_cron="$(mktemp)"
 if crontab -l > "$tmp_cron" 2>/dev/null; then
-    grep -Ev '/opt/mcp-servers/deploy/(backup|healthcheck)\.sh|mcp-wiki-maintain' \
+    grep -Ev '/opt/mcp-servers/deploy/(backup|healthcheck)\.sh|mcp-wiki-maintain|#.*Knowledge system (backup|healthcheck)' \
         "$tmp_cron" > "${tmp_cron}.new" || true
     crontab "${tmp_cron}.new"
     echo "  Removed old backup/healthcheck/wiki cron entries"
