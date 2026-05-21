@@ -29,7 +29,7 @@ from servers.knowledge import (  # noqa: E402
 
 async def main() -> None:
     settings = KnowledgeSettings()  # type: ignore[call-arg]
-    db = KnowledgeDB(Path(settings.knowledge_db_path))
+    db = KnowledgeDB(Path(settings.db_path))
     await db.initialize()
 
     embeddings = EmbeddingClient(settings)
