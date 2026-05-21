@@ -35,7 +35,7 @@ async def main() -> None:
     embeddings = EmbeddingClient(settings)
     sparse_encoder = BM25SparseEncoder()
     vectors = KnowledgeVectorStore(settings)
-    await vectors.initialize()
+    await vectors.ensure_collection()
 
     # Warm up BM25 from existing chunks.
     all_chunks = await vectors.chunks_all(limit=50_000)
