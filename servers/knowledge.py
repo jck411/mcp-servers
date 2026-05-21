@@ -1581,6 +1581,43 @@ class KnowledgeVectorStore:
             ),
         )
 
+    async def embed_wiki_page(
+        self,
+        *,
+        slug: str,
+        domain: str,
+        title: str,
+        body_md: str,
+        embeddings: Any,
+        sparse_encoder: Any,
+    ) -> None:
+        """Embed a wiki page body into Qdrant as a single chunk.
+
+        Replaces any previous vectors for this slug. The page participates
+        in the same hybrid search as source chunks so wiki and document
+        results compete on semantic similarity rather than keyword heuristics.
+        """
+        if not body_md.strip():
+            return
+        # Remove old vectors for this page.
+        await self.delete_by_source(slug)
+        text = f"{title}\n\n{body_md}"
+        dense = await embeddings.embed(text)
+        sparse_encoder.fit_batch([text])
+        sparse = sparse_encoder.encode(text)
+        now = datetime.now(UTC).isoformat()
+        chunk = {
+            "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"wiki:{slug}")),
+            "domain": domain,
+            "source_id": slug,
+            "source_type": "wiki_page",
+            "source_name": title,
+            "chunk_index": 0,
+            "content": text,
+            "ingested_at": now,
+        }
+        await self.upsert_chunks([chunk], [dense], [sparse])
+
     async def update_source_name(self, source_id: str, source_name: str) -> None:
         await self._client.set_payload(
             collection_name=self._collection,
@@ -3609,6 +3646,19 @@ async def rebuild_wiki(
                 sources=page["sources"],
                 fact_count=page["fact_count"],
             )
+            # Embed wiki page into Qdrant for semantic search.
+            if page["status"] == "active":
+                await vectors.embed_wiki_page(
+                    slug=page["slug"],
+                    domain=page["domain"],
+                    title=page["title"],
+                    body_md=page["body_md"],
+                    embeddings=embeddings,
+                    sparse_encoder=sparse_encoder,
+                )
+            else:
+                # Non-active pages should not appear in vector search.
+                await vectors.delete_by_source(page["slug"])
             touched.append(page["slug"])
 
         for touched_domain in sorted({str(item["domain"]) for item in preview["changed_entities"]}):
@@ -4552,13 +4602,6 @@ async def search_knowledge(
     )
     facts = filter_facts_for_temporal_intent(facts, search_temporal_intent, now)
     route = classify_search_route(query, facts)
-    wiki_statuses = {"active", "archived"} if include_archived else {"active"}
-    wiki_matches = await db.wiki_search(
-        resolved_domains,
-        retrieval_query,
-        limit=min(limit, 5),
-        statuses=wiki_statuses,
-    )
 
     query_embedding = await embeddings.embed(retrieval_query)
     sparse_query = sparse_encoder.encode_query(retrieval_query)
@@ -4571,23 +4614,53 @@ async def search_knowledge(
         min_score=min_similarity,
     )
 
+    # Split Qdrant results into wiki pages (source_type=wiki_page) and
+    # regular source chunks.  Wiki pages are enriched with SQLite metadata.
     chunk_results = []
+    wiki_results = []
+    wiki_slugs_seen: set[str] = set()
     for r in results:
         p = r.payload or {}
         content = str(p.get("content", ""))
         if max_chars is not None and max_chars > 0 and len(content) > max_chars:
             content = content[:max_chars] + "…"
-        chunk_results.append({
-            "result_type": "chunk",
-            "content": content,
-            "domain": p.get("domain", ""),
-            "source_id": p.get("source_id", ""),
-            "source_name": p.get("source_name", ""),
-            "source_type": p.get("source_type", ""),
-            "chunk_id": str(r.id),
-            "chunk_index": p.get("chunk_index", 0),
-            "similarity": round(r.score, 4),
-        })
+        if p.get("source_type") == "wiki_page":
+            slug = str(p.get("source_id") or "")
+            if slug in wiki_slugs_seen:
+                continue
+            wiki_slugs_seen.add(slug)
+            # Enrich from SQLite for title, kind, status, frontmatter.
+            page = await db.wiki_get(slug) if slug else None
+            include_archived = search_temporal_intent == "historical"
+            if page and (page["status"] == "active" or (include_archived and page["status"] == "archived")):
+                wiki_results.append({
+                    "result_type": "wiki",
+                    "content": content,
+                    "domain": p.get("domain", ""),
+                    "source_id": slug,
+                    "source_name": page["title"],
+                    "source_type": "wiki_page",
+                    "chunk_id": slug,
+                    "chunk_index": 0,
+                    "similarity": round(r.score, 4),
+                    "slug": slug,
+                    "title": page["title"],
+                    "kind": page["kind"],
+                    "status": page["status"],
+                    "frontmatter": page.get("frontmatter") or {},
+                })
+        else:
+            chunk_results.append({
+                "result_type": "chunk",
+                "content": content,
+                "domain": p.get("domain", ""),
+                "source_id": p.get("source_id", ""),
+                "source_name": p.get("source_name", ""),
+                "source_type": p.get("source_type", ""),
+                "chunk_id": str(r.id),
+                "chunk_index": p.get("chunk_index", 0),
+                "similarity": round(r.score, 4),
+            })
 
     fact_results = [{
         "result_type": "fact",
@@ -4610,27 +4683,7 @@ async def search_knowledge(
         "origin_ref": fact.get("origin_ref"),
         "last_confirmed_at": fact.get("last_confirmed_at"),
     } for fact in facts]
-    wiki_results = []
-    for page in wiki_matches:
-        content = str(page.get("body_md") or "")
-        if max_chars is not None and max_chars > 0 and len(content) > max_chars:
-            content = content[:max_chars] + "…"
-        wiki_results.append({
-            "result_type": "wiki",
-            "content": content,
-            "domain": page["domain"],
-            "source_id": "",
-            "source_name": page["title"],
-            "source_type": "wiki_page",
-            "chunk_id": page["slug"],
-            "chunk_index": 0,
-            "similarity": round(float(page.get("score") or 0), 4),
-            "slug": page["slug"],
-            "title": page["title"],
-            "kind": page["kind"],
-            "status": page["status"],
-            "frontmatter": page.get("frontmatter") or {},
-        })
+
     if route == "fact":
         ordered_results = [
             *fact_results,
@@ -4640,7 +4693,11 @@ async def search_knowledge(
     elif route == "evidence":
         ordered_results = [*chunk_results, *wiki_results]
     else:
-        ordered_results = [*wiki_results, *chunk_results]
+        # Wiki and chunk results are already on the same similarity scale
+        # (cosine similarity from Qdrant), so merge and sort by score.
+        merged = [*wiki_results, *chunk_results]
+        merged.sort(key=lambda r: -float(r.get("similarity") or 0))
+        ordered_results = merged
     formatted = ordered_results[:max(1, limit)]
 
     response: dict[str, Any] = {

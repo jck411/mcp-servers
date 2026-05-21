@@ -749,6 +749,12 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
                     },
                 )]
 
+            async def embed_wiki_page(self, **kwargs) -> None:
+                pass
+
+            async def delete_by_source(self, source_id: str) -> None:
+                pass
+
         async def fake_call_wiki_llm(settings, context):
             assert context["facts"][0]["key"] == "dad_heart_history"
             assert context["chunks"]
@@ -853,6 +859,12 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
 
             async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
                 return []
+
+            async def embed_wiki_page(self, **kwargs) -> None:
+                pass
+
+            async def delete_by_source(self, source_id: str) -> None:
+                pass
 
         async def fake_call_wiki_llm(settings, context):
             return {
@@ -1098,18 +1110,32 @@ async def test_search_knowledge_routes_synthesis_to_active_wiki(tmp_path: Path):
 
         class FakeVectors:
             async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
-                return [SimpleNamespace(
-                    id="chunk-dad",
-                    score=0.5,
-                    payload={
-                        "content": "Dad source chunk.",
-                        "domain": "family",
-                        "source_id": "source-dad",
-                        "source_name": "dad.pdf",
-                        "source_type": "pdf",
-                        "chunk_index": 0,
-                    },
-                )]
+                return [
+                    SimpleNamespace(
+                        id="wiki-dad",
+                        score=0.85,
+                        payload={
+                            "content": "Dad heart history overview.",
+                            "domain": "family",
+                            "source_id": "family/dad",
+                            "source_name": "Dad",
+                            "source_type": "wiki_page",
+                            "chunk_index": 0,
+                        },
+                    ),
+                    SimpleNamespace(
+                        id="chunk-dad",
+                        score=0.5,
+                        payload={
+                            "content": "Dad source chunk.",
+                            "domain": "family",
+                            "source_id": "source-dad",
+                            "source_name": "dad.pdf",
+                            "source_type": "pdf",
+                            "chunk_index": 0,
+                        },
+                    ),
+                ]
 
         response = await search_knowledge(
             embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
