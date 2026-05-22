@@ -356,7 +356,7 @@ async def set_fact(
     body: dict[str, Any] = REQUIRED_BODY,
 ) -> dict[str, Any]:
     """Upsert a structured fact in a domain."""
-    settings, _, _, _, db = _require_ready()
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
 
     if not await db.domain_exists(domain):
         raise HTTPException(status_code=404, detail=f"Domain '{domain}' not found")
@@ -379,6 +379,16 @@ async def set_fact(
         body.get("origin_ref"),
     )
 
+    # Embed fact as a derived vector for semantic search.
+    try:
+        fact_row = await db.fact_get(domain, key)
+        if fact_row:
+            await vectors.embed_fact(
+                fact=fact_row, embeddings=embeddings, sparse_encoder=sparse_encoder,
+            )
+    except Exception:
+        log.warning("fact_vector_embed_failed domain=%s key=%s", domain, key, exc_info=True)
+
     return {"domain": domain, "key": key, "value": value}
 
 
@@ -390,7 +400,7 @@ async def set_fact(
 @app.delete("/api/facts/{domain}/{key}")
 async def delete_fact(domain: str, key: str) -> dict[str, Any]:
     """Delete a structured fact from a domain."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, vectors, db = _require_ready()
 
     deleted = await db.fact_delete(domain, key)
     if not deleted:
@@ -398,6 +408,12 @@ async def delete_fact(domain: str, key: str) -> dict[str, Any]:
             status_code=404,
             detail=f"Fact '{key}' not found in domain '{domain}'",
         )
+
+    # Clean up the derived Qdrant vector.
+    try:
+        await vectors.delete_fact_vector(domain, key)
+    except Exception:
+        log.warning("fact_vector_delete_failed domain=%s key=%s", domain, key, exc_info=True)
 
     return {"deleted": True, "domain": domain, "key": key}
 

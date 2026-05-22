@@ -1618,6 +1618,103 @@ class KnowledgeVectorStore:
         }
         await self.upsert_chunks([chunk], [dense], [sparse])
 
+    async def embed_fact(
+        self,
+        *,
+        fact: dict[str, Any],
+        embeddings: Any,
+        sparse_encoder: Any,
+    ) -> None:
+        """Embed a structured fact into Qdrant as a single derived vector.
+
+        The fact is enriched with domain context, temporal metadata, and source
+        provenance to improve semantic retrieval. The Qdrant point uses
+        type=fact and fact_id, which the maintenance scanner recognises as a
+        separate identity scheme (not a source chunk).
+        """
+        domain = str(fact.get("domain", ""))
+        key = str(fact.get("key", ""))
+        value = str(fact.get("value", ""))
+        if not (domain and key and value):
+            return
+
+        fact_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain}:{key}"))
+
+        # Build enriched text for embedding — mirrors the old vectorisation
+        # payload but is generated deterministically from the fact row.
+        parts = [f"Structured fact in {domain} domain."]
+        readable_key = key.replace("_", " ")
+        parts.append(f"{readable_key}: {value}.")
+        if fact.get("source"):
+            parts.append(f"Source: {fact['source']}.")
+        temporal_parts: list[str] = []
+        if fact.get("valid_from"):
+            temporal_parts.append(f"from {fact['valid_from']}")
+        if fact.get("valid_until"):
+            temporal_parts.append(f"until {fact['valid_until']}")
+        elif fact.get("valid_from"):
+            temporal_parts.append("until open-ended")
+        if temporal_parts:
+            parts.append(f"Valid {' '.join(temporal_parts)}.")
+        if fact.get("as_of"):
+            parts.append(f"As of {fact['as_of']}.")
+
+        enriched_text = " ".join(parts)
+        raw_text = f"{key}: {value}"
+
+        # Remove any existing vector for this fact.
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="fact_id", match=MatchValue(value=fact_id))]
+            ),
+        )
+
+        dense = await embeddings.embed(enriched_text)
+        sparse_encoder.fit_batch([enriched_text])
+        sparse = sparse_encoder.encode(enriched_text)
+        now = datetime.now(UTC).isoformat()
+
+        related_domains = [domain]
+        if domain != "core":
+            related_domains.append("core")
+
+        chunk = {
+            "id": fact_id,
+            "type": "fact",
+            "domain": domain,
+            "fact_id": fact_id,
+            "key": key,
+            "value": value,
+            "raw": raw_text,
+            "content": enriched_text,
+            "enriched_text": enriched_text,
+            "source": fact.get("source") or "",
+            "source_name": f"fact:{domain}/{key}",
+            "source_type": "fact",
+            "entity_links": related_domains,
+            "confidence": fact.get("confidence", 1.0),
+            "valid_from": fact.get("valid_from"),
+            "valid_until": fact.get("valid_until"),
+            "as_of": fact.get("as_of"),
+            "review_after": fact.get("review_after"),
+            "updated_at": fact.get("updated_at") or now,
+            "created_at": fact.get("created_at") or now,
+            "chunk_index": 0,
+            "ingested_at": now,
+        }
+        await self.upsert_chunks([chunk], [dense], [sparse])
+
+    async def delete_fact_vector(self, domain: str, key: str) -> None:
+        """Delete the derived Qdrant vector for a fact."""
+        fact_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain}:{key}"))
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="fact_id", match=MatchValue(value=fact_id))]
+            ),
+        )
+
     async def update_source_name(self, source_id: str, source_name: str) -> None:
         await self._client.set_payload(
             collection_name=self._collection,
@@ -4896,7 +4993,7 @@ async def knowledge_fact_set(
         origin_type: Provenance category. Defaults to "chat" for MCP writes.
         origin_ref: Provenance reference. Defaults to today's date for chat writes.
     """
-    _, _, _, _, db = _require_ready()
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
 
     if not await db.domain_exists(domain):
         return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
@@ -4908,6 +5005,17 @@ async def knowledge_fact_set(
         domain, key, value, source, confidence, valid_from, valid_until,
         as_of, review_after, origin_type, origin_ref,
     )
+
+    # Embed fact as a derived vector for semantic search.
+    try:
+        fact_row = await db.fact_get(domain, key)
+        if fact_row:
+            await vectors.embed_fact(
+                fact=fact_row, embeddings=embeddings, sparse_encoder=sparse_encoder,
+            )
+    except Exception:
+        log.warning("fact_vector_embed_failed domain=%s key=%s", domain, key, exc_info=True)
+
     return {
         "success": True,
         "fact_id": fact_id,
@@ -4926,11 +5034,17 @@ async def knowledge_fact_delete(domain: str, key: str) -> dict[str, Any]:
         domain: Domain the fact belongs to.
         key: The fact key to delete.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, vectors, db = _require_ready()
 
     deleted = await db.fact_delete(domain, key)
     if not deleted:
         return {"success": False, "error": f"Fact '{key}' not found in domain '{domain}'"}
+
+    # Clean up the derived Qdrant vector.
+    try:
+        await vectors.delete_fact_vector(domain, key)
+    except Exception:
+        log.warning("fact_vector_delete_failed domain=%s key=%s", domain, key, exc_info=True)
 
     return {"success": True, "domain": domain, "key": key, "message": "Fact deleted."}
 
