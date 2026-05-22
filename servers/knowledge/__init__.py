@@ -9,6 +9,10 @@ Phase 1 extractions (own modules):
   - embeddings.py: EmbeddingClient, BM25SparseEncoder
   - temporal.py: fact_temporal_status, add_fact_temporal_status
 
+Phase 2 extractions (own modules):
+  - db.py: KnowledgeDB, search_fact_keywords
+  - vectors.py: KnowledgeVectorStore
+
 Everything else is re-exported from knowledge_server.py until
 extracted in later phases.
 """
@@ -27,10 +31,12 @@ from servers.knowledge.temporal import (
     fact_temporal_status,
 )
 
+# --- Phase 2: Extracted modules ---
+from servers.knowledge.db import KnowledgeDB, search_fact_keywords
+from servers.knowledge.vectors import KnowledgeVectorStore
+
 # --- Not yet extracted: re-export from knowledge_server.py ---
 from servers.knowledge_server import (  # noqa: E402
-    KnowledgeDB,
-    KnowledgeVectorStore,
     _ingest_file_at_path,
     _is_likely_binary,
     _validate_text_ingest_inputs,
@@ -48,7 +54,6 @@ from servers.knowledge_server import (  # noqa: E402
     rebuild_wiki,
     rename_source_record,
     resolve_search_domains,
-    search_fact_keywords,
     search_knowledge,
     source_download_bytes,
 )
@@ -64,9 +69,11 @@ __all__ = [
     "add_fact_temporal_status",
     "fact_temporal_counts",
     "fact_temporal_status",
-    # Re-exports from knowledge_server.py
+    # Phase 2 extractions
     "KnowledgeDB",
     "KnowledgeVectorStore",
+    "search_fact_keywords",
+    # Re-exports from knowledge_server.py
     "_ingest_file_at_path",
     "_is_likely_binary",
     "_validate_text_ingest_inputs",
@@ -84,7 +91,6 @@ __all__ = [
     "rebuild_wiki",
     "rename_source_record",
     "resolve_search_domains",
-    "search_fact_keywords",
     "search_knowledge",
     "source_download_bytes",
 ]
