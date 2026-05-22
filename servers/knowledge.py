@@ -5307,6 +5307,136 @@ async def knowledge_upload_file_base64(
 
 
 # ---------------------------------------------------------------------------
+# MCP Tools — Context Pack (high-level facade)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool("knowledge_context_pack")
+@logged_tool(log)
+async def knowledge_context_pack(
+    query: str,
+    temporal_intent: str | None = None,
+    max_results: int = 8,
+) -> dict[str, Any]:
+    """Get Jack's personal context for any question. CALL THIS FIRST.
+
+    This is your primary tool for ANY question that might relate to Jack's
+    personal life, schedule, plans, preferences, health, work, relationships,
+    finances, home, or anything he has told you before.
+
+    Call this BEFORE web search, calendar, email, or any other tool. It
+    combines semantic search, structured facts, and wiki pages into one
+    compact context package.
+
+    Only skip this tool if the question is purely about public knowledge
+    with zero personal dimension (e.g., "what is the capital of France").
+
+    Args:
+        query: The user's question or topic to search for.
+        temporal_intent: Optional hint — auto, all, current_upcoming, or
+            historical. Defaults to auto (inferred from the query).
+        max_results: Maximum search results to include (default 8).
+
+    Returns:
+        A context package with facts, search results, wiki pages, and
+        suggestions for whether additional tools (web, calendar, etc.)
+        might be useful.
+    """
+    settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
+
+    # 1. Run the full Knowledge search (facts + chunks + wiki)
+    search_result = await search_knowledge(
+        embeddings=embeddings_client,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+        query=query,
+        limit=max_results,
+        min_similarity=0.25,
+        include_facts=True,
+        max_chars=800,
+        temporal_intent=temporal_intent,
+    )
+
+    # 2. Gather domain summary for context
+    all_domains = await db.domain_list()
+    active_domains = [
+        {"name": d["name"], "description": d["description"]}
+        for d in all_domains
+        if not d["archived"]
+    ]
+
+    # 3. Check curation queue (lightweight)
+    pending_count = 0
+    with contextlib.suppress(Exception):
+        pending_count = await db.curation_count(status="pending")
+
+    # 4. Summarize what we found
+    facts = search_result.get("facts", [])
+    results = search_result.get("results", [])
+    wiki_count = search_result.get("wiki_count", 0)
+    chunk_count = search_result.get("chunk_count", 0)
+    fact_count = len(facts)
+
+    has_personal_context = fact_count > 0 or len(results) > 0
+
+    # 5. Build augmentation suggestions
+    suggestions: list[str] = []
+    query_lower = query.lower()
+
+    # Temporal/calendar hints
+    temporal_words = {"tomorrow", "today", "tonight", "weekend", "next week",
+                      "schedule", "calendar", "appointment", "meeting", "event"}
+    if any(w in query_lower for w in temporal_words):
+        suggestions.append("calendar: check calendar for schedule/event details")
+
+    # Weather hints
+    weather_words = {"weather", "rain", "temperature", "forecast", "outside",
+                     "cold", "hot", "warm", "umbrella"}
+    if any(w in query_lower for w in weather_words):
+        suggestions.append("weather: get current/forecast weather data")
+
+    # Email hints
+    email_words = {"email", "mail", "inbox", "message", "sent", "reply"}
+    if any(w in query_lower for w in email_words):
+        suggestions.append("email: check Gmail for related messages")
+
+    # Web supplement (only if personal context is thin)
+    if not has_personal_context:
+        suggestions.append(
+            "web_search: no personal context found — web search may help "
+            "if this is a public knowledge question"
+        )
+    elif any(w in query_lower for w in {"news", "latest", "current", "price",
+                                         "stock", "market"}):
+        suggestions.append(
+            "web_search: personal context found but query may benefit from "
+            "current public data"
+        )
+
+    return {
+        "success": True,
+        "query": query,
+        "temporal_intent": search_result.get("temporal_intent", "auto"),
+        "searched_domains": search_result.get("searched_domains", []),
+        "has_personal_context": has_personal_context,
+        # Core results
+        "facts": facts,
+        "fact_count": fact_count,
+        "results": results,
+        "result_count": len(results),
+        "wiki_count": wiki_count,
+        "chunk_count": chunk_count,
+        # Domain awareness
+        "available_domains": active_domains,
+        # Diagnostics
+        "curation_pending": pending_count,
+        # Guidance for the model
+        "augmentation_suggestions": suggestions,
+    }
+
+
+# ---------------------------------------------------------------------------
 # MCP Tools — Search
 # ---------------------------------------------------------------------------
 

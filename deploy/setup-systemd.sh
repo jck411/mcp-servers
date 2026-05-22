@@ -24,10 +24,11 @@ cd "$REPO_DIR" && uv sync --extra all
 # Port map
 declare -A PORT_MAP=(
     [knowledge]=9017
+    [web_search]=9016
 )
 
 # Default servers to enable
-DEFAULT_SERVERS=("knowledge")
+DEFAULT_SERVERS=("knowledge" "web_search")
 
 # Use provided servers or defaults
 if [[ $# -gt 0 ]]; then

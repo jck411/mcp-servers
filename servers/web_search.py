@@ -80,10 +80,19 @@ async def web_search(
     region: str = "wt-wt",
     timelimit: str | None = None,
 ) -> str:
-    """Search the web using DuckDuckGo.
+    """Search the PUBLIC web using DuckDuckGo.
 
-    Performs a general web search and returns formatted results with titles,
-    snippets, and URLs.
+    Use this ONLY for questions about public information: current events,
+    product research, technical documentation, how-to guides, or topics
+    NOT related to Jack's personal life.
+
+    Do NOT use this for: Jack's schedule, todos, preferences, health,
+    finances, relationships, work plans, or anything he has discussed
+    before. Use knowledge_context_pack for those — it searches Jack's
+    personal Knowledge base.
+
+    Call knowledge_context_pack FIRST. Only use web search when personal
+    context is insufficient or the question is clearly about public data.
 
     Args:
         query: Search query string
@@ -127,7 +136,8 @@ async def web_search_news(
 ) -> str:
     """Search for recent news articles using DuckDuckGo News.
 
-    Returns news articles with titles, sources, dates, and URLs.
+    Use for public news and current events. Do NOT use for Jack's personal
+    schedule, plans, or life questions — use knowledge_context_pack instead.
 
     Args:
         query: News search query string
@@ -243,10 +253,13 @@ async def web_search_images(
 
 @mcp.tool("web_fetch_page")
 async def web_fetch_page(url: str) -> str:
-    """Fetch and extract the main content from a webpage.
+    """Fetch and extract the main content from a public webpage.
 
     Downloads a webpage and extracts the main text content, removing navigation,
     ads, and other non-essential elements. Returns clean, readable text.
+
+    Use only after web_search has identified a relevant URL. Do not use this
+    as a substitute for searching Jack's Knowledge base.
 
     Args:
         url: URL of the webpage to fetch
