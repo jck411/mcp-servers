@@ -39,22 +39,19 @@ import uvicorn
 from fastapi import Body, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 
-from servers.knowledge import (
-    BM25SparseEncoder,
-    EmbeddingClient,
-    KnowledgeDB,
-    KnowledgeSettings,
-    KnowledgeVectorStore,
-    _ingest_file_at_path,
-    apply_curation_item,
-    create_curation_queue_item,
+from servers.knowledge.settings import KnowledgeSettings
+from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
+from servers.knowledge.db import KnowledgeDB
+from servers.knowledge.vectors import KnowledgeVectorStore
+from servers.knowledge.ingestion import _ingest_file_at_path, extract_source_facts_single_shot
+from servers.knowledge.sources import (
     delete_source_record,
     delete_sources_for_overwrite,
-    extract_source_facts_single_shot,
     rename_source_record,
-    search_knowledge,
     source_download_bytes,
 )
+from servers.knowledge.search import search_knowledge
+from servers.knowledge.curation import apply_curation_item, create_curation_queue_item
 from servers.knowledge_source_files import (
     sanitize_source_filename,
 )

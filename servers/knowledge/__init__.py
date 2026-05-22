@@ -33,7 +33,11 @@ from servers.knowledge.extraction import (
     chunk_text,
     compute_text_hash,
 )
-from servers.knowledge.ingestion import _ingest_file_at_path, _validate_text_ingest_inputs
+from servers.knowledge.ingestion import (
+    _ingest_file_at_path,
+    _validate_text_ingest_inputs,
+    extract_source_facts_single_shot,
+)
 from servers.knowledge.sources import (
     delete_source_record,
     delete_sources_for_overwrite,
@@ -73,6 +77,7 @@ __all__ = [
     "_ingest_file_at_path",
     "_is_likely_binary",
     "_validate_text_ingest_inputs",
+    "extract_source_facts_single_shot",
     "apply_curation_item",
     "apply_curation_pack_resolution",
     "build_curation_question_packs",
