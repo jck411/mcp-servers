@@ -509,6 +509,7 @@ async def test_wiki_page_helpers_get_list_and_set_status(tmp_path: Path):
 
 async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import servers.knowledge_server as knowledge
+    import servers.knowledge_admin_server as knowledge_admin
 
     db = KnowledgeDB(tmp_path / "wiki_tools.db")
     await db.initialize()
@@ -526,12 +527,21 @@ async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.Mon
         )
         await db._conn.commit()
 
+        # Patch main server
         monkeypatch.setattr(knowledge, "_ready", True)
         monkeypatch.setattr(knowledge, "_settings", object())
         monkeypatch.setattr(knowledge, "_embeddings", object())
         monkeypatch.setattr(knowledge, "_sparse_encoder", object())
         monkeypatch.setattr(knowledge, "_vectors", object())
         monkeypatch.setattr(knowledge, "_db", db)
+
+        # Patch admin server
+        monkeypatch.setattr(knowledge_admin, "_ready", True)
+        monkeypatch.setattr(knowledge_admin, "_settings", object())
+        monkeypatch.setattr(knowledge_admin, "_embeddings", object())
+        monkeypatch.setattr(knowledge_admin, "_sparse_encoder", object())
+        monkeypatch.setattr(knowledge_admin, "_vectors", object())
+        monkeypatch.setattr(knowledge_admin, "_db", db)
 
         get_tool = (
             knowledge.knowledge_wiki_get.fn
@@ -544,9 +554,9 @@ async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.Mon
             else knowledge.knowledge_wiki_list
         )
         set_status_tool = (
-            knowledge.knowledge_wiki_set_status.fn
-            if hasattr(knowledge.knowledge_wiki_set_status, "fn")
-            else knowledge.knowledge_wiki_set_status
+            knowledge_admin.knowledge_wiki_set_status.fn
+            if hasattr(knowledge_admin.knowledge_wiki_set_status, "fn")
+            else knowledge_admin.knowledge_wiki_set_status
         )
 
         assert (await list_tool(status="draft"))["success"] is False

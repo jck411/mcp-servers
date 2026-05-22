@@ -29,11 +29,12 @@ BACKEND_REFRESH_URL="https://127.0.0.1:8000/api/mcp/servers/refresh"
 declare -A PORT_MAP=(
     [knowledge]=9017
     [knowledge_api]=9018
+    [knowledge_admin]=9019
     [web_search]=9016
 )
 
 ALL_SERVERS=(
-    knowledge knowledge_api web_search
+    knowledge knowledge_admin knowledge_api web_search
 )
 
 # ── Parse args ────────────────────────────────────────────────────────────────
