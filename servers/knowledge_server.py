@@ -76,14 +76,19 @@ from shared.time_context import EASTERN_TIMEZONE
 
 log = get_logger("knowledge")
 
-# Default port for HTTP transport
-DEFAULT_HTTP_PORT = 9017
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-FACT_COLUMNS = (
-    "domain, key, value, source, confidence, valid_from, valid_until, as_of, "
-    "review_after, origin_type, origin_ref, last_confirmed_at, updated_at"
+# --- Extracted to servers/knowledge/ package (Phase 1) ---
+from servers.knowledge.settings import (  # noqa: F811
+    DEFAULT_HTTP_PORT,
+    FACT_COLUMNS,
+    PROJECT_ROOT,
+    KnowledgeSettings,
+)
+from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: F811
+from servers.knowledge.temporal import (  # noqa: F811
+    _parse_temporal_value,
+    add_fact_temporal_status,
+    fact_temporal_counts,
+    fact_temporal_status,
 )
 
 
@@ -95,268 +100,6 @@ def _auth_provider() -> StaticTokenVerifier | None:
 
 
 mcp = FastMCP("knowledge", auth=_auth_provider())
-
-
-def _parse_temporal_value(value: Any) -> date | datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        return date.fromisoformat(text)
-    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=EASTERN_TIMEZONE)
-    return parsed.astimezone(EASTERN_TIMEZONE)
-
-
-def _before_today(value: date | datetime, now: datetime, *, inclusive: bool = False) -> bool:
-    if isinstance(value, datetime):
-        return value <= now if inclusive else value < now
-    return value <= now.date() if inclusive else value < now.date()
-
-
-def _after_today(value: date | datetime, now: datetime) -> bool:
-    if isinstance(value, datetime):
-        return value > now
-    return value > now.date()
-
-
-def _before_local_date(value: date | datetime, now: datetime) -> bool:
-    value_date = value.date() if isinstance(value, datetime) else value
-    return value_date < now.date()
-
-
-def fact_temporal_status(fact: dict[str, Any], now: datetime | None = None) -> str:
-    """Classify live fact timing relative to America/New_York runtime time."""
-    now = now or datetime.now(EASTERN_TIMEZONE)
-    try:
-        valid_until = _parse_temporal_value(fact.get("valid_until"))
-        valid_from = _parse_temporal_value(fact.get("valid_from"))
-        review_after = _parse_temporal_value(fact.get("review_after"))
-        as_of = _parse_temporal_value(fact.get("as_of"))
-    except ValueError:
-        return "unknown"
-    if valid_until and _before_today(valid_until, now):
-        return "expired"
-    if valid_from and _after_today(valid_from, now):
-        return "future"
-    if review_after and _before_today(review_after, now, inclusive=True):
-        return "stale"
-    if as_of and _before_local_date(as_of, now):
-        return "historical"
-    return "current"
-
-
-def add_fact_temporal_status(fact: dict[str, Any]) -> dict[str, Any]:
-    return {**fact, "temporal_status": fact_temporal_status(fact)}
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-
-class KnowledgeSettings(BaseSettings):
-    """Knowledge server configuration from environment variables."""
-
-    model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    # Knowledge storage
-    knowledge_path: Path = Field(
-        default_factory=lambda: PROJECT_ROOT / "knowledge",
-        validation_alias="KNOWLEDGE_PATH",
-    )
-
-    # OpenRouter embedding API
-    openrouter_api_key: str = Field(..., validation_alias="OPENROUTER_API_KEY")
-    embedding_model: str = Field(
-        default="openai/text-embedding-3-small",
-        validation_alias="EMBEDDING_MODEL",
-    )
-    embedding_dimensions: int = Field(default=1536, validation_alias="EMBEDDING_DIMENSIONS")
-
-    # Qdrant vector store
-    qdrant_url: str = Field(default="http://127.0.0.1:6333", validation_alias="QDRANT_URL")
-    qdrant_collection: str = Field(
-        default="knowledge", validation_alias="KNOWLEDGE_QDRANT_COLLECTION"
-    )
-
-    # SQLite database
-    db_path: Path = Field(
-        default_factory=lambda: PROJECT_ROOT / "data" / "knowledge.db",
-        validation_alias="KNOWLEDGE_DB_PATH",
-    )
-
-    # Chunking
-    chunk_max_chars: int = Field(default=1000, validation_alias="KNOWLEDGE_CHUNK_MAX_CHARS")
-    chunk_overlap: int = Field(default=200, validation_alias="KNOWLEDGE_CHUNK_OVERLAP")
-
-    # OCR for images and scanned PDFs
-    ocr_enabled: bool = Field(default=True, validation_alias="KNOWLEDGE_OCR_ENABLED")
-    ocr_language: str = Field(default="eng", validation_alias="KNOWLEDGE_OCR_LANGUAGE")
-
-    # Vision LLM used for high-accuracy OCR (set to empty to disable and use tesseract).
-    # Any OpenRouter vision-capable model id works, e.g.:
-    #   google/gemini-2.0-flash-001  (cheap, fast, very good)
-    #   anthropic/claude-3.5-sonnet   (best on dense docs/handwriting)
-    #   openai/gpt-4o-mini            (cheap)
-    vision_model: str = Field(
-        default="google/gemini-2.0-flash-001",
-        validation_alias="KNOWLEDGE_VISION_MODEL",
-    )
-    vision_max_pages: int = Field(default=20, validation_alias="KNOWLEDGE_VISION_MAX_PAGES")
-    vision_dpi: int = Field(default=200, validation_alias="KNOWLEDGE_VISION_DPI")
-
-    # Model for single-shot fact extraction via POST /api/sources/{id}/extract.
-    # Must be a vision-capable model; Sonnet gives best accuracy on documents.
-    extraction_model: str = Field(
-        default="anthropic/claude-sonnet-4-6",
-        validation_alias="KNOWLEDGE_EXTRACTION_MODEL",
-    )
-
-    # Public REST API base used when MCP tools generate clickable download URLs
-    api_base: str = Field(
-        default="https://api-knowledge.jackshome.com",
-        validation_alias="API_BASE",
-    )
-
-# ---------------------------------------------------------------------------
-# Embedding Client
-# ---------------------------------------------------------------------------
-
-
-class EmbeddingClient:
-    """Generate text embeddings via OpenRouter API."""
-
-    def __init__(self, settings: KnowledgeSettings) -> None:
-        self._api_key = settings.openrouter_api_key
-        self._model = settings.embedding_model
-        self._dimensions = settings.embedding_dimensions
-        self._url = "https://openrouter.ai/api/v1/embeddings"
-        self._client: httpx.AsyncClient | None = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=30.0,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-        return self._client
-
-    async def embed(self, text: str) -> list[float]:
-        """Embed a single text string."""
-        results = await self.embed_batch([text])
-        return results[0]
-
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed multiple texts in one API call."""
-        if not texts:
-            return []
-        client = await self._get_client()
-        payload: dict = {"model": self._model, "input": texts}
-        if "text-embedding-3" in self._model:
-            payload["dimensions"] = self._dimensions
-
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = await client.post(self._url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                if "data" not in data:
-                    err = data.get("error", data)
-                    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                    raise RuntimeError(f"Embedding API error: {msg}")
-                sorted_data = sorted(data["data"], key=lambda x: x["index"])
-                return [item["embedding"] for item in sorted_data]
-            except (httpx.HTTPStatusError, httpx.TransportError, RuntimeError) as exc:
-                last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(2**attempt)
-
-        raise RuntimeError(f"Embedding failed after 3 attempts: {last_error}")
-
-    async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-
-
-# ---------------------------------------------------------------------------
-# BM25 Sparse Encoder
-# ---------------------------------------------------------------------------
-
-
-class BM25SparseEncoder:
-    """BM25-based sparse vectors for hybrid search via feature hashing."""
-
-    def __init__(self, vocab_size: int = 30000) -> None:
-        self._vocab_size = vocab_size
-        self._k1 = 1.5
-        self._b = 0.75
-        self._doc_count = 0
-        self._doc_freqs: Counter[int] = Counter()
-        self._avg_doc_len = 0.0
-        self._total_doc_len = 0
-
-    def _tokenize(self, text: str) -> list[str]:
-        text = text.lower()
-        tokens = re.findall(r"\b[a-z0-9]+\b", text)
-        return [t for t in tokens if len(t) > 1]
-
-    def _hash_token(self, token: str) -> int:
-        h = hashlib.sha256(token.encode()).digest()
-        return int.from_bytes(h[:4], "little") % self._vocab_size
-
-    def fit_batch(self, texts: list[str]) -> None:
-        for text in texts:
-            tokens = self._tokenize(text)
-            self._doc_count += 1
-            self._total_doc_len += len(tokens)
-            unique_indices = set(self._hash_token(t) for t in tokens)
-            for idx in unique_indices:
-                self._doc_freqs[idx] += 1
-        if self._doc_count > 0:
-            self._avg_doc_len = self._total_doc_len / self._doc_count
-
-    def encode(self, text: str) -> tuple[list[int], list[float]]:
-        tokens = self._tokenize(text)
-        if not tokens:
-            return [], []
-        doc_len = len(tokens)
-        term_freqs: Counter[int] = Counter()
-        for token in tokens:
-            term_freqs[self._hash_token(token)] += 1
-
-        indices = []
-        values = []
-        for idx, tf in term_freqs.items():
-            tf_score = (tf * (self._k1 + 1)) / (
-                tf + self._k1 * (1 - self._b + self._b * doc_len / max(self._avg_doc_len, 1))
-            )
-            df = self._doc_freqs.get(idx, 0)
-            idf = max(0.0, (self._doc_count - df + 0.5) / (df + 0.5))
-            if idf > 0:
-                idf = (idf + 1.0) ** 0.5
-            score = tf_score * idf
-            if score > 0:
-                indices.append(idx)
-                values.append(float(score))
-
-        if indices:
-            sorted_pairs = sorted(zip(indices, values, strict=True), key=lambda x: x[0])
-            indices, values = zip(*sorted_pairs, strict=True)
-            return list(indices), list(values)
-        return [], []
-
-    def encode_query(self, text: str) -> tuple[list[int], list[float]]:
-        return self.encode(text)
 
 
 # ---------------------------------------------------------------------------
@@ -4650,10 +4393,6 @@ def filter_facts_for_temporal_intent(
         ),
     )
 
-
-def fact_temporal_counts(facts: list[dict[str, Any]]) -> dict[str, int]:
-    counts = Counter(str(fact.get("temporal_status") or "unknown") for fact in facts)
-    return dict(sorted(counts.items()))
 
 
 def search_fact_keywords(query: str) -> list[str]:
