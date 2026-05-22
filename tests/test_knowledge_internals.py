@@ -29,6 +29,7 @@ from servers.knowledge import (
     search_fact_keywords,
     search_knowledge,
 )
+import servers.knowledge.wiki  # noqa: E402 — for monkeypatching _call_wiki_llm
 from shared.time_context import EASTERN_TIMEZONE
 
 # ---------------------------------------------------------------------------
@@ -794,7 +795,7 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
         monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
         monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
         monkeypatch.setattr(knowledge, "_db", db)
-        monkeypatch.setattr(knowledge, "_call_wiki_llm", fake_call_wiki_llm)
+        monkeypatch.setattr(servers.knowledge.wiki, "_call_wiki_llm", fake_call_wiki_llm)
 
         rebuild_tool = (
             knowledge.knowledge_wiki_rebuild.fn
@@ -888,7 +889,7 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
         monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
         monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
         monkeypatch.setattr(knowledge, "_db", db)
-        monkeypatch.setattr(knowledge, "_call_wiki_llm", fake_call_wiki_llm)
+        monkeypatch.setattr(servers.knowledge.wiki, "_call_wiki_llm", fake_call_wiki_llm)
 
         rebuild_tool = (
             knowledge.knowledge_wiki_rebuild.fn
