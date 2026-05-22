@@ -35,12 +35,12 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-from servers.knowledge_source_files import sanitize_source_filename
+from servers.knowledge_source_files import resolve_source_path, sanitize_source_filename
 from shared.logging_config import get_logger, logged_tool
 
 log = get_logger("knowledge")
 
-# --- Extracted to servers/knowledge/ package ---
+# --- servers/knowledge/ package ---
 from servers.knowledge.settings import DEFAULT_HTTP_PORT, KnowledgeSettings  # noqa: E402
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
 
@@ -54,46 +54,30 @@ def _auth_provider() -> StaticTokenVerifier | None:
 
 mcp = FastMCP("knowledge", auth=_auth_provider())
 
-
-
-# --- Extracted to servers/knowledge/db.py (Phase 2) ---
-from servers.knowledge.db import (  # noqa: E402
-    SEARCH_STOPWORDS,
-    KnowledgeDB,
-    search_fact_keywords,
-)
-
-
-
-
-# --- Extracted to servers/knowledge/vectors.py (Phase 2) ---
+from servers.knowledge.db import KnowledgeDB  # noqa: E402
 from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
-
-
-
-# --- Extracted to servers/knowledge/sources.py (Phase 3) ---
-from servers.knowledge.sources import (  # noqa: E402
-    compute_file_hash,
-    delete_source_record,
-    delete_sources_for_overwrite,
-    rename_source_record,
-    source_download_bytes,
-)
-
-# --- Extracted to servers/knowledge/extraction.py (Phase 3) ---
-from servers.knowledge.extraction import (  # noqa: E402
-    _is_likely_binary,
-    chunk_text,
-    compute_text_hash,
-)
-
-
-# --- Extracted to servers/knowledge/ingestion.py (Phase 3) ---
+from servers.knowledge.sources import delete_source_record, rename_source_record  # noqa: E402
+from servers.knowledge.extraction import chunk_text, compute_text_hash  # noqa: E402
 from servers.knowledge.ingestion import (  # noqa: E402
     _ingest_file_at_path,
     _validate_text_ingest_inputs,
-    extract_source_facts_single_shot,
 )
+from servers.knowledge.wiki import (  # noqa: E402
+    WIKI_PAGE_KINDS,
+    WIKI_PAGE_LIST_STATUSES,
+    WIKI_PAGE_STATUSES,
+    preview_wiki_rebuild,
+    rebuild_wiki,
+)
+from servers.knowledge.curation import (  # noqa: E402
+    apply_curation_item,
+    apply_curation_pack_resolution,
+    build_curation_question_packs,
+    create_curation_queue_item,
+    get_curation_question_pack,
+    preview_curation_pack_resolution,
+)
+from servers.knowledge.search import search_knowledge  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Global State
@@ -121,43 +105,6 @@ def _require_ready() -> (
         raise RuntimeError("Knowledge subsystem not initialized")
     return _settings, _embeddings, _sparse_encoder, _vectors, _db
 
-
-
-# --- Extracted to servers/knowledge/wiki.py (Phase 3) ---
-from servers.knowledge.wiki import (  # noqa: E402
-    WIKI_PAGE_KINDS,
-    WIKI_PAGE_LIST_STATUSES,
-    WIKI_PAGE_STATUSES,
-    _call_wiki_llm,
-    preview_wiki_rebuild,
-    rebuild_wiki,
-)
-
-
-# --- Extracted to servers/knowledge/curation.py (Phase 3) ---
-from servers.knowledge.curation import (  # noqa: E402
-    SUPPORTED_CURATION_ACTIONS,
-    apply_curation_item,
-    apply_curation_pack_resolution,
-    build_curation_question_packs,
-    create_curation_queue_item,
-    curation_item_has_destructive_actions,
-)
-
-
-# --- Extracted to servers/knowledge/search.py (Phase 3) ---
-from servers.knowledge.search import (  # noqa: E402
-    EVIDENCE_QUERY_HINTS,
-    FACT_QUERY_HINTS,
-    SEARCH_TEMPORAL_INTENTS,
-    TEMPORAL_TOPIC_HINTS,
-    classify_search_route,
-    classify_search_temporal_intent,
-    filter_facts_for_required_terms,
-    filter_facts_for_temporal_intent,
-    resolve_search_domains,
-    search_knowledge,
-)
 
 # ---------------------------------------------------------------------------
 # MCP Tools — Domain Management
@@ -378,32 +325,6 @@ async def knowledge_facts_list(domain: str) -> dict[str, Any]:
     return {"success": True, "domain": domain, "count": len(facts), "facts": facts}
 
 
-@mcp.tool("knowledge_facts_search")
-@logged_tool(log)
-async def knowledge_facts_search(
-    query: str,
-    domains: list[str] | None = None,
-    keys: list[str] | None = None,
-) -> dict[str, Any]:
-    """Search structured facts across domains.
-
-    Searches by key substring match. If no domains specified, searches all.
-
-    Args:
-        query: Not used for fact search — use keys param (kept for API consistency).
-        domains: Domains to search. If omitted, searches all non-archived.
-        keys: Key substrings to match (e.g. ["glucose", "budget"]).
-    """
-    _, _, _, _, db = _require_ready()
-
-    if not domains:
-        all_domains = await db.domain_list()
-        domains = [d["name"] for d in all_domains if not d["archived"]]
-
-    facts = await db.facts_search(domains, keys or [])
-    return {"success": True, "count": len(facts), "facts": facts}
-
-
 # ---------------------------------------------------------------------------
 # MCP Tools — Ingestion
 # ---------------------------------------------------------------------------
@@ -567,58 +488,6 @@ async def knowledge_ingest_file(
         "total_chunks": total_chunks,
         "files": results,
     }
-
-
-@mcp.tool("knowledge_upload_file_base64")
-@logged_tool(log)
-async def knowledge_upload_file_base64(
-    domain: str,
-    filename: str,
-    content_base64: str,
-    overwrite: bool = False,
-) -> dict[str, Any]:
-    """Upload and ingest a file from base64 content supplied by the MCP client.
-
-    Use this when the client can expose an attached file's bytes directly to
-    tools.
-    """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-
-    if not await db.domain_exists(domain):
-        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
-
-    clean_filename = sanitize_source_filename(filename)
-    if not clean_filename:
-        return {"success": False, "error": "Invalid filename"}
-
-    try:
-        data = base64.b64decode(content_base64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        return {"success": False, "error": f"Invalid base64 content: {exc}"}
-
-    domain_dir = settings.knowledge_path / domain
-    dest = (domain_dir / clean_filename).resolve()
-    if not dest.is_relative_to(settings.knowledge_path.resolve()):
-        return {"success": False, "error": "Invalid upload path"}
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and not overwrite:
-        return {
-            "success": False,
-            "error": (
-                f"File '{clean_filename}' already exists in '{domain}'. "
-                "Set overwrite=true to replace."
-            ),
-        }
-
-    if overwrite:
-        await delete_sources_for_overwrite(settings, vectors, db, domain, clean_filename)
-
-    dest.write_bytes(data)
-
-    return await _ingest_file_at_path(
-        settings, embeddings, sparse_encoder, vectors, db,
-        dest=dest, domain=domain, force=overwrite,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -842,26 +711,6 @@ async def knowledge_sources(domain: str) -> dict[str, Any]:
         src["download_markdown"] = f"[{safe_label}]({url})"
         src["download_expires_at"] = token["expires_at"]
     return {"success": True, "domain": domain, "count": len(sources), "sources": sources}
-
-
-@mcp.tool("knowledge_source_download_base64")
-@logged_tool(log)
-async def knowledge_source_download_base64(
-    source_id: str,
-) -> dict[str, Any]:
-    """Download one stored source as base64 bytes for chat clients.
-
-    Use knowledge_sources(domain) first to find the source_id.
-    """
-    settings, _, _, vectors, db = _require_ready()
-    result = await source_download_bytes(settings, db, source_id, vectors)
-
-    if not result.get("success"):
-        return result
-
-    data = result.pop("data")
-    result["data_base64"] = base64.b64encode(data).decode()
-    return result
 
 
 @mcp.tool("knowledge_source_download_url")
@@ -1203,17 +1052,34 @@ async def knowledge_curation_pack_apply(
     )
 
 
-@mcp.tool("knowledge_curation_apply")
+@mcp.tool("knowledge_curation_resolve")
 @logged_tool(log)
-async def knowledge_curation_apply(
+async def knowledge_curation_resolve(
     item_id: str,
+    action: str = "apply",
     confirmation: str | None = None,
 ) -> dict[str, Any]:
-    """Apply a reviewed curation item.
+    """Resolve a curation queue item by applying or rejecting it.
 
-    Destructive actions such as source deletion, fact deletion, or domain archive
-    require confirmation equal to the queue item id.
+    Use action="apply" to execute the proposed changes, or action="reject" to
+    dismiss the item without changes. Destructive actions (source deletion,
+    fact deletion, domain archive) require confirmation equal to the item id.
+
+    Args:
+        item_id: Curation queue item to resolve.
+        action: "apply" to execute proposed changes, "reject" to dismiss.
+        confirmation: Required for destructive apply — set to item_id.
     """
+    if action not in ("apply", "reject"):
+        return {"success": False, "error": "action must be 'apply' or 'reject'"}
+
+    if action == "reject":
+        _, _, _, _, db = _require_ready()
+        updated = await db.curation_mark_status(item_id, "rejected")
+        if not updated:
+            return {"success": False, "error": f"Curation item '{item_id}' not found"}
+        return {"success": True, "item_id": item_id, "status": "rejected"}
+
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
     return await apply_curation_item(
         item_id,
@@ -1224,17 +1090,6 @@ async def knowledge_curation_apply(
         vectors=vectors,
         db=db,
     )
-
-
-@mcp.tool("knowledge_curation_reject")
-@logged_tool(log)
-async def knowledge_curation_reject(item_id: str) -> dict[str, Any]:
-    """Reject a curation queue item without applying any proposed actions."""
-    _, _, _, _, db = _require_ready()
-    updated = await db.curation_mark_status(item_id, "rejected")
-    if not updated:
-        return {"success": False, "error": f"Curation item '{item_id}' not found"}
-    return {"success": True, "item_id": item_id, "status": "rejected"}
 
 
 @mcp.tool("knowledge_curation_snooze")
