@@ -70,6 +70,7 @@ from servers.knowledge.wiki import (  # noqa: E402
 )
 from servers.knowledge.curation import apply_curation_item  # noqa: E402
 from servers.knowledge.search import search_knowledge  # noqa: E402
+from servers.knowledge.cross_domain import enrich_context  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Global State
@@ -511,7 +512,26 @@ async def knowledge_context_pack(
 
     has_personal_context = fact_count > 0 or len(results) > 0
 
-    # 5. Build augmentation suggestions
+    # 5. Cross-domain enrichment — detect signals in query + results and
+    #    automatically fetch context from related domains (schedule,
+    #    people, finances, tasks, etc.) so the model gets a complete
+    #    picture without needing to make additional tool calls.
+    cross_domain: dict[str, Any] = {}
+    try:
+        cross_domain = await enrich_context(
+            query,
+            primary_facts=facts,
+            primary_results=results,
+            searched_domains=search_result.get("searched_domains", []),
+            embeddings=embeddings_client,
+            sparse_encoder=sparse_encoder,
+            vectors=vectors,
+            db=db,
+        )
+    except Exception:
+        log.warning("cross_domain_enrichment_failed", exc_info=True)
+
+    # 6. Build augmentation suggestions
     suggestions: list[str] = []
     query_lower = query.lower()
 
@@ -545,7 +565,10 @@ async def knowledge_context_pack(
             "current public data"
         )
 
-    return {
+    # Merge cross-domain suggestions
+    suggestions.extend(cross_domain.pop("cross_domain_suggestions", []))
+
+    response = {
         "success": True,
         "query": query,
         "temporal_intent": search_result.get("temporal_intent", "auto"),
@@ -565,6 +588,12 @@ async def knowledge_context_pack(
         # Guidance for the model
         "augmentation_suggestions": suggestions,
     }
+
+    # Attach cross-domain enrichment if any signals were detected
+    if cross_domain:
+        response["cross_domain_context"] = cross_domain
+
+    return response
 
 
 # ---------------------------------------------------------------------------
