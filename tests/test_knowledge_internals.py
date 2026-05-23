@@ -914,7 +914,10 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
         assert page["frontmatter"]["audit_notes"] == {
             "merge_candidate": ["Could overlap with another Framework page."]
         }
-        assert await db.curation_count(status="pending") == 0
+        assert await db.curation_count(status="pending") == 1
+        curation_items = await db.curation_list(status="pending")
+        assert curation_items[0]["kind"] == "wiki_merge"
+        assert "tech/framework-13" in curation_items[0]["title"]
         assert await db.wiki_list(status="active") == []
     finally:
         await db.close()

@@ -17,6 +17,7 @@ from servers.knowledge import (
     KnowledgeVectorStore,
     preview_wiki_rebuild,
     rebuild_wiki,
+    wiki_lint_pass,
 )
 from shared.logging_config import get_logger
 
@@ -96,7 +97,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         texts = [chunk["content"] for chunk in chunks if chunk.get("content")]
         if texts:
             sparse_encoder.fit_batch(texts)
-        return await rebuild_wiki(
+        result = await rebuild_wiki(
             settings,
             embeddings,
             sparse_encoder,
@@ -106,6 +107,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             entity_slug=args.entity_slug,
             force_full=args.force_full,
         )
+        # Run lint pass after successful rebuild
+        if result.get("success"):
+            try:
+                lint_result = await wiki_lint_pass(db)
+                log.info(
+                    "wiki_lint_pass_complete items_created=%s",
+                    lint_result.get("items_created", 0),
+                )
+                result["lint"] = lint_result
+            except Exception:
+                log.warning("wiki_lint_pass_failed", exc_info=True)
+        return result
     finally:
         await embeddings.close()
         await vectors.close()

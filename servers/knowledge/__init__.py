@@ -49,7 +49,7 @@ from servers.knowledge.search import (
     resolve_search_domains,
     search_knowledge,
 )
-from servers.knowledge.wiki import preview_wiki_rebuild, rebuild_wiki
+from servers.knowledge.wiki import preview_wiki_rebuild, rebuild_wiki, wiki_lint_pass
 from servers.knowledge.curation import (
     apply_curation_item,
     apply_curation_pack_resolution,
@@ -94,4 +94,5 @@ __all__ = [
     "resolve_search_domains",
     "search_knowledge",
     "source_download_bytes",
+    "wiki_lint_pass",
 ]

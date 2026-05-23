@@ -662,6 +662,31 @@ async def rebuild_wiki(
                 await vectors.delete_by_source(page["slug"])
             touched.append(page["slug"])
 
+            # --- Auto-create curation items for pages with concerns ---
+            concerns = page.get("concerns") or {}
+            for concern_type, items in concerns.items():
+                if not items:
+                    continue
+                curation_kind = {
+                    "merge_candidate": "wiki_merge",
+                    "split_candidate": "wiki_split",
+                }.get(concern_type, f"wiki_{concern_type}")
+                summary_lines = items if isinstance(items, list) else [str(items)]
+                await db.curation_upsert(
+                    kind=curation_kind,
+                    title=f"{concern_type.replace('_', ' ').title()}: {page['title']} ({page['slug']})",
+                    summary="\n".join(summary_lines),
+                    source_refs=[{"type": "wiki_page", "slug": page["slug"]}],
+                    proposed_actions=[{
+                        "action": concern_type,
+                        "slug": page["slug"],
+                        "detail": summary_lines[0] if summary_lines else "",
+                    }],
+                    risk="low",
+                    confidence=0.8,
+                    item_id=f"wiki:{concern_type}:{page['slug']}",
+                )
+
         for touched_domain in sorted({str(item["domain"]) for item in preview["changed_entities"]}):
             touched.append(await _rebuild_wiki_index(
                 db, touched_domain,
@@ -707,3 +732,135 @@ async def rebuild_wiki(
         }
 
 
+async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
+    """Post-rebuild lint: create curation items for expired facts and orphan pages.
+
+    Runs after wiki rebuild. Detects:
+    1. Expired facts (valid_until < now) that should be archived
+    2. Orphan wiki pages with no inbound related_slugs from other pages
+    3. Candidate pages stuck with concerns (merge/split) for >7 days
+    """
+    items_created = 0
+    now = datetime.now(UTC)
+
+    # --- 1. Expired facts ---
+    try:
+        all_domains = await db.domain_list()
+        for domain_row in all_domains:
+            if domain_row.get("archived"):
+                continue
+            domain = str(domain_row["name"])
+            facts = await db.fact_list(domain)
+            for fact in facts:
+                valid_until = fact.get("valid_until")
+                if not valid_until:
+                    continue
+                try:
+                    expiry = datetime.fromisoformat(str(valid_until))
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=UTC)
+                    if expiry < now:
+                        await db.curation_upsert(
+                            kind="expired_fact",
+                            title=f"Expired fact: {domain}/{fact['key']}",
+                            summary=(
+                                f"Fact '{fact['key']}' in domain '{domain}' "
+                                f"expired on {valid_until}. "
+                                f"Current value: {fact.get('value', '')[:200]}"
+                            ),
+                            source_refs=[{"type": "fact", "domain": domain, "key": fact["key"]}],
+                            proposed_actions=[{
+                                "action": "archive_or_update",
+                                "domain": domain,
+                                "key": fact["key"],
+                            }],
+                            risk="low",
+                            confidence=0.95,
+                            item_id=f"lint:expired:{domain}/{fact['key']}",
+                        )
+                        items_created += 1
+                except (ValueError, TypeError):
+                    pass
+    except Exception:
+        log.warning("lint_expired_facts_failed", exc_info=True)
+
+    # --- 2. Orphan wiki pages (no inbound related_slugs) ---
+    try:
+        all_pages = await db.wiki_list(status="active", limit=200)
+        # Build set of all slugs referenced by related_slugs
+        all_related: set[str] = set()
+        slug_to_title: dict[str, str] = {}
+        for page in all_pages:
+            slug = str(page.get("slug", ""))
+            slug_to_title[slug] = str(page.get("title", slug))
+            # wiki_list doesn't return frontmatter, so fetch it
+            full = await db.wiki_get(slug)
+            if full:
+                fm = full.get("frontmatter") or {}
+                for related in fm.get("related_slugs", []):
+                    all_related.add(str(related))
+
+        for page in all_pages:
+            slug = str(page.get("slug", ""))
+            if page.get("kind") == "index":
+                continue
+            # Orphan = not referenced by any other page's related_slugs
+            if slug not in all_related:
+                await db.curation_upsert(
+                    kind="orphan_page",
+                    title=f"Orphan wiki page: {slug_to_title.get(slug, slug)}",
+                    summary=(
+                        f"Wiki page '{slug}' has no inbound links from "
+                        f"other pages' related_slugs. Consider adding "
+                        f"cross-references or archiving if stale."
+                    ),
+                    source_refs=[{"type": "wiki_page", "slug": slug}],
+                    proposed_actions=[{
+                        "action": "add_cross_references_or_archive",
+                        "slug": slug,
+                    }],
+                    risk="low",
+                    confidence=0.7,
+                    item_id=f"lint:orphan:{slug}",
+                )
+                items_created += 1
+    except Exception:
+        log.warning("lint_orphan_pages_failed", exc_info=True)
+
+    # --- 3. Stale candidates with concerns ---
+    try:
+        stale_cutoff = (now - timedelta(days=7)).isoformat()
+        candidate_pages = await db.wiki_list(status="candidate", limit=200)
+        for page in candidate_pages:
+            updated = str(page.get("updated_at") or page.get("created_at") or "")
+            if updated and updated < stale_cutoff:
+                full = await db.wiki_get(str(page["slug"]))
+                if not full:
+                    continue
+                fm = full.get("frontmatter") or {}
+                audit_notes = fm.get("audit_notes") or {}
+                if audit_notes:
+                    concern_summary = json.dumps(audit_notes, indent=2)[:500]
+                    await db.curation_upsert(
+                        kind="stale_candidate",
+                        title=f"Stale candidate: {page.get('title', page['slug'])}",
+                        summary=(
+                            f"Wiki page '{page['slug']}' has been a candidate "
+                            f"for >7 days with unresolved concerns:\n{concern_summary}"
+                        ),
+                        source_refs=[{"type": "wiki_page", "slug": str(page["slug"])}],
+                        proposed_actions=[{
+                            "action": "review_and_promote_or_archive",
+                            "slug": str(page["slug"]),
+                            "concerns": audit_notes,
+                        }],
+                        risk="low",
+                        confidence=0.6,
+                        item_id=f"lint:stale:{page['slug']}",
+                    )
+                    items_created += 1
+    except Exception:
+        log.warning("lint_stale_candidates_failed", exc_info=True)
+
+    log.info("wiki_lint_pass_complete items_created=%s", items_created)
+    return {"items_created": items_created}
