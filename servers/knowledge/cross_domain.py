@@ -9,13 +9,16 @@ MCP tool suggestions describe capabilities ("check calendar",
 "check weather") without naming specific servers, so adding or
 removing MCP servers requires no changes here.
 
-Two enrichment layers work together:
+Three enrichment layers work together:
 1. **Signal detection** — pattern-based signals (scheduling, financial,
    outdoor, people, health, projects, transport) that trigger targeted
    cross-domain searches and MCP tool hints.
 2. **Entity echo** — always-on extraction of entity references from
    primary search results, followed by targeted searches to pull in
    cross-domain context the model wouldn't otherwise see.
+3. **Wiki synthesis** — always-on lookup of active wiki pages covering
+   domains and entities found in primary results, providing the model
+   with pre-synthesized cross-referenced knowledge.
 """
 
 from __future__ import annotations
@@ -332,6 +335,141 @@ def _build_entity_echo_query(
 
 
 # ---------------------------------------------------------------------------
+# Wiki synthesis — fetch pre-synthesized wiki pages for relevant entities
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_wiki_synthesis(
+    query: str,
+    primary_results: list[dict[str, Any]],
+    primary_facts: list[dict[str, Any]],
+    searched_domains: list[str],
+    *,
+    db: KnowledgeDB,
+) -> dict[str, Any] | None:
+    """Lookup active wiki pages covering entities found in primary results.
+
+    Wiki pages are the 'compiled knowledge' layer — they already contain
+    cross-references, citations, and entity relationships. Surfacing
+    them gives the model pre-synthesized context instead of raw fragments.
+    """
+    # Collect unique domains from results + facts
+    result_domains = {r.get("domain", "") for r in primary_results if r.get("domain")}
+    fact_domains = {f.get("domain", "") for f in primary_facts if f.get("domain")}
+    all_domains = sorted((result_domains | fact_domains | set(searched_domains)) - {""})
+
+    if not all_domains:
+        return None
+
+    # Collect wiki pages already in primary results (to avoid duplication)
+    primary_wiki_slugs = {
+        r.get("slug") or r.get("source_id", "")
+        for r in primary_results
+        if r.get("result_type") == "wiki" or r.get("source_type") == "wiki_page"
+    }
+
+    wiki_pages: list[dict[str, Any]] = []
+    related_slugs_to_check: set[str] = set()
+
+    # For each domain seen in results, fetch its active wiki pages
+    for domain in all_domains[:6]:  # cap at 6 domains to limit DB calls
+        try:
+            pages = await db.wiki_list(domain=domain, status="active", limit=10)
+            for page in pages:
+                slug = str(page.get("slug", ""))
+                if slug in primary_wiki_slugs or page.get("kind") == "index":
+                    continue
+
+                # Check if this page's title/slug matches the query terms
+                title = str(page.get("title", "")).lower()
+                slug_tail = slug.rsplit("/", 1)[-1].replace("-", " ") if "/" in slug else slug
+                query_lower = query.lower()
+
+                # Include page if its title appears in the query or if the
+                # query terms overlap with the slug/title
+                query_words = set(query_lower.split())
+                title_words = set(title.split())
+                overlap = query_words & title_words - {
+                    "a", "an", "the", "is", "my", "what", "when",
+                    "where", "who", "how", "do", "does", "i",
+                }
+
+                if overlap or slug_tail in query_lower or title in query_lower:
+                    wiki_pages.append({
+                        "slug": slug,
+                        "domain": domain,
+                        "title": page.get("title", ""),
+                        "kind": page.get("kind", ""),
+                        "fact_count": page.get("fact_count", 0),
+                    })
+                    # Track related_slugs for secondary lookups
+                    # (frontmatter not in list results, skip for now)
+        except Exception:
+            log.warning("wiki_synthesis_domain_failed domain=%s", domain, exc_info=True)
+
+    # Also do a keyword search across all wiki pages for richer matching
+    if not wiki_pages:
+        try:
+            # Use wiki_search (SQLite keyword ranker) as fallback
+            keyword_pages = await db.wiki_search(
+                domains=all_domains,
+                query=query,
+                limit=5,
+                statuses={"active"},
+            )
+            for page in keyword_pages:
+                slug = str(page.get("slug", ""))
+                if slug not in primary_wiki_slugs and page.get("kind") != "index":
+                    wiki_pages.append({
+                        "slug": slug,
+                        "domain": page.get("domain", ""),
+                        "title": page.get("title", ""),
+                        "kind": page.get("kind", ""),
+                        "fact_count": page.get("fact_count", 0),
+                    })
+        except Exception:
+            log.warning("wiki_synthesis_keyword_failed", exc_info=True)
+
+    if not wiki_pages:
+        return None
+
+    # Fetch full body for the top-scoring wiki pages (limit to 3 to stay lean)
+    full_pages: list[dict[str, Any]] = []
+    for wp in wiki_pages[:3]:
+        try:
+            full = await db.wiki_get(wp["slug"])
+            if full and full.get("body_md"):
+                body = str(full["body_md"])
+                if len(body) > 1500:
+                    body = body[:1500] + "…"
+                full_pages.append({
+                    "slug": wp["slug"],
+                    "domain": wp["domain"],
+                    "title": full.get("title", wp["title"]),
+                    "kind": full.get("kind", wp["kind"]),
+                    "body_md": body,
+                    "related_slugs": (
+                        full.get("frontmatter", {}).get("related_slugs", [])
+                    ),
+                })
+        except Exception:
+            log.warning("wiki_synthesis_get_failed slug=%s", wp["slug"], exc_info=True)
+
+    if not full_pages:
+        return None
+
+    return {
+        "wiki_pages": full_pages,
+        "wiki_page_count": len(full_pages),
+        "note": (
+            "These wiki pages contain pre-synthesized knowledge with "
+            "cross-references and citations. Prefer wiki content over "
+            "raw chunks when answering synthesis questions."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Enrichment — broad cross-domain searches, no domain filters
 # ---------------------------------------------------------------------------
 
@@ -411,10 +549,12 @@ async def enrich_context(
     All searches are broad (no domain filters) so new domains are
     automatically included without code changes.
 
-    Two layers:
+    Three layers:
     1. Signal-based enrichment: fires on detected patterns.
     2. Entity echo: always fires when primary results reference
        entities from other domains, pulling in cross-domain context.
+    3. Wiki synthesis: fetches pre-synthesized wiki pages covering
+       entities found in results, providing compiled cross-references.
     """
     now = now or datetime.now(EASTERN_TIMEZONE)
     signals = detect_signals(query, primary_results, primary_facts, now)
@@ -501,6 +641,16 @@ async def enrich_context(
                 }
         except Exception:
             log.warning("entity_echo_search_failed", exc_info=True)
+
+    # --- Layer 3: Wiki synthesis — pre-compiled knowledge pages ---
+    try:
+        wiki_synthesis = await _fetch_wiki_synthesis(
+            query, primary_results, primary_facts, searched_domains, db=db,
+        )
+        if wiki_synthesis:
+            enrichment["wiki_synthesis"] = wiki_synthesis
+    except Exception:
+        log.warning("wiki_synthesis_failed", exc_info=True)
 
     # Note domains mentioned in results that could be explored
     if new_mentioned:
