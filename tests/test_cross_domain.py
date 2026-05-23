@@ -115,10 +115,50 @@ class TestDetectSignals:
 
     def test_no_signals_for_simple_query(self):
         signals = detect_signals(
-            "What is my blood type?",
+            "What is my favorite color?",
             results=[], facts=[], now=self._now(),
         )
         assert len(signals) == 0
+
+    def test_health_detection(self):
+        signals = detect_signals(
+            "What is my blood type?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "health" in names
+
+    def test_people_detection(self):
+        signals = detect_signals(
+            "Who is my coworker on night shift?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "people" in names
+
+    def test_project_detection(self):
+        signals = detect_signals(
+            "What is the status of my homelab project?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "projects" in names
+
+    def test_transport_detection(self):
+        signals = detect_signals(
+            "When is my car inspection due?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "transport" in names
+
+    def test_task_detection(self):
+        signals = detect_signals(
+            "What tasks are overdue?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "tasks" in names
 
     def test_multiple_signals(self):
         """A yard planning question with money should trigger multiple signals."""

@@ -552,6 +552,12 @@ async def knowledge_context_pack(
     if any(w in query_lower for w in email_words):
         suggestions.append("email: check Gmail for related messages")
 
+    # Finance hints
+    finance_words = {"budget", "spending", "cost", "price", "afford",
+                     "expense", "bill", "payment", "subscription", "balance"}
+    if any(w in query_lower for w in finance_words):
+        suggestions.append("finance: check Monarch for budget/spending details")
+
     # Web supplement (only if personal context is thin)
     if not has_personal_context:
         suggestions.append(

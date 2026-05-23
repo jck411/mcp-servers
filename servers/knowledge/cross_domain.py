@@ -8,6 +8,14 @@ are hardcoded.  New domains are automatically included.
 MCP tool suggestions describe capabilities ("check calendar",
 "check weather") without naming specific servers, so adding or
 removing MCP servers requires no changes here.
+
+Two enrichment layers work together:
+1. **Signal detection** — pattern-based signals (scheduling, financial,
+   outdoor, people, health, projects, transport) that trigger targeted
+   cross-domain searches and MCP tool hints.
+2. **Entity echo** — always-on extraction of entity references from
+   primary search results, followed by targeted searches to pull in
+   cross-domain context the model wouldn't otherwise see.
 """
 
 from __future__ import annotations
@@ -84,6 +92,40 @@ _OUTDOOR_KW = frozenset({
     "yard", "garden", "outside", "outdoor", "lawn", "landscap",
     "plant", "sod", "mow", "patio", "driveway", "pool",
 })
+_PEOPLE_RE = re.compile(
+    r"\b(who\s+(?:is|was|does|did|works|lives)|"
+    r"(?:family|mom|dad|wife|husband|brother|sister|son|daughter|"
+    r"girlfriend|boyfriend|partner|roommate|friend|neighbor|"
+    r"coworker|boss|manager|supervisor)\b)",
+    re.IGNORECASE,
+)
+_HEALTH_RE = re.compile(
+    r"\b(doctor|dr\.|physician|dentist|appointment|medication|"
+    r"prescription|dose|dosage|supplement|vitamin|symptom|"
+    r"diagnosis|lab\s*(?:work|result)|blood|glucose|insulin|"
+    r"allergy|allergies|weight|bmi|exercise|workout|therapy|"
+    r"medical|health|hospital|clinic|surgery|procedure|vaccine|"
+    r"insurance\s+(?:health|medical|dental))\b",
+    re.IGNORECASE,
+)
+_PROJECT_RE = re.compile(
+    r"\b(project|homelab|server|deploy|build|install|upgrade|"
+    r"migrate|refactor|repo|repository|pipeline|automation|"
+    r"setup|configure|debug|troubleshoot)\b",
+    re.IGNORECASE,
+)
+_TRANSPORT_RE = re.compile(
+    r"\b(car|vehicle|truck|drive|commute|mileage|oil\s+change|"
+    r"tire|maintenance|inspection|registration|insurance\s+(?:car|auto)|"
+    r"gas|fuel|mechanic|dealership|lease|loan\s+(?:car|auto)|"
+    r"parking|toll|highway)\b",
+    re.IGNORECASE,
+)
+_TASK_RE = re.compile(
+    r"\b(todo|to.do|task|tasks|reminder|deadline|due\s+date|"
+    r"overdue|checklist|pending|backlog|priority|priorities)\b",
+    re.IGNORECASE,
+)
 
 
 def _collect_text(
@@ -125,8 +167,11 @@ _SIGNAL_DEFS: list[dict[str, Any]] = [
         "name": "financial",
         "detect": lambda q, txt, now: bool(_MONEY_RE.search(txt)),
         "meta": lambda q, txt, now: {},
-        "enrichment_query": "budget spending finances cost",
-        "tool_hint": None,
+        "enrichment_query": "budget spending finances cost subscription",
+        "tool_hint": (
+            "Check finance tools (Monarch) for budget, spending, and "
+            "account balance details if relevant."
+        ),
     },
     {
         "name": "outdoor",
@@ -139,6 +184,44 @@ _SIGNAL_DEFS: list[dict[str, Any]] = [
             "This involves outdoor activity. Check weather forecast for "
             "the recommended dates before confirming plans."
         ),
+    },
+    {
+        "name": "people",
+        "detect": lambda q, txt, now: bool(_PEOPLE_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "family coworker relationship contact person",
+        "tool_hint": None,
+    },
+    {
+        "name": "health",
+        "detect": lambda q, txt, now: bool(_HEALTH_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "health medication appointment doctor",
+        "tool_hint": (
+            "Check calendar for upcoming medical appointments. "
+            "Cross-reference medication interactions if multiple drugs mentioned."
+        ),
+    },
+    {
+        "name": "projects",
+        "detect": lambda q, txt, now: bool(_PROJECT_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "project task status deadline progress",
+        "tool_hint": None,
+    },
+    {
+        "name": "transport",
+        "detect": lambda q, txt, now: bool(_TRANSPORT_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "car vehicle maintenance mileage registration",
+        "tool_hint": None,
+    },
+    {
+        "name": "tasks",
+        "detect": lambda q, txt, now: bool(_TASK_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "task todo deadline priority pending",
+        "tool_hint": None,
     },
 ]
 
@@ -167,6 +250,85 @@ def detect_signals(
             })
 
     return detected
+
+
+# ---------------------------------------------------------------------------
+# Entity echo — extract references from primary results for follow-up
+# ---------------------------------------------------------------------------
+
+
+def _extract_mentioned_domains(
+    results: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    available_domains: list[str],
+) -> set[str]:
+    """Find domain names mentioned in result content or fact values.
+
+    If primary results reference entities that live in other domains,
+    we want to pull context from those domains too.
+    """
+    all_text = _collect_text("", results, facts).lower()
+    mentioned: set[str] = set()
+    for d in available_domains:
+        # Match domain name as word boundary (e.g. "health" but not "healthy")
+        # Use underscore-split tokens for multi-word domains like "work_schedule"
+        tokens = d.replace("_", " ")
+        if re.search(rf"\b{re.escape(tokens)}\b", all_text):
+            mentioned.add(d)
+        if "_" in d and re.search(rf"\b{re.escape(d)}\b", all_text):
+            mentioned.add(d)
+    return mentioned
+
+
+def _build_entity_echo_query(
+    query: str,
+    results: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+) -> str | None:
+    """Build a follow-up search query from entity references in primary results.
+
+    Extracts key nouns and proper-noun-like tokens from primary results
+    that weren't in the original query, then builds a compact search string
+    to find cross-referenced context.
+    """
+    # Collect unique domain names seen in results
+    result_domains = {r.get("domain", "") for r in results if r.get("domain")}
+    fact_domains = {f.get("domain", "") for f in facts if f.get("domain")}
+    all_domains = result_domains | fact_domains
+
+    # Collect fact keys as entity references — these are often the most
+    # semantically useful cross-reference terms
+    entity_terms: list[str] = []
+    for f in facts[:10]:  # limit to avoid huge queries
+        key = str(f.get("key", "")).replace("_", " ").strip()
+        if key and len(key) > 2:
+            entity_terms.append(key)
+
+    # Extract source names from results as potential entity references
+    for r in results[:8]:
+        source_name = str(r.get("source_name", "")).strip()
+        if source_name and source_name not in ("manual", "note", "fact"):
+            # Take just the first few words as entity references
+            words = source_name.split()[:4]
+            entity_terms.append(" ".join(words))
+
+    if not entity_terms and len(all_domains) <= 1:
+        return None
+
+    # Build a compact echo query — original query core + entity references
+    query_core = " ".join(query.split()[:6])  # first 6 words of query
+    echo_parts = [query_core]
+    # Add up to 5 unique entity terms
+    seen: set[str] = set()
+    for term in entity_terms:
+        lower = term.lower()
+        if lower not in seen and lower not in query.lower():
+            seen.add(lower)
+            echo_parts.append(term)
+        if len(seen) >= 5:
+            break
+
+    return " ".join(echo_parts) if len(echo_parts) > 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -248,18 +410,21 @@ async def enrich_context(
     Returns a dict suitable for merging into the context_pack response.
     All searches are broad (no domain filters) so new domains are
     automatically included without code changes.
+
+    Two layers:
+    1. Signal-based enrichment: fires on detected patterns.
+    2. Entity echo: always fires when primary results reference
+       entities from other domains, pulling in cross-domain context.
     """
     now = now or datetime.now(EASTERN_TIMEZONE)
     signals = detect_signals(query, primary_results, primary_facts, now)
 
-    if not signals:
-        return {}
+    enrichment: dict[str, Any] = {}
 
-    enrichment: dict[str, Any] = {
-        "signals_detected": [s["name"] for s in signals],
-    }
+    if signals:
+        enrichment["signals_detected"] = [s["name"] for s in signals]
 
-    # Run broad cross-domain searches for each signal that has a query
+    # --- Layer 1: Signal-based cross-domain searches ---
     for signal in signals:
         eq = signal.get("enrichment_query")
         if eq:
@@ -276,6 +441,70 @@ async def enrich_context(
             # Attach signal metadata (e.g. dates_found)
             if signal.get("meta"):
                 enrichment[key]["meta"] = signal["meta"]
+
+    # --- Layer 2: Entity echo — always-on cross-domain discovery ---
+    # Identify domains mentioned in results that aren't in the primary set
+    all_domain_rows = await db.domain_list()
+    available_domain_names = [
+        d["name"] for d in all_domain_rows if not d.get("archived")
+    ]
+    mentioned = _extract_mentioned_domains(
+        primary_results, primary_facts, available_domain_names,
+    )
+    primary_set = set(searched_domains)
+    new_mentioned = mentioned - primary_set
+
+    # Build and run the echo query
+    echo_query = _build_entity_echo_query(query, primary_results, primary_facts)
+    if echo_query:
+        try:
+            echo_result = await search_knowledge(
+                embeddings=embeddings,
+                sparse_encoder=sparse_encoder,
+                vectors=vectors,
+                db=db,
+                query=echo_query,
+                limit=6,
+                min_similarity=0.22,
+                include_facts=True,
+                max_chars=400,
+            )
+            echo_results = echo_result.get("results", [])
+            echo_facts = echo_result.get("facts", [])
+
+            # Filter to only genuinely new information
+            primary_chunk_ids = {r.get("chunk_id") for r in primary_results}
+            primary_fact_keys = {
+                (f.get("domain"), f.get("key")) for f in primary_facts
+            }
+            new_echo_results = [
+                r for r in echo_results
+                if r.get("chunk_id") not in primary_chunk_ids
+            ]
+            new_echo_facts = [
+                f for f in echo_facts
+                if (f.get("domain"), f.get("key")) not in primary_fact_keys
+            ]
+
+            if new_echo_results or new_echo_facts:
+                echo_domains = sorted({
+                    r.get("domain", "") for r in new_echo_results
+                } | {
+                    f.get("domain", "") for f in new_echo_facts
+                } - {""} - primary_set)
+
+                enrichment["entity_echo"] = {
+                    "echo_query": echo_query,
+                    "results": new_echo_results[:5],
+                    "facts": new_echo_facts[:8],
+                    "new_domains_found": echo_domains,
+                }
+        except Exception:
+            log.warning("entity_echo_search_failed", exc_info=True)
+
+    # Note domains mentioned in results that could be explored
+    if new_mentioned:
+        enrichment["domains_referenced_in_results"] = sorted(new_mentioned)
 
     # Capability-based suggestions (no server names)
     suggestions = [s["tool_hint"] for s in signals if s.get("tool_hint")]
