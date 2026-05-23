@@ -1,12 +1,13 @@
 """Cross-domain signal detection and context enrichment.
 
 Scans query text and primary search results for signals indicating
-additional domains should be searched. Returns enrichment data that
-context_pack merges into its response.
+that additional context from OTHER domains would improve the answer.
+Runs broad follow-up searches across all domains — no domain names
+are hardcoded.  New domains are automatically included.
 
-Schedule availability is surfaced by auto-searching the work_schedule
-domain for relevant facts. Actual calendar event checks are deferred
-to the Calendar MCP server via augmentation suggestions.
+MCP tool suggestions describe capabilities ("check calendar",
+"check weather") without naming specific servers, so adding or
+removing MCP servers requires no changes here.
 """
 
 from __future__ import annotations
@@ -40,22 +41,6 @@ _MONTHS = {
     "september": 9, "october": 10, "november": 11, "december": 12,
 }
 
-_PLANNING_RE = re.compile(
-    r"\b(when\s+(?:should|can|would|will|could)|"
-    r"good\s+time|best\s+(?:time|day)|"
-    r"before\s+\w+\s+(?:starts?|arrives?|begins?|comes?)|"
-    r"prepare\b|plan\s+(?:for|to|ahead)|"
-    r"free\s+(?:time|day)|day\s+off|available|"
-    r"what\s+day|which\s+day)",
-    re.IGNORECASE,
-)
-
-# Known people — used to trigger relationship domain searches.
-_PEOPLE_RE = re.compile(
-    r"\b(Sanja|Zoe|Andison|Dan(?:iel)?|Maja)\b",
-    re.IGNORECASE,
-)
-
 
 def extract_dates(text: str, now: datetime) -> list[str]:
     """Extract concrete date references from text as ISO strings."""
@@ -79,8 +64,26 @@ def extract_dates(text: str, now: datetime) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Signal detection
+# Signal detection — pattern-based, zero hardcoded domains
 # ---------------------------------------------------------------------------
+
+_PLANNING_RE = re.compile(
+    r"\b(when\s+(?:should|can|would|will|could)|"
+    r"good\s+time|best\s+(?:time|day)|"
+    r"before\s+\w+\s+(?:starts?|arrives?|begins?|comes?)|"
+    r"prepare\b|plan\s+(?:for|to|ahead)|"
+    r"free\s+(?:time|day)|day\s+off|available|"
+    r"what\s+day|which\s+day)",
+    re.IGNORECASE,
+)
+_MONEY_RE = re.compile(
+    r"\$[\d,]+(?:\.\d{2})?|\b\d+\s*(?:dollars?|USD)\b",
+    re.IGNORECASE,
+)
+_OUTDOOR_KW = frozenset({
+    "yard", "garden", "outside", "outdoor", "lawn", "landscap",
+    "plant", "sod", "mow", "patio", "driveway", "pool",
+})
 
 
 def _collect_text(
@@ -97,99 +100,130 @@ def _collect_text(
     return " ".join(parts)
 
 
+# Each signal type carries an enrichment_query (used for a broad cross-domain
+# search) and an optional tool_hint (capability description for the model).
+# No domain names or MCP server names appear here.
+
+_SIGNAL_DEFS: list[dict[str, Any]] = [
+    {
+        "name": "scheduling",
+        "detect": lambda q, txt, now: (
+            bool(extract_dates(txt, now)) or bool(_PLANNING_RE.search(q))
+        ),
+        "meta": lambda q, txt, now: {
+            "dates_found": extract_dates(txt, now),
+            "is_planning_query": bool(_PLANNING_RE.search(q)),
+        },
+        "enrichment_query": "work schedule shifts days off availability",
+        "tool_hint": (
+            "Check calendar/scheduling tools for events and conflicts on "
+            "the relevant dates. Jack is NOT available for physical tasks "
+            "after evening work shifts — recommend days off instead."
+        ),
+    },
+    {
+        "name": "financial",
+        "detect": lambda q, txt, now: bool(_MONEY_RE.search(txt)),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": "budget spending finances cost",
+        "tool_hint": None,
+    },
+    {
+        "name": "outdoor",
+        "detect": lambda q, txt, now: any(
+            w in txt.lower() for w in _OUTDOOR_KW
+        ),
+        "meta": lambda q, txt, now: {},
+        "enrichment_query": None,  # no cross-domain search needed
+        "tool_hint": (
+            "This involves outdoor activity. Check weather forecast for "
+            "the recommended dates before confirming plans."
+        ),
+    },
+]
+
+
 def detect_signals(
     query: str,
     results: list[dict[str, Any]],
     facts: list[dict[str, Any]],
-    searched_domains: list[str],
     now: datetime,
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """Detect cross-domain signals from query and results.
 
-    Returns a dict mapping signal name → details.  Only signals whose
-    target domains were NOT already searched are included.
+    Returns a list of signal dicts, each with:
+      name, meta, enrichment_query (or None), tool_hint (or None)
     """
     all_text = _collect_text(query, results, facts)
-    searched = set(searched_domains)
-    signals: dict[str, Any] = {}
+    detected: list[dict[str, Any]] = []
 
-    # 1. Scheduling / dates
-    found_dates = extract_dates(all_text, now)
-    is_planning = bool(_PLANNING_RE.search(query))
-    if (found_dates or is_planning) and "work_schedule" not in searched:
-        signals["scheduling"] = {
-            "dates_found": found_dates,
-            "is_planning_query": is_planning,
-        }
+    for defn in _SIGNAL_DEFS:
+        if defn["detect"](query, all_text, now):
+            detected.append({
+                "name": defn["name"],
+                "meta": defn["meta"](query, all_text, now),
+                "enrichment_query": defn["enrichment_query"],
+                "tool_hint": defn["tool_hint"],
+            })
 
-    # 2. People
-    people = {m.group(1).title() for m in _PEOPLE_RE.finditer(all_text)}
-    people_domains = {"family", "work_people"} - searched
-    if people and people_domains:
-        signals["people"] = {
-            "names": sorted(people),
-            "search_domains": sorted(people_domains),
-        }
-
-    # 3. Financial
-    if re.search(r"\$[\d,]+|\b\d+\s*(?:dollars?|USD)\b", all_text, re.IGNORECASE):
-        if "finances" not in searched:
-            signals["financial"] = {"search_domains": ["finances"]}
-
-    # 4. Outdoor / weather
-    outdoor_kw = {"yard", "garden", "outside", "outdoor", "lawn", "landscap",
-                  "plant", "sod", "mow", "patio", "driveway"}
-    if any(w in all_text.lower() for w in outdoor_kw):
-        signals["outdoor"] = {"suggest_weather": True}
-
-    # 5. Active tasks / projects
-    task_kw = {"todo", "task list", "pending", "deadline", "action item"}
-    if any(w in all_text.lower() for w in task_kw):
-        extra = {"tasks", "projects"} - searched
-        if extra:
-            signals["tasks"] = {"search_domains": sorted(extra)}
-
-    return signals
+    return detected
 
 
 # ---------------------------------------------------------------------------
-# Enrichment — runs additional searches based on detected signals
+# Enrichment — broad cross-domain searches, no domain filters
 # ---------------------------------------------------------------------------
 
 
-async def _domain_search_enrichment(
+async def _broad_enrichment_search(
     signal_name: str,
-    domains: list[str],
-    query: str,
+    enrichment_query: str,
+    primary_domains: list[str],
     *,
     embeddings: EmbeddingClient,
     sparse_encoder: BM25SparseEncoder,
     vectors: KnowledgeVectorStore,
     db: KnowledgeDB,
 ) -> dict[str, Any]:
-    """Run an additional Knowledge search scoped to specific domains."""
+    """Search ALL domains for cross-domain context.
+
+    Results that came from the primary search's domains are de-prioritized
+    so the model sees genuinely new information.
+    """
     try:
         result = await search_knowledge(
             embeddings=embeddings,
             sparse_encoder=sparse_encoder,
             vectors=vectors,
             db=db,
-            query=query,
-            domains=domains,
-            limit=5,
+            query=enrichment_query,
+            # No domain filter — search everything
+            limit=8,
             min_similarity=0.20,
             include_facts=True,
             max_chars=500,
         )
+        primary_set = set(primary_domains)
+        all_results = result.get("results", [])
+        all_facts = result.get("facts", [])
+
+        # Separate results into new-domain vs already-seen-domain
+        new_results = [r for r in all_results if r.get("domain") not in primary_set]
+        same_results = [r for r in all_results if r.get("domain") in primary_set]
+        new_facts = [f for f in all_facts if f.get("domain") not in primary_set]
+        same_facts = [f for f in all_facts if f.get("domain") in primary_set]
+
         return {
-            "reason": f"Cross-domain enrichment for signal '{signal_name}'",
-            "domains_searched": domains,
-            "facts": result.get("facts", []),
-            "results": result.get("results", [])[:3],
+            "signal": signal_name,
+            # New-domain results first (the valuable cross-references)
+            "facts": [*new_facts[:8], *same_facts[:3]],
+            "results": [*new_results[:5], *same_results[:2]],
+            "new_domains_found": sorted({
+                r.get("domain", "") for r in new_results
+            } | {f.get("domain", "") for f in new_facts} - {""}),
         }
     except Exception:
         log.warning("cross_domain_search_failed signal=%s", signal_name, exc_info=True)
-        return {"error": f"Cross-domain search for {signal_name} failed"}
+        return {"signal": signal_name, "error": "search failed"}
 
 
 # ---------------------------------------------------------------------------
@@ -212,60 +246,39 @@ async def enrich_context(
     """Detect cross-domain signals and gather additional context.
 
     Returns a dict suitable for merging into the context_pack response.
-    Contains auto-searched domain results and augmentation suggestions.
+    All searches are broad (no domain filters) so new domains are
+    automatically included without code changes.
     """
     now = now or datetime.now(EASTERN_TIMEZONE)
-    signals = detect_signals(query, primary_results, primary_facts, searched_domains, now)
+    signals = detect_signals(query, primary_results, primary_facts, now)
 
     if not signals:
         return {}
 
-    enrichment: dict[str, Any] = {"signals_detected": list(signals.keys())}
+    enrichment: dict[str, Any] = {
+        "signals_detected": [s["name"] for s in signals],
+    }
 
-    # Schedule enrichment — search work_schedule domain for pattern + changes.
-    # Actual calendar event checking is deferred to the Calendar MCP tool.
-    if "scheduling" in signals:
-        enrichment["schedule_context"] = await _domain_search_enrichment(
-            "scheduling",
-            ["work_schedule"],
-            "work schedule pattern days off shifts availability",
-            embeddings=embeddings,
-            sparse_encoder=sparse_encoder,
-            vectors=vectors,
-            db=db,
-        )
-        enrichment["schedule_context"]["note"] = (
-            "Jack works 10am–10:30pm (or 2pm–10:30pm Sun/Wed) during on-weeks "
-            "and is not home until ~11pm. 'After work' is NOT viable for "
-            "physical tasks. Plan outdoor/active tasks for days off only."
-        )
-
-    # Other domain-based enrichments
-    for sig_name in ("people", "financial", "tasks"):
-        sig = signals.get(sig_name)
-        if sig and sig.get("search_domains"):
-            enrichment[f"{sig_name}_context"] = await _domain_search_enrichment(
-                sig_name,
-                sig["search_domains"],
-                query,
+    # Run broad cross-domain searches for each signal that has a query
+    for signal in signals:
+        eq = signal.get("enrichment_query")
+        if eq:
+            key = f"{signal['name']}_context"
+            enrichment[key] = await _broad_enrichment_search(
+                signal["name"],
+                eq,
+                searched_domains,
                 embeddings=embeddings,
                 sparse_encoder=sparse_encoder,
                 vectors=vectors,
                 db=db,
             )
+            # Attach signal metadata (e.g. dates_found)
+            if signal.get("meta"):
+                enrichment[key]["meta"] = signal["meta"]
 
-    # Suggestions
-    suggestions: list[str] = []
-    if "outdoor" in signals:
-        suggestions.append(
-            "weather: This involves outdoor activity. Check weather forecast "
-            "for the recommended dates before confirming."
-        )
-    if "scheduling" in signals:
-        suggestions.append(
-            "calendar: Check Google Calendar for appointments/conflicts on "
-            "the relevant dates. Use calendar tools to verify availability."
-        )
+    # Capability-based suggestions (no server names)
+    suggestions = [s["tool_hint"] for s in signals if s.get("tool_hint")]
     if suggestions:
         enrichment["cross_domain_suggestions"] = suggestions
 

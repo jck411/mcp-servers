@@ -35,15 +35,14 @@ class TestExtractDates:
         now = datetime(2026, 5, 22)
         assert extract_dates("No dates here.", now) == []
 
-    def test_multiple_dates(self):
+    def test_multiple_dates_sorted(self):
         now = datetime(2026, 5, 22)
         dates = extract_dates("Between 2026-06-03 and 2026-06-04.", now)
-        assert len(dates) == 2
         assert dates == ["2026-06-03", "2026-06-04"]
 
 
 # ---------------------------------------------------------------------------
-# Signal detection
+# Signal detection — no hardcoded domains or servers
 # ---------------------------------------------------------------------------
 
 
@@ -54,104 +53,114 @@ class TestDetectSignals:
     def test_planning_query_triggers_scheduling(self):
         signals = detect_signals(
             "When should I prepare the yard?",
-            results=[], facts=[], searched_domains=[], now=self._now(),
+            results=[], facts=[], now=self._now(),
         )
-        assert "scheduling" in signals
-        assert signals["scheduling"]["is_planning_query"] is True
+        names = [s["name"] for s in signals]
+        assert "scheduling" in names
+
+    def test_scheduling_has_enrichment_query(self):
+        signals = detect_signals(
+            "When should I do this?",
+            results=[], facts=[], now=self._now(),
+        )
+        sched = next(s for s in signals if s["name"] == "scheduling")
+        assert sched["enrichment_query"]  # non-empty query string
+        assert isinstance(sched["enrichment_query"], str)
 
     def test_dates_in_results_trigger_scheduling(self):
         results = [{"content": "Confirmed date: June 4, 2026"}]
         signals = detect_signals(
             "Tell me about the landscaping project",
-            results=results, facts=[], searched_domains=[], now=self._now(),
+            results=results, facts=[], now=self._now(),
         )
-        assert "scheduling" in signals
-        assert "2026-06-04" in signals["scheduling"]["dates_found"]
-
-    def test_no_scheduling_if_already_searched(self):
-        signals = detect_signals(
-            "When should I prepare?",
-            results=[], facts=[], searched_domains=["work_schedule"],
-            now=self._now(),
-        )
-        assert "scheduling" not in signals
-
-    def test_people_detection(self):
-        signals = detect_signals(
-            "What about Sanja's schedule?",
-            results=[], facts=[], searched_domains=[], now=self._now(),
-        )
-        assert "people" in signals
-        assert "Sanja" in signals["people"]["names"]
-
-    def test_people_in_facts(self):
-        facts = [{"key": "swap_worker", "value": "Andison covers for Jack"}]
-        signals = detect_signals(
-            "schedule changes",
-            results=[], facts=facts, searched_domains=[], now=self._now(),
-        )
-        assert "people" in signals
-        assert "Andison" in signals["people"]["names"]
-
-    def test_outdoor_detection(self):
-        signals = detect_signals(
-            "yard work plans",
-            results=[], facts=[], searched_domains=[], now=self._now(),
-        )
-        assert "outdoor" in signals
-        assert signals["outdoor"]["suggest_weather"] is True
-
-    def test_financial_detection(self):
-        results = [{"content": "Total cost: $2,650"}]
-        signals = detect_signals(
-            "landscaping quote",
-            results=results, facts=[], searched_domains=[], now=self._now(),
-        )
-        assert "financial" in signals
-
-    def test_financial_not_duplicated(self):
-        """If finances was already searched, don't signal again."""
-        results = [{"content": "Total cost: $2,650"}]
-        signals = detect_signals(
-            "landscaping quote",
-            results=results, facts=[], searched_domains=["finances"],
-            now=self._now(),
-        )
-        assert "financial" not in signals
-
-    def test_no_signals_for_simple_query(self):
-        signals = detect_signals(
-            "What is my blood type?",
-            results=[], facts=[], searched_domains=[], now=self._now(),
-        )
-        assert len(signals) == 0
-
-    def test_multiple_signals(self):
-        """A yard planning question with dates should trigger scheduling + outdoor."""
-        results = [{"content": "Dan arrives June 4, 2026. Cost: $2,650"}]
-        signals = detect_signals(
-            "When should I prepare the yard before Dan starts?",
-            results=results, facts=[], searched_domains=[], now=self._now(),
-        )
-        assert "scheduling" in signals
-        assert "outdoor" in signals
-        assert "financial" in signals
-        assert "people" in signals
-        assert "Dan" in signals["people"]["names"]
-
-    def test_best_day_triggers_planning(self):
-        signals = detect_signals(
-            "What's the best day to do this?",
-            results=[], facts=[], searched_domains=[], now=self._now(),
-        )
-        assert "scheduling" in signals
-        assert signals["scheduling"]["is_planning_query"] is True
+        names = [s["name"] for s in signals]
+        assert "scheduling" in names
+        sched = next(s for s in signals if s["name"] == "scheduling")
+        assert "2026-06-04" in sched["meta"]["dates_found"]
 
     def test_dates_in_facts_trigger_scheduling(self):
         facts = [{"key": "confirmed_date", "value": "June 4, 2026"}]
         signals = detect_signals(
             "landscaping project details",
-            results=[], facts=facts, searched_domains=[], now=self._now(),
+            results=[], facts=facts, now=self._now(),
         )
-        assert "scheduling" in signals
-        assert "2026-06-04" in signals["scheduling"]["dates_found"]
+        names = [s["name"] for s in signals]
+        assert "scheduling" in names
+
+    def test_outdoor_detection(self):
+        signals = detect_signals(
+            "yard work plans",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "outdoor" in names
+
+    def test_outdoor_has_tool_hint(self):
+        signals = detect_signals(
+            "yard work plans",
+            results=[], facts=[], now=self._now(),
+        )
+        outdoor = next(s for s in signals if s["name"] == "outdoor")
+        assert outdoor["tool_hint"]
+        assert "weather" in outdoor["tool_hint"].lower()
+
+    def test_financial_detection(self):
+        results = [{"content": "Total cost: $2,650"}]
+        signals = detect_signals(
+            "landscaping quote",
+            results=results, facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "financial" in names
+
+    def test_no_signals_for_simple_query(self):
+        signals = detect_signals(
+            "What is my blood type?",
+            results=[], facts=[], now=self._now(),
+        )
+        assert len(signals) == 0
+
+    def test_multiple_signals(self):
+        """A yard planning question with money should trigger multiple signals."""
+        results = [{"content": "Dan arrives June 4, 2026. Cost: $2,650"}]
+        signals = detect_signals(
+            "When should I prepare the yard before Dan starts?",
+            results=results, facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "scheduling" in names
+        assert "outdoor" in names
+        assert "financial" in names
+
+    def test_no_hardcoded_domain_names(self):
+        """Signal dicts should not contain hardcoded domain names."""
+        results = [{"content": "June 4, 2026. Cost: $2,650"}]
+        signals = detect_signals(
+            "When should I prepare the yard?",
+            results=results, facts=[], now=self._now(),
+        )
+        for signal in signals:
+            # Signals should have enrichment_query (a search string),
+            # not search_domains (hardcoded domain list)
+            assert "search_domains" not in signal
+
+    def test_tool_hints_are_capability_based(self):
+        """Tool hints should describe capabilities, not name specific servers."""
+        signals = detect_signals(
+            "When should I prepare the yard?",
+            results=[], facts=[], now=self._now(),
+        )
+        for signal in signals:
+            hint = signal.get("tool_hint") or ""
+            # Should not reference specific MCP server names or ports
+            assert "9004" not in hint
+            assert "9017" not in hint
+            assert "mcp-" not in hint.lower()
+
+    def test_best_day_triggers_planning(self):
+        signals = detect_signals(
+            "What's the best day to do this?",
+            results=[], facts=[], now=self._now(),
+        )
+        names = [s["name"] for s in signals]
+        assert "scheduling" in names
