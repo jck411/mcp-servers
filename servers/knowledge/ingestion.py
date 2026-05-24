@@ -23,11 +23,11 @@ from servers.knowledge.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     IMAGE_EXTENSIONS,
     _decode_llm_json_object,
+    _extract_and_chunk_with_log,
     _is_likely_binary,
     chunk_text,
     compute_file_hash,
     compute_text_hash,
-    extract_and_chunk,
 )
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
@@ -570,5 +570,4 @@ async def extract_source_facts_single_shot(
         "warnings": warnings,
         "pipeline": pipeline,
     }
-
 

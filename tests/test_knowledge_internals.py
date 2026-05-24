@@ -19,6 +19,7 @@ import pytest
 from servers.knowledge import (
     BM25SparseEncoder,
     KnowledgeDB,
+    _ingest_file_at_path,
     _is_likely_binary,
     _validate_text_ingest_inputs,
     chunk_text,
@@ -1026,6 +1027,53 @@ async def test_wiki_lint_pass_ignores_orphan_active_pages(tmp_path: Path):
 
         assert result == {"items_created": 0}
         assert await db.curation_list(status="pending") == []
+    finally:
+        await db.close()
+
+
+async def test_ingest_file_uses_logged_extraction_pipeline(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "ingest_file.db")
+    await db.initialize()
+    try:
+        knowledge_root = tmp_path / "knowledge"
+        dest = knowledge_root / "tech" / "note.md"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("A short tech note for reingest.")
+        await db.domain_create("tech", "tech", [])
+
+        class FakeEmbeddings:
+            async def embed_batch(self, texts):
+                return [[0.1] for _ in texts]
+
+        class FakeSparseEncoder(BM25SparseEncoder):
+            pass
+
+        class FakeVectors:
+            def __init__(self):
+                self.payloads = []
+
+            async def upsert_chunks(self, payloads, dense_vecs, sparse_vecs):
+                self.payloads = payloads
+
+        vectors = FakeVectors()
+        result = await _ingest_file_at_path(
+            SimpleNamespace(
+                knowledge_path=knowledge_root,
+                chunk_max_chars=1000,
+                chunk_overlap=100,
+            ),
+            FakeEmbeddings(),
+            FakeSparseEncoder(),
+            vectors,
+            db,
+            dest=dest,
+            domain="tech",
+        )
+
+        assert result["success"] is True
+        assert result["chunks_stored"] == 1
+        assert result["pipeline_type"] == "text_read"
+        assert vectors.payloads[0]["content"] == "A short tech note for reingest."
     finally:
         await db.close()
 
