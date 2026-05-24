@@ -446,9 +446,12 @@ async def knowledge_ingest_file(
 @mcp.tool("knowledge_context_pack")
 @logged_tool(log)
 async def knowledge_context_pack(
-    query: str,
+    query: str | None = None,
+    question: str | None = None,
+    q: str | None = None,
     temporal_intent: str | None = None,
     max_results: int = 8,
+    max_items: int | None = None,
 ) -> dict[str, Any]:
     """Get Jack's personal context for any question. CALL THIS FIRST.
 
@@ -465,15 +468,28 @@ async def knowledge_context_pack(
 
     Args:
         query: The user's question or topic to search for.
+        question: Backward-compatible alias for query.
+        q: Short alias for query.
         temporal_intent: Optional hint — auto, all, current_upcoming, or
             historical. Defaults to auto (inferred from the query).
         max_results: Maximum search results to include (default 8).
+        max_items: Backward-compatible alias for max_results.
 
     Returns:
         A context package with facts, search results, wiki pages, and
         suggestions for whether additional tools (web, calendar, etc.)
         might be useful.
     """
+    clean_query = (query or question or q or "").strip()
+    if not clean_query:
+        return {
+            "success": False,
+            "error": "query is required; call knowledge_context_pack(query=<user question>)",
+        }
+    query = clean_query
+    if max_items is not None:
+        max_results = max_items
+
     settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
 
     # 1. Run the full Knowledge search (facts + chunks + wiki)

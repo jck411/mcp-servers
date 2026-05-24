@@ -1078,6 +1078,31 @@ async def test_ingest_file_uses_logged_extraction_pipeline(tmp_path: Path):
         await db.close()
 
 
+def test_context_pack_schema_accepts_missing_query_for_graceful_error():
+    import servers.knowledge_server as knowledge
+
+    params = knowledge.knowledge_context_pack.parameters
+
+    assert "query" not in params.get("required", [])
+    assert "question" in params["properties"]
+    assert "max_items" in params["properties"]
+
+
+async def test_context_pack_missing_query_returns_tool_error():
+    import servers.knowledge_server as knowledge
+
+    context_pack = (
+        knowledge.knowledge_context_pack.fn
+        if hasattr(knowledge.knowledge_context_pack, "fn")
+        else knowledge.knowledge_context_pack
+    )
+
+    result = await context_pack()
+
+    assert result["success"] is False
+    assert "query is required" in result["error"]
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------
