@@ -163,10 +163,11 @@ Then restart whichever services need it: `./deploy/deploy.sh --no-push <name>`.
 |--------|------|
 | knowledge | 9017 |
 | knowledge_api | 9018 |
+| knowledge_admin | 9019 |
 
 The private/home MCP ports are listed in the README and managed by the CT 117
 `mcp-accounts` deployment path. Retired ports (do not reuse): 9002, 9003,
-9007, 9012, 9016. Next available: 9019.
+9007, 9012, 9016. Next available: 9020.
 
 ---
 

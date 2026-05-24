@@ -29,20 +29,28 @@ Each server:
 | hue | 9015 | 117 |
 | knowledge | 9017 | 110 |
 | knowledge_api (REST, not MCP) | 9018 | 110 |
+| knowledge_admin | 9019 | 110 |
 
-Next available MCP port: **9019**. Retired ports (do not reuse): `9002`, `9003`, `9007`, `9012`, `9016`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
+Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`, `9007`, `9012`, `9016`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
 
-- **LXC 110** (knowledge): knowledge, knowledge_api
+- **LXC 110** (knowledge): knowledge, knowledge_api, knowledge_admin
 - **LXC 117** (private/home): calendar, gmail, gdrive, monarch, spotify, tv, hue — account credentials and home-control keys only exist here
 
 ### Knowledge Curation Queue
 
-The `knowledge` server owns an approval-gated curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Tools:
+The `knowledge` server owns an approval-gated curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Conversational review tools:
 
 - `knowledge_curation_list`
+- `knowledge_curation_resolve`
+
+Admin workflow tools live on `knowledge_admin`:
+
+- `knowledge_curation_create`
 - `knowledge_curation_get`
-- `knowledge_curation_apply`
-- `knowledge_curation_reject`
+- `knowledge_curation_question_packs`
+- `knowledge_curation_question_pack_get`
+- `knowledge_curation_pack_preview`
+- `knowledge_curation_pack_apply`
 - `knowledge_curation_snooze`
 
 Destructive actions require `confirmation` equal to the queue item id.
@@ -214,11 +222,11 @@ The Knowledge MCP endpoint uses a shared bearer token. Raw MCP ports stay networ
 
 ### LAN access
 
-Raw MCP ports are internal backend ports. LXC firewalls should allow only trusted clients such as chat-backend, OpenCode, LibreChat, the Proxmox host for Cloudflare tunnel ingress, and the admin laptop. Do not expose ports `9003–9018` through router port-forwarding.
+Raw MCP ports are internal backend ports. LXC firewalls should allow only trusted clients such as chat-backend, OpenCode, LibreChat, the Proxmox host for Cloudflare tunnel ingress, and the admin laptop. Do not expose ports `9003–9019` through router port-forwarding. Keep `knowledge_admin` out of LibreChat; Codex reaches it through an SSH tunnel.
 
 ### Remote access (Cloudflare Tunnel)
 
-Use a **Cloudflare Tunnel** — never port-forward `9003–9018` through your router. The tunnel gives Knowledge a public HTTPS endpoint without opening firewall holes.
+Use a **Cloudflare Tunnel** — never port-forward `9003–9019` through your router. The tunnel gives Knowledge a public HTTPS endpoint without opening firewall holes.
 
 ### Authentication
 
