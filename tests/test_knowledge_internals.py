@@ -923,6 +923,61 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
         await db.close()
 
 
+async def test_call_wiki_llm_decodes_forced_tool_arguments(monkeypatch: pytest.MonkeyPatch):
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "function": {
+                                "arguments": json.dumps({
+                                    "title": "Dad",
+                                    "kind": "entity",
+                                    "body_md": "Dad overview.",
+                                }),
+                            },
+                        }],
+                    },
+                }],
+                "usage": {"total_tokens": 42},
+            }
+
+    class FakeClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            pass
+
+        async def post(self, *args, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(servers.knowledge.wiki.httpx, "AsyncClient", FakeClient)
+
+    page, tokens = await servers.knowledge.wiki._call_wiki_llm(
+        SimpleNamespace(extraction_model="test-model", openrouter_api_key="token"),
+        {
+            "slug": "family/dad",
+            "domain": "family",
+            "title": "Dad",
+            "facts": [],
+            "sources": {},
+            "chunks": [],
+            "existing_page": None,
+        },
+    )
+
+    assert page["title"] == "Dad"
+    assert tokens == 42
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ import httpx
 
 from servers.knowledge.db import KnowledgeDB, search_fact_keywords
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
+from servers.knowledge.extraction import _decode_llm_json_object
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
 from shared.logging_config import get_logger

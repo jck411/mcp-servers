@@ -189,6 +189,9 @@ sudo ./deploy/setup-systemd.sh
 ./deploy/deploy.sh
 ```
 
+`setup-systemd.sh` installs the 3am ET backup/maintenance/wiki timer and the
+noon ET wiki-only rebuild timer.
+
 ### Managing Services
 
 ```bash

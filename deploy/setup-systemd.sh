@@ -6,8 +6,8 @@
 # composition, so we use EnvironmentFile=/opt/mcp-servers/.env.<instance>
 #
 # Usage:
-#   sudo ./deploy/setup-systemd.sh                           # Install services + enabled timer
-#   sudo ENABLE_NIGHTLY=0 ./deploy/setup-systemd.sh knowledge # Install without starting nightly timer
+#   sudo ./deploy/setup-systemd.sh                           # Install services + scheduled timers
+#   sudo ENABLE_NIGHTLY=0 ./deploy/setup-systemd.sh knowledge # Install without starting scheduled timers
 #
 # NOTE: Private/account/home-control servers live on LXC 117 (mcp-accounts).
 
@@ -43,6 +43,8 @@ cp "${REPO_DIR}/deploy/mcp-server@.service" /etc/systemd/system/
 cp "${REPO_DIR}/deploy/mcp-knowledge-api.service" /etc/systemd/system/
 cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.service" /etc/systemd/system/
 cp "${REPO_DIR}/deploy/mcp-knowledge-nightly.timer" /etc/systemd/system/
+cp "${REPO_DIR}/deploy/mcp-knowledge-wiki-midday.service" /etc/systemd/system/
+cp "${REPO_DIR}/deploy/mcp-knowledge-wiki-midday.timer" /etc/systemd/system/
 chmod +x "${REPO_DIR}/deploy/backup.sh" "${REPO_DIR}/deploy/healthcheck.sh"
 systemctl daemon-reload
 
@@ -76,12 +78,17 @@ done
 systemctl disable --now mcp-server@knowledge_api.service 2>/dev/null || true
 systemctl enable --now mcp-knowledge-api.service
 systemctl disable --now mcp-wiki-maintain.timer 2>/dev/null || true
+systemctl disable --now mcp-wiki-maintain.service 2>/dev/null || true
+rm -f /etc/systemd/system/mcp-wiki-maintain.timer /etc/systemd/system/mcp-wiki-maintain.service
+systemctl daemon-reload
 if [[ "$ENABLE_NIGHTLY" == 1 ]]; then
-    echo "  Enabling mcp-knowledge-nightly.timer..."
+    echo "  Enabling scheduled Knowledge timers..."
     systemctl enable --now mcp-knowledge-nightly.timer
+    systemctl enable --now mcp-knowledge-wiki-midday.timer
 else
-    echo "  Installing mcp-knowledge-nightly.timer disabled because ENABLE_NIGHTLY=0..."
+    echo "  Installing scheduled Knowledge timers disabled because ENABLE_NIGHTLY=0..."
     systemctl disable --now mcp-knowledge-nightly.timer 2>/dev/null || true
+    systemctl disable --now mcp-knowledge-wiki-midday.timer 2>/dev/null || true
 fi
 
 echo ""
@@ -114,12 +121,14 @@ else
     echo "  ❌ mcp-knowledge-api.service — not running"
     journalctl -u mcp-knowledge-api.service -n 5 --no-pager 2>/dev/null || true
 fi
-if systemctl is-active --quiet mcp-knowledge-nightly.timer 2>/dev/null; then
-    echo "  ✅ mcp-knowledge-nightly.timer — active"
-else
-    echo "  mcp-knowledge-nightly.timer — installed, not active"
-    journalctl -u mcp-knowledge-nightly.timer -n 5 --no-pager 2>/dev/null || true
-fi
+for timer in mcp-knowledge-nightly.timer mcp-knowledge-wiki-midday.timer; do
+    if systemctl is-active --quiet "$timer" 2>/dev/null; then
+        echo "  ✅ ${timer} — active"
+    else
+        echo "  ${timer} — installed, not active"
+        journalctl -u "$timer" -n 5 --no-pager 2>/dev/null || true
+    fi
+done
 
 echo ""
 echo "Done. Verify with: systemctl list-units 'mcp-server@*'; systemctl list-timers --all '*knowledge*'"

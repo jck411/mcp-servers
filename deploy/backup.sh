@@ -163,7 +163,9 @@ prune_keep() {
 }
 
 promote_archive() {
-    local archive="$1" layer="$2" dest="${BACKUP_ROOT}/${layer}/$(basename "$archive")"
+    local archive="$1"
+    local layer="$2"
+    local dest="${BACKUP_ROOT}/${layer}/$(basename "$archive")"
     ln "$archive" "$dest" 2>/dev/null || cp -p "$archive" "$dest"
     ln "${archive}.sha256" "${dest}.sha256" 2>/dev/null || cp -p "${archive}.sha256" "${dest}.sha256"
     ln "${archive}.list" "${dest}.list" 2>/dev/null || cp -p "${archive}.list" "${dest}.list"
