@@ -1005,6 +1005,31 @@ async def test_wiki_lint_pass_creates_expired_fact_item(tmp_path: Path):
         await db.close()
 
 
+async def test_wiki_lint_pass_ignores_orphan_active_pages(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_lint_orphan.db")
+    await db.initialize()
+    try:
+        await db.domain_create("family", "family", [])
+        await db.wiki_upsert_page(
+            slug="family/dad",
+            domain="family",
+            title="Dad",
+            kind="entity",
+            status="active",
+            body_md="Dad overview.",
+            frontmatter={"related_slugs": []},
+            sources=[],
+            fact_count=0,
+        )
+
+        result = await servers.knowledge.wiki.wiki_lint_pass(db)
+
+        assert result == {"items_created": 0}
+        assert await db.curation_list(status="pending") == []
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------

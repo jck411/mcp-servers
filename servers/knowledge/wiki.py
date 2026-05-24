@@ -734,12 +734,11 @@ async def rebuild_wiki(
 
 
 async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
-    """Post-rebuild lint: create curation items for expired facts and orphan pages.
+    """Post-rebuild lint: create curation items for concrete wiki issues.
 
     Runs after wiki rebuild. Detects:
     1. Expired facts (valid_until < now) that should be archived
-    2. Orphan wiki pages with no inbound related_slugs from other pages
-    3. Candidate pages stuck with concerns (merge/split) for >7 days
+    2. Candidate pages stuck with concerns (merge/split) for >7 days
     """
     items_created = 0
     now = datetime.now(UTC)
@@ -785,50 +784,7 @@ async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
     except Exception:
         log.warning("lint_expired_facts_failed", exc_info=True)
 
-    # --- 2. Orphan wiki pages (no inbound related_slugs) ---
-    try:
-        all_pages = await db.wiki_list(status="active", limit=200)
-        # Build set of all slugs referenced by related_slugs
-        all_related: set[str] = set()
-        slug_to_title: dict[str, str] = {}
-        for page in all_pages:
-            slug = str(page.get("slug", ""))
-            slug_to_title[slug] = str(page.get("title", slug))
-            # wiki_list doesn't return frontmatter, so fetch it
-            full = await db.wiki_get(slug)
-            if full:
-                fm = full.get("frontmatter") or {}
-                for related in fm.get("related_slugs", []):
-                    all_related.add(str(related))
-
-        for page in all_pages:
-            slug = str(page.get("slug", ""))
-            if page.get("kind") == "index":
-                continue
-            # Orphan = not referenced by any other page's related_slugs
-            if slug not in all_related:
-                await db.curation_upsert(
-                    kind="orphan_page",
-                    title=f"Orphan wiki page: {slug_to_title.get(slug, slug)}",
-                    summary=(
-                        f"Wiki page '{slug}' has no inbound links from "
-                        f"other pages' related_slugs. Consider adding "
-                        f"cross-references or archiving if stale."
-                    ),
-                    source_refs=[{"type": "wiki_page", "slug": slug}],
-                    proposed_actions=[{
-                        "action": "add_cross_references_or_archive",
-                        "slug": slug,
-                    }],
-                    risk="low",
-                    confidence=0.7,
-                    item_id=f"lint:orphan:{slug}",
-                )
-                items_created += 1
-    except Exception:
-        log.warning("lint_orphan_pages_failed", exc_info=True)
-
-    # --- 3. Stale candidates with concerns ---
+    # --- 2. Stale candidates with concerns ---
     try:
         stale_cutoff = (now - timedelta(days=7)).isoformat()
         candidate_pages = await db.wiki_list(status="candidate", limit=200)
