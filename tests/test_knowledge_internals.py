@@ -978,6 +978,33 @@ async def test_call_wiki_llm_decodes_forced_tool_arguments(monkeypatch: pytest.M
     assert tokens == 42
 
 
+async def test_wiki_lint_pass_creates_expired_fact_item(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "wiki_lint.db")
+    await db.initialize()
+    try:
+        await db.domain_create("health", "health", [])
+        await db.fact_set(
+            "health",
+            "old_plan",
+            "expired",
+            valid_until="2026-01-01",
+            origin_type="manual",
+        )
+
+        result = await servers.knowledge.wiki.wiki_lint_pass(db)
+
+        assert result == {"items_created": 1}
+        items = await db.curation_list(status="pending")
+        assert items[0]["kind"] == "expired_fact"
+        assert items[0]["source_refs"] == [{
+            "type": "fact",
+            "domain": "health",
+            "key": "old_plan",
+        }]
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Search-side keyword extraction parity
 # ---------------------------------------------------------------------------

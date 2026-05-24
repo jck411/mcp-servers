@@ -751,7 +751,7 @@ async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
             if domain_row.get("archived"):
                 continue
             domain = str(domain_row["name"])
-            facts = await db.fact_list(domain)
+            facts = await db.facts_list(domain)
             for fact in facts:
                 valid_until = fact.get("valid_until")
                 if not valid_until:
