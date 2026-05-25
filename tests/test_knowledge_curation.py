@@ -332,6 +332,109 @@ async def test_apply_non_destructive_curation_item_sets_fact(knowledge_db: Knowl
     assert (await knowledge_db.curation_get("apply-test"))["status"] == "applied"
 
 
+async def test_apply_legacy_review_curation_item_marks_reviewed(knowledge_db: KnowledgeDB):
+    await knowledge_db.curation_upsert(
+        kind="wiki_merge",
+        title="Review wiki identity",
+        proposed_actions=[{"action": "merge_candidate", "slug": "core/example"}],
+        risk="low",
+        confidence=0.8,
+        item_id="legacy-review-test",
+    )
+
+    result = await apply_curation_item(
+        "legacy-review-test",
+        confirmation=None,
+        settings=None,  # type: ignore[arg-type]
+        embeddings=None,  # type: ignore[arg-type]
+        sparse_encoder=None,  # type: ignore[arg-type]
+        vectors=None,  # type: ignore[arg-type]
+        db=knowledge_db,
+    )
+
+    assert result["success"] is True
+    assert result["results"] == [{"action": "merge_candidate", "status": "reviewed"}]
+    assert (await knowledge_db.curation_get("legacy-review-test"))["status"] == "applied"
+
+
+async def test_apply_reingest_source_curation_item(knowledge_db: KnowledgeDB, tmp_path: Path):
+    await knowledge_db.domain_create("tech", "Tech test domain", [])
+    knowledge_root = tmp_path / "knowledge"
+    source_path = knowledge_root / "tech" / "note.md"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("Reindex this note for search.", encoding="utf-8")
+
+    await knowledge_db.source_add(
+        "old-source",
+        "tech",
+        "md",
+        "note.md",
+        "old-hash",
+        0,
+        "tech/note.md",
+        "text/markdown",
+        source_path.stat().st_size,
+    )
+    await knowledge_db.curation_upsert(
+        kind="maintenance_action",
+        title="Reingest note",
+        proposed_actions=[{"action": "reingest_source", "target_id": "old-source"}],
+        item_id="reingest-test",
+    )
+
+    class FakeEmbeddings:
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1] for _ in texts]
+
+    class FakeSparseEncoder:
+        def fit_batch(self, texts: list[str]) -> None:
+            self.fitted = texts
+
+        def encode(self, text: str) -> dict[str, list[float] | list[int]]:
+            return {"indices": [0], "values": [1.0]}
+
+    class FakeVectors:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+            self.chunks: list[dict] = []
+
+        async def upsert_chunks(self, chunks, dense_vectors, sparse_vectors) -> None:
+            self.chunks = chunks
+
+        async def delete_by_source(self, source_id: str) -> None:
+            self.deleted.append(source_id)
+
+    vectors = FakeVectors()
+    result = await apply_curation_item(
+        "reingest-test",
+        confirmation=None,
+        settings=SimpleNamespace(
+            knowledge_path=knowledge_root,
+            chunk_max_chars=1000,
+            chunk_overlap=200,
+            ocr_enabled=False,
+        ),  # type: ignore[arg-type]
+        embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
+        sparse_encoder=FakeSparseEncoder(),  # type: ignore[arg-type]
+        vectors=vectors,  # type: ignore[arg-type]
+        db=knowledge_db,
+    )
+
+    assert result["success"] is True
+    applied = result["results"][0]
+    assert applied["action"] == "reingest_source"
+    assert applied["old_source_id"] == "old-source"
+    assert applied["new_source_id"] != "old-source"
+    assert applied["chunks_stored"] == 1
+    assert vectors.deleted == ["old-source"]
+    assert len(vectors.chunks) == 1
+    assert await knowledge_db.source_get("old-source") is None
+    new_source = await knowledge_db.source_get(applied["new_source_id"])
+    assert new_source["filename"] == "note.md"
+    assert new_source["chunk_count"] == 1
+    assert (await knowledge_db.curation_get("reingest-test"))["status"] == "applied"
+
+
 async def test_destructive_curation_requires_exact_confirmation(knowledge_db: KnowledgeDB):
     await knowledge_db.curation_upsert(
         kind="maintenance_action",

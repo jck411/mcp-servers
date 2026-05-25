@@ -115,9 +115,20 @@
   function autoApplicable(item) {
     const supported = new Set([
       "archive_domain", "delete_source", "domain_archive", "fact_delete",
-      "fact_set", "fact_update_validity", "flag_for_review", "ingest_text", "no_action",
+      "fact_set", "fact_update_validity", "flag_for_review", "ingest_text",
+      "merge_candidate", "no_action", "reingest_source", "review_and_promote_or_archive",
+      "split_candidate",
     ]);
     return (item.proposed_actions || []).every((a) => supported.has(a.action || a.type));
+  }
+
+  function reviewOnly(item) {
+    const review = new Set([
+      "flag_for_review", "merge_candidate", "no_action",
+      "review_and_promote_or_archive", "split_candidate",
+    ]);
+    const actions = item.proposed_actions || [];
+    return actions.length > 0 && actions.every((a) => review.has(a.action || a.type));
   }
 
   async function mutate(item, action) {
@@ -150,6 +161,7 @@
     const reviewed = item.reviewed_at ? new Date(item.reviewed_at).toLocaleString() : "";
     const disabled = item.status !== "pending";
     const applyDisabled = disabled || !autoApplicable(item);
+    const applyLabel = reviewOnly(item) ? "Mark Reviewed" : "Apply";
     const applyTitle = applyDisabled && !disabled
       ? "Apply is only available for executable actions. Resolve this in chat, reject, or snooze."
       : "";
@@ -178,7 +190,7 @@
       </details>` : ""}
       <div class="actions">
         <button class="ok" data-action="apply" ${applyDisabled ? "disabled" : ""}
-          title="${escapeHtml(applyTitle)}">Apply</button>
+          title="${escapeHtml(applyTitle)}">${escapeHtml(applyLabel)}</button>
         <button class="err" data-action="reject" ${disabled ? "disabled" : ""}>Reject</button>
         <button class="warn" data-action="snooze" ${disabled ? "disabled" : ""}>Snooze</button>
       </div>`;

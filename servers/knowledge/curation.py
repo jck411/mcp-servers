@@ -15,6 +15,7 @@ from typing import Any
 
 from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
+from servers.knowledge.ingestion import _ingest_file_at_path
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
 from servers.knowledge_source_files import resolve_source_path
@@ -32,7 +33,11 @@ SUPPORTED_CURATION_ACTIONS = {
     "fact_update_validity",
     "flag_for_review",
     "ingest_text",
+    "merge_candidate",
     "no_action",
+    "reingest_source",
+    "review_and_promote_or_archive",
+    "split_candidate",
 }
 
 DESTRUCTIVE_CURATION_ACTIONS = {
@@ -40,6 +45,14 @@ DESTRUCTIVE_CURATION_ACTIONS = {
     "delete_source",
     "domain_archive",
     "fact_delete",
+}
+
+REVIEW_ONLY_CURATION_ACTIONS = {
+    "flag_for_review",
+    "merge_candidate",
+    "no_action",
+    "review_and_promote_or_archive",
+    "split_candidate",
 }
 
 
@@ -502,6 +515,49 @@ async def _ingest_curation_text(
     }
 
 
+async def _reingest_source_action(
+    *,
+    settings: KnowledgeSettings,
+    embeddings: EmbeddingClient,
+    sparse_encoder: BM25SparseEncoder,
+    vectors: KnowledgeVectorStore,
+    db: KnowledgeDB,
+    source_id: str,
+) -> dict[str, Any]:
+    source = await db.source_get(source_id)
+    if not source:
+        raise ValueError(f"Source '{source_id}' not found")
+
+    source_path = resolve_source_path(settings.knowledge_path, source)
+    if not source_path:
+        raise ValueError(f"Stored source file for '{source_id}' was not found")
+
+    result = await _ingest_file_at_path(
+        settings,
+        embeddings,
+        sparse_encoder,
+        vectors,
+        db,
+        dest=source_path,
+        domain=str(source["domain"]),
+        force=True,
+    )
+    if result.get("success") is not True:
+        raise ValueError(f"Reingest failed for '{source_id}': {result!r}")
+
+    await vectors.delete_by_source(source_id)
+    await db.source_remove(source_id)
+    return {
+        "action": "reingest_source",
+        "status": "applied",
+        "old_source_id": source_id,
+        "new_source_id": result.get("source_id"),
+        "file": result.get("file"),
+        "domain": result.get("domain"),
+        "chunks_stored": result.get("chunks_stored", 0),
+    }
+
+
 async def execute_curation_action(
     action: dict[str, Any],
     *,
@@ -600,8 +656,21 @@ async def execute_curation_action(
             raise ValueError(f"Domain '{domain}' not found or already archived")
         return {"action": action_type, "status": "applied", "domain": domain}
 
-    if action_type in {"flag_for_review", "no_action"}:
-        return {"action": action_type, "status": "skipped"}
+    if action_type == "reingest_source":
+        source_id = str(action.get("target_id") or action.get("source_id") or "")
+        if not source_id:
+            raise ValueError("reingest_source action requires target_id or source_id")
+        return await _reingest_source_action(
+            settings=settings,
+            embeddings=embeddings,
+            sparse_encoder=sparse_encoder,
+            vectors=vectors,
+            db=db,
+            source_id=source_id,
+        )
+
+    if action_type in REVIEW_ONLY_CURATION_ACTIONS:
+        return {"action": action_type, "status": "reviewed"}
 
     raise ValueError(f"Unsupported curation action '{action_type}'")
 
@@ -649,5 +718,3 @@ async def apply_curation_item(
 
     await db.curation_mark_status(item_id, "applied")
     return {"success": True, "item_id": item_id, "results": results}
-
-
