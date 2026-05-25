@@ -1,8 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from servers import knowledge_api
 from servers.knowledge import (
     KnowledgeDB,
     apply_curation_item,
@@ -53,6 +55,35 @@ async def test_curation_queue_round_trip(knowledge_db: KnowledgeDB):
     assert await knowledge_db.curation_count(status="pending") == 1
     assert listed[0]["source_refs"][0]["conversationId"] == "conv-1"
     assert not curation_item_has_destructive_actions(listed[0])
+
+
+async def test_curation_api_action_routes_accept_slash_ids(
+    knowledge_db: KnowledgeDB,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    item_id = "wiki:merge_candidate:family/sanja"
+    await knowledge_db.curation_upsert(
+        kind="wiki_merge",
+        title="Review wiki identity: Sanja",
+        proposed_actions=[{"action": "flag_for_review", "slug": "family/sanja"}],
+        item_id=item_id,
+    )
+    monkeypatch.setattr(knowledge_api, "_settings", SimpleNamespace())
+    monkeypatch.setattr(knowledge_api, "_embeddings", SimpleNamespace())
+    monkeypatch.setattr(knowledge_api, "_sparse_encoder", SimpleNamespace())
+    monkeypatch.setattr(knowledge_api, "_vectors", SimpleNamespace())
+    monkeypatch.setattr(knowledge_api, "_db", knowledge_db)
+
+    transport = httpx.ASGITransport(app=knowledge_api.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        detail = await client.get("/api/curation/item/wiki%3Amerge_candidate%3Afamily%2Fsanja")
+        reject = await client.post("/api/curation/reject/wiki%3Amerge_candidate%3Afamily%2Fsanja")
+
+    assert detail.status_code == 200
+    assert detail.json()["item"]["id"] == item_id
+    assert reject.status_code == 200
+    assert reject.json() == {"item_id": item_id, "status": "rejected"}
+    assert (await knowledge_db.curation_get(item_id))["status"] == "rejected"
 
 
 async def test_create_curation_queue_item_accepts_type_alias(knowledge_db: KnowledgeDB):

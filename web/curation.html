@@ -112,6 +112,14 @@
     return (item.proposed_actions || []).some((a) => dangerous.has(a.action || a.type));
   }
 
+  function autoApplicable(item) {
+    const supported = new Set([
+      "archive_domain", "delete_source", "domain_archive", "fact_delete",
+      "fact_set", "fact_update_validity", "flag_for_review", "ingest_text", "no_action",
+    ]);
+    return (item.proposed_actions || []).every((a) => supported.has(a.action || a.type));
+  }
+
   async function mutate(item, action) {
     const body = {};
     if (action === "apply" && destructive(item)) {
@@ -126,7 +134,7 @@
       options.body = JSON.stringify(body);
     }
 
-    const r = await fetch(`/api/curation/${encodeURIComponent(item.id)}/${action}`, options);
+    const r = await fetch(`/api/curation/${action}/${encodeURIComponent(item.id)}`, options);
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       alert(messageFrom(j, `HTTP ${r.status}`));
@@ -141,6 +149,10 @@
     const created = item.created_at ? new Date(item.created_at).toLocaleString() : "";
     const reviewed = item.reviewed_at ? new Date(item.reviewed_at).toLocaleString() : "";
     const disabled = item.status !== "pending";
+    const applyDisabled = disabled || !autoApplicable(item);
+    const applyTitle = applyDisabled && !disabled
+      ? "Apply is only available for executable actions. Resolve this in chat, reject, or snooze."
+      : "";
     el.innerHTML = `
       <div class="head">
         <div>
@@ -165,7 +177,8 @@
         <pre>${pretty(item.source_refs)}</pre>
       </details>` : ""}
       <div class="actions">
-        <button class="ok" data-action="apply" ${disabled ? "disabled" : ""}>Apply</button>
+        <button class="ok" data-action="apply" ${applyDisabled ? "disabled" : ""}
+          title="${escapeHtml(applyTitle)}">Apply</button>
         <button class="err" data-action="reject" ${disabled ? "disabled" : ""}>Reject</button>
         <button class="warn" data-action="snooze" ${disabled ? "disabled" : ""}>Snooze</button>
       </div>`;

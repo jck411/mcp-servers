@@ -919,6 +919,8 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
         curation_items = await db.curation_list(status="pending")
         assert curation_items[0]["kind"] == "wiki_merge"
         assert "tech/framework-13" in curation_items[0]["title"]
+        assert curation_items[0]["proposed_actions"][0]["action"] == "flag_for_review"
+        assert curation_items[0]["proposed_actions"][0]["review_type"] == "merge_candidate"
         assert await db.wiki_list(status="active") == []
     finally:
         await db.close()

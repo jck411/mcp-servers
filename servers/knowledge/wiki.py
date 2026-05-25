@@ -680,7 +680,8 @@ async def rebuild_wiki(
                     summary="\n".join(summary_lines),
                     source_refs=[{"type": "wiki_page", "slug": page["slug"]}],
                     proposed_actions=[{
-                        "action": concern_type,
+                        "action": "flag_for_review",
+                        "review_type": concern_type,
                         "slug": page["slug"],
                         "detail": summary_lines[0] if summary_lines else "",
                     }],
@@ -765,7 +766,8 @@ async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
                         ),
                         source_refs=[{"type": "wiki_page", "slug": str(page["slug"])}],
                         proposed_actions=[{
-                            "action": "review_and_promote_or_archive",
+                            "action": "flag_for_review",
+                            "review_type": "stale_candidate",
                             "slug": str(page["slug"]),
                             "concerns": audit_notes,
                         }],

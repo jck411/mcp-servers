@@ -18,10 +18,10 @@ Endpoints:
     GET  /api/download/{token}         Download via temporary direct URL
     GET  /api/curation                 List curation queue items
     POST /api/curation                 Create/update a curation queue item
-    GET  /api/curation/{item_id}       Get one curation queue item
-    POST /api/curation/{item_id}/apply Apply a reviewed curation item
-    POST /api/curation/{item_id}/reject Reject a curation item
-    POST /api/curation/{item_id}/snooze Snooze a curation item
+    GET  /api/curation/item/{item_id}  Get one curation queue item
+    POST /api/curation/apply/{item_id} Apply a reviewed curation item
+    POST /api/curation/reject/{item_id} Reject a curation item
+    POST /api/curation/snooze/{item_id} Snooze a curation item
 
 Run:
     python -m servers.knowledge_api --host 0.0.0.0 --port 9018
@@ -595,6 +595,7 @@ async def create_curation_item(
     return {"id": result["item_id"], "item": result["item"]}
 
 
+@app.get("/api/curation/item/{item_id:path}")
 @app.get("/api/curation/{item_id}")
 async def get_curation_item(item_id: str) -> dict[str, Any]:
     """Get one curation queue item."""
@@ -605,6 +606,7 @@ async def get_curation_item(item_id: str) -> dict[str, Any]:
     return {"item": item}
 
 
+@app.post("/api/curation/apply/{item_id:path}")
 @app.post("/api/curation/{item_id}/apply")
 async def apply_curation(
     item_id: str,
@@ -626,6 +628,7 @@ async def apply_curation(
     return result
 
 
+@app.post("/api/curation/reject/{item_id:path}")
 @app.post("/api/curation/{item_id}/reject")
 async def reject_curation(item_id: str) -> dict[str, Any]:
     """Reject a curation queue item without applying it."""
@@ -636,6 +639,7 @@ async def reject_curation(item_id: str) -> dict[str, Any]:
     return {"item_id": item_id, "status": "rejected"}
 
 
+@app.post("/api/curation/snooze/{item_id:path}")
 @app.post("/api/curation/{item_id}/snooze")
 async def snooze_curation(item_id: str) -> dict[str, Any]:
     """Snooze a curation queue item."""
