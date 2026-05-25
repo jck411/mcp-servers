@@ -10,9 +10,12 @@ import re
 from datetime import datetime
 from typing import Any
 
-from servers.knowledge.db import KnowledgeDB, SEARCH_STOPWORDS, search_fact_keywords
+from servers.knowledge.db import KnowledgeDB, search_fact_keywords
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
-from servers.knowledge.temporal import add_fact_temporal_status, fact_temporal_counts, fact_temporal_status
+from servers.knowledge.temporal import (
+    fact_temporal_counts,
+    fact_temporal_status,
+)
 from servers.knowledge.vectors import KnowledgeVectorStore
 from shared.logging_config import get_logger
 from shared.time_context import EASTERN_TIMEZONE
@@ -291,12 +294,40 @@ async def search_knowledge(
     # regular source chunks.  Wiki pages are enriched with SQLite metadata.
     chunk_results = []
     wiki_results = []
+    vector_fact_results = []
     wiki_slugs_seen: set[str] = set()
+    live_fact_keys = {(fact["domain"], fact["key"]) for fact in facts}
     for r in results:
         p = r.payload or {}
         content = str(p.get("content", ""))
         if max_chars is not None and max_chars > 0 and len(content) > max_chars:
             content = content[:max_chars] + "…"
+        if p.get("type") == "fact" or p.get("source_type") == "fact":
+            status = fact_temporal_status(p, now)
+            if search_temporal_intent == "current_upcoming" and status in {"expired", "historical"}:
+                continue
+            domain_key = (str(p.get("domain") or ""), str(p.get("key") or ""))
+            if domain_key in live_fact_keys:
+                continue
+            vector_fact_results.append({
+                "result_type": "fact",
+                "content": f"{p.get('key', '')}: {p.get('value', '')}",
+                "domain": p.get("domain", ""),
+                "source_id": "",
+                "source_name": p.get("source") or "",
+                "source_type": "fact",
+                "chunk_id": f"{p.get('domain', '')}/{p.get('key', '')}",
+                "chunk_index": 0,
+                "similarity": round(r.score, 4),
+                "key": p.get("key"),
+                "value": p.get("value"),
+                "valid_from": p.get("valid_from"),
+                "valid_until": p.get("valid_until"),
+                "as_of": p.get("as_of"),
+                "review_after": p.get("review_after"),
+                "temporal_status": status,
+            })
+            continue
         if p.get("source_type") == "wiki_page":
             slug = str(p.get("source_id") or "")
             if slug in wiki_slugs_seen:
@@ -305,7 +336,10 @@ async def search_knowledge(
             # Enrich from SQLite for title, kind, status, frontmatter.
             page = await db.wiki_get(slug) if slug else None
             include_archived = search_temporal_intent == "historical"
-            if page and (page["status"] == "active" or (include_archived and page["status"] == "archived")):
+            if page and (
+                page["status"] == "active"
+                or (include_archived and page["status"] == "archived")
+            ):
                 wiki_results.append({
                     "result_type": "wiki",
                     "content": content,
@@ -356,19 +390,20 @@ async def search_knowledge(
         "origin_ref": fact.get("origin_ref"),
         "last_confirmed_at": fact.get("last_confirmed_at"),
     } for fact in facts]
+    all_fact_results = [*fact_results, *vector_fact_results]
 
     if route == "fact":
         ordered_results = [
-            *fact_results,
-            *(wiki_results if not fact_results else []),
+            *all_fact_results,
+            *(wiki_results if not all_fact_results else []),
             *chunk_results,
         ]
     elif route == "evidence":
-        ordered_results = [*chunk_results, *wiki_results]
+        ordered_results = [*chunk_results, *wiki_results, *vector_fact_results]
     else:
         # Wiki and chunk results are already on the same similarity scale
         # (cosine similarity from Qdrant), so merge and sort by score.
-        merged = [*wiki_results, *chunk_results]
+        merged = [*wiki_results, *vector_fact_results, *chunk_results]
         merged.sort(key=lambda r: -float(r.get("similarity") or 0))
         ordered_results = merged
     formatted = ordered_results[:max(1, limit)]
@@ -393,5 +428,3 @@ async def search_knowledge(
         response["fact_temporal_counts"] = fact_temporal_counts(facts)
 
     return response
-
-

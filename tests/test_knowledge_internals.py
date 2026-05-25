@@ -1415,6 +1415,57 @@ async def test_search_knowledge_defaults_pto_to_current_upcoming_facts(tmp_path:
     assert response["results"][0]["key"] == "pto_upcoming"
 
 
+async def test_search_knowledge_filters_expired_fact_vectors_from_current_context(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "pto_current_vector_search.db")
+    await db.initialize()
+    await db.domain_create("work", "work", [])
+
+    class FakeVectors:
+        async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    id="expired-fact",
+                    score=0.8,
+                    payload={
+                        "type": "fact",
+                        "domain": "work",
+                        "key": "pto_2000_used",
+                        "value": "PTO used on 2000-01-01",
+                        "source_type": "fact",
+                        "valid_until": "2000-01-01",
+                    },
+                ),
+                SimpleNamespace(
+                    id="future-fact",
+                    score=0.7,
+                    payload={
+                        "type": "fact",
+                        "domain": "work",
+                        "key": "pto_upcoming",
+                        "value": "PTO scheduled for 2999-01-01",
+                        "source_type": "fact",
+                        "valid_from": "2999-01-01",
+                    },
+                ),
+            ]
+
+    try:
+        response = await search_knowledge(
+            embeddings=_FakeEmbeddings(),  # type: ignore[arg-type]
+            sparse_encoder=_EmptySparseEncoder(),  # type: ignore[arg-type]
+            vectors=FakeVectors(),  # type: ignore[arg-type]
+            db=db,
+            query="When do I have PTO?",
+            domain="work",
+            limit=5,
+        )
+    finally:
+        await db.close()
+
+    assert response["temporal_intent"] == "current_upcoming"
+    assert [result["key"] for result in response["results"]] == ["pto_upcoming"]
+
+
 async def test_search_knowledge_historical_pto_searches_archived_evidence(tmp_path: Path):
     last_year = datetime.now(EASTERN_TIMEZONE).year - 1
     db = KnowledgeDB(tmp_path / "pto_historical_search.db")
