@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,14 +19,12 @@ import httpx
 from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
 from servers.knowledge.extraction import (
+    _IMAGE_MEDIA,
     EXTRACTION_SYSTEM_PROMPT,
     IMAGE_EXTENSIONS,
     _decode_llm_json_object,
     _extract_and_chunk_with_log,
-    _is_likely_binary,
-    chunk_text,
     compute_file_hash,
-    compute_text_hash,
 )
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
@@ -48,8 +45,8 @@ log = get_logger("knowledge")
 # File extensions that imply binary/document uploads. These must never be
 # accepted as a `source_name` for `knowledge_ingest_text` — that path stores
 # only chunks (no `stored_path`, no raw bytes), so a `.pdf` source created via
-# text ingest is silently a fake file. Real binary uploads must go through
-# `knowledge_upload_file_base64` or `POST /api/upload/{domain}`.
+# text ingest is silently a fake file. Real binary uploads must go through the
+# upload API or admin file placement followed by `knowledge_ingest_file`.
 _BINARY_NAME_EXTENSIONS: frozenset[str] = frozenset({
     ".pdf", ".png", ".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff",
     ".webp", ".bmp", ".gif", ".svg",
@@ -78,8 +75,9 @@ def _validate_text_ingest_inputs(
     if name_ext in _BINARY_NAME_EXTENSIONS:
         return (
             f"source_name '{source_name}' has a binary/document extension "
-            f"({name_ext}). Use knowledge_upload_file_base64 (or "
-            "POST /api/upload/{domain}) so the original bytes are stored. "
+            f"({name_ext}). Use POST /api/upload/{{domain}} or place the file "
+            "under the domain directory and call knowledge_ingest_file so the "
+            "original bytes are stored. "
             "knowledge_ingest_text only stores extracted text chunks."
         )
     type_lower = source_type.lower().strip()
@@ -87,7 +85,7 @@ def _validate_text_ingest_inputs(
         if type_lower.lstrip(".") in {ext.lstrip(".") for ext in _BINARY_NAME_EXTENSIONS}:
             return (
                 f"source_type '{source_type}' looks like a file extension. "
-                "Use knowledge_upload_file_base64 to upload the actual file."
+                "Use POST /api/upload/{domain} or knowledge_ingest_file for the actual file."
             )
         allowed = ", ".join(sorted(_TEXT_SOURCE_TYPE_ALLOWLIST))
         return (
@@ -110,8 +108,8 @@ async def _ingest_file_at_path(
 ) -> dict[str, Any]:
     """Hash, extract, embed, and persist one file already on disk under `dest`.
 
-    Shared by `POST /api/upload/{domain}`, `knowledge_upload_file_base64`,
-    and `knowledge_ingest_file`. Returns a result dict; never raises for
+    Shared by `POST /api/upload/{domain}` and `knowledge_ingest_file`.
+    Returns a result dict; never raises for
     "no content" / "already ingested" — those are normal outcomes.
     """
     file_hash = compute_file_hash(dest)
@@ -570,4 +568,3 @@ async def extract_source_facts_single_shot(
         "warnings": warnings,
         "pipeline": pipeline,
     }
-

@@ -24,7 +24,6 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import re
@@ -41,8 +40,8 @@ from shared.logging_config import get_logger, logged_tool
 log = get_logger("knowledge")
 
 # --- servers/knowledge/ package ---
-from servers.knowledge.settings import DEFAULT_HTTP_PORT, KnowledgeSettings  # noqa: E402
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
+from servers.knowledge.settings import DEFAULT_HTTP_PORT, KnowledgeSettings  # noqa: E402
 
 
 def _auth_provider() -> StaticTokenVerifier | None:
@@ -54,23 +53,22 @@ def _auth_provider() -> StaticTokenVerifier | None:
 
 mcp = FastMCP("knowledge", auth=_auth_provider())
 
+from servers.knowledge.cross_domain import enrich_context  # noqa: E402
+from servers.knowledge.curation import apply_curation_item  # noqa: E402
 from servers.knowledge.db import KnowledgeDB  # noqa: E402
-from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
-
 from servers.knowledge.extraction import chunk_text, compute_text_hash  # noqa: E402
 from servers.knowledge.ingestion import (  # noqa: E402
     _ingest_file_at_path,
     _validate_text_ingest_inputs,
 )
+from servers.knowledge.search import search_knowledge  # noqa: E402
+from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
 from servers.knowledge.wiki import (  # noqa: E402
     WIKI_PAGE_KINDS,
     WIKI_PAGE_LIST_STATUSES,
     preview_wiki_rebuild,
     rebuild_wiki,
 )
-from servers.knowledge.curation import apply_curation_item  # noqa: E402
-from servers.knowledge.search import search_knowledge  # noqa: E402
-from servers.knowledge.cross_domain import enrich_context  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Global State
@@ -799,7 +797,18 @@ async def knowledge_wiki_rebuild(
     dry_run: bool = False,
     confirmed: bool = False,
 ) -> dict[str, Any]:
-    """Estimate or run a wiki rebuild."""
+    """Estimate or run a wiki rebuild.
+
+    Args:
+        domain: Optional domain scope.
+        entity_slug: Optional targeted page slug in '<domain>/<slug>' form.
+        force_full: Rebuild from all eligible inputs/pages instead of only
+            changes since the last wiki run. Leave false unless Jack asks for
+            a full rebuild.
+        dry_run: Return the scope, changed entities, page counts, and token
+            estimate without writing.
+        confirmed: Required for writes unless dry_run is true.
+    """
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
     preview = await preview_wiki_rebuild(
         settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
