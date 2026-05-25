@@ -248,6 +248,15 @@ TEXT_EXTENSIONS = {
 }
 
 
+def _is_text_path(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        path.suffix.lower() in TEXT_EXTENSIONS
+        or name in {".env", ".env.example"}
+        or name.endswith(".env.example")
+    )
+
+
 async def _run(
     cmd: list[str],
     stdin: bytes | None = None,
@@ -633,7 +642,7 @@ async def _extract_and_chunk_with_log(
         # OCR is reserved for PDFs where text layout matters.
         pipeline_type = "image_description"
         text, steps = await _describe_image_file(path, settings)
-    elif suffix in TEXT_EXTENSIONS or suffix == "":
+    elif _is_text_path(path) or suffix == "":
         pipeline_type = "text_read"
         read_step: dict[str, Any] = {"step": "text_read", "model": None}
         try:
@@ -688,7 +697,7 @@ async def extract_and_chunk(path: Path, settings: KnowledgeSettings) -> list[str
         text = await _extract_pdf_text(path, settings)
     elif suffix in IMAGE_EXTENSIONS and settings.ocr_enabled:
         text = await _ocr_image_file(path, settings)
-    elif suffix in TEXT_EXTENSIONS or suffix == "":
+    elif _is_text_path(path) or suffix == "":
         try:
             raw = path.read_bytes()
             if suffix == "" and _is_likely_binary(raw):
@@ -765,5 +774,3 @@ def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str
     append_current()
 
     return [c for c in chunks if c]
-
-

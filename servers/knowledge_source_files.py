@@ -34,6 +34,9 @@ def sanitize_source_filename(filename: str | None) -> str:
 
 def source_media_type(filename: str | None) -> str:
     """Infer a source file media type from its filename."""
+    name = str(filename or "").lower()
+    if name in {".env", ".env.example"} or name.endswith(".env.example"):
+        return "text/plain"
     media_type, _ = mimetypes.guess_type(filename or "")
     return media_type or "application/octet-stream"
 

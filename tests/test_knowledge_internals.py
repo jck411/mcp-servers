@@ -81,6 +81,58 @@ def test_chunk_text_handles_zero_overlap():
     assert all(len(c) == 200 for c in out)
 
 
+async def test_ingest_file_treats_env_example_as_text(tmp_path: Path):
+    db = KnowledgeDB(tmp_path / "knowledge.db")
+    await db.initialize()
+    await db.domain_create("tech", "tech", [])
+    knowledge_root = tmp_path / "knowledge"
+    env_path = knowledge_root / "tech" / ".env.example"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("OPENROUTER_API_KEY=\nMCP_KNOWLEDGE_API_TOKEN=\n", encoding="utf-8")
+
+    class FakeEmbeddings:
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1] for _ in texts]
+
+    class FakeSparseEncoder:
+        def fit_batch(self, texts: list[str]) -> None:
+            self.texts = texts
+
+        def encode(self, text: str) -> dict[str, list[float] | list[int]]:
+            return {"indices": [0], "values": [1.0]}
+
+    class FakeVectors:
+        async def upsert_chunks(self, chunks, dense_vectors, sparse_vectors) -> None:
+            self.chunks = chunks
+
+    try:
+        vectors = FakeVectors()
+        result = await _ingest_file_at_path(
+            SimpleNamespace(
+                knowledge_path=knowledge_root,
+                chunk_max_chars=1000,
+                chunk_overlap=200,
+                ocr_enabled=False,
+            ),
+            FakeEmbeddings(),
+            FakeSparseEncoder(),
+            vectors,
+            db,
+            dest=env_path,
+            domain="tech",
+        )
+
+        assert result["success"] is True
+        assert result["chunks_stored"] == 1
+        assert result["pipeline_type"] == "text_read"
+        source = await db.source_get(result["source_id"])
+        assert source["media_type"] == "text/plain"
+        assert source["chunk_count"] == 1
+        assert vectors.chunks[0]["content"] == "OPENROUTER_API_KEY=\nMCP_KNOWLEDGE_API_TOKEN="
+    finally:
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # compute_text_hash
 # ---------------------------------------------------------------------------
