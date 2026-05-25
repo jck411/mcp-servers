@@ -9,14 +9,12 @@ from __future__ import annotations
 import contextlib
 import json
 import re
-from collections import Counter
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
 
-from servers.knowledge.db import KnowledgeDB, search_fact_keywords
+from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
 from servers.knowledge.extraction import _decode_llm_json_object
 from servers.knowledge.settings import KnowledgeSettings
@@ -675,7 +673,10 @@ async def rebuild_wiki(
                 summary_lines = items if isinstance(items, list) else [str(items)]
                 await db.curation_upsert(
                     kind=curation_kind,
-                    title=f"{concern_type.replace('_', ' ').title()}: {page['title']} ({page['slug']})",
+                    title=(
+                        f"{concern_type.replace('_', ' ').title()}: "
+                        f"{page['title']} ({page['slug']})"
+                    ),
                     summary="\n".join(summary_lines),
                     source_refs=[{"type": "wiki_page", "slug": page["slug"]}],
                     proposed_actions=[{
@@ -736,55 +737,12 @@ async def rebuild_wiki(
 async def wiki_lint_pass(db: KnowledgeDB) -> dict[str, Any]:
     """Post-rebuild lint: create curation items for concrete wiki issues.
 
-    Runs after wiki rebuild. Detects:
-    1. Expired facts (valid_until < now) that should be archived
-    2. Candidate pages stuck with concerns (merge/split) for >7 days
+    Runs after wiki rebuild. Detects candidate pages stuck with concerns
+    (merge/split) for >7 days.
     """
     items_created = 0
     now = datetime.now(UTC)
 
-    # --- 1. Expired facts ---
-    try:
-        all_domains = await db.domain_list()
-        for domain_row in all_domains:
-            if domain_row.get("archived"):
-                continue
-            domain = str(domain_row["name"])
-            facts = await db.facts_list(domain)
-            for fact in facts:
-                valid_until = fact.get("valid_until")
-                if not valid_until:
-                    continue
-                try:
-                    expiry = datetime.fromisoformat(str(valid_until))
-                    if expiry.tzinfo is None:
-                        expiry = expiry.replace(tzinfo=UTC)
-                    if expiry < now:
-                        await db.curation_upsert(
-                            kind="expired_fact",
-                            title=f"Expired fact: {domain}/{fact['key']}",
-                            summary=(
-                                f"Fact '{fact['key']}' in domain '{domain}' "
-                                f"expired on {valid_until}. "
-                                f"Current value: {fact.get('value', '')[:200]}"
-                            ),
-                            source_refs=[{"type": "fact", "domain": domain, "key": fact["key"]}],
-                            proposed_actions=[{
-                                "action": "archive_or_update",
-                                "domain": domain,
-                                "key": fact["key"],
-                            }],
-                            risk="low",
-                            confidence=0.95,
-                            item_id=f"lint:expired:{domain}/{fact['key']}",
-                        )
-                        items_created += 1
-                except (ValueError, TypeError):
-                    pass
-    except Exception:
-        log.warning("lint_expired_facts_failed", exc_info=True)
-
-    # --- 2. Stale candidates with concerns ---
     try:
         stale_cutoff = (now - timedelta(days=7)).isoformat()
         candidate_pages = await db.wiki_list(status="candidate", limit=200)
