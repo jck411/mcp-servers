@@ -1,20 +1,18 @@
 # Knowledge System
 
 Current-state reference for `servers/knowledge_server.py`,
-`servers/knowledge_admin_server.py`, `servers/knowledge_api.py`, and the upload
-UI.
+`servers/knowledge_admin_server.py`, and `servers/knowledge_api.py`.
 
 ## Components
 
 | Component | File | Purpose |
 |---|---|---|
-| Chat MCP server | `servers/knowledge_server.py` | Domains, facts, source ingest, search, wiki reads |
-| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, source/domain/wiki admin |
-| REST API | `servers/knowledge_api.py` | Upload UI backend, source CRUD, search, health |
-| Upload UI | `web/upload.html` | Browser workflow for upload, delete, and extraction |
-| SQLite | `data/knowledge.db` | Domains, facts, source metadata, curation queue, download tokens |
-| Qdrant | `knowledge` collection | Dense and sparse chunk vectors |
-| Raw files | `knowledge/<domain>/<filename>` | Uploaded source bytes |
+| Chat MCP server | `servers/knowledge_server.py` | Domains, facts, search, wiki reads, context pack |
+| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, wiki admin |
+| REST API | `servers/knowledge_api.py` | Facts CRUD, search, curation, health |
+| Curation UI | `web/curation.html` | Browser workflow for curation review |
+| SQLite | `data/knowledge.db` | Domains, facts, wiki pages, curation queue |
+| Qdrant | `knowledge` collection | Dense and sparse fact + wiki vectors |
 
 `knowledge` runs as MCP on port `9017`, `knowledge_admin` runs on port `9019`,
 and `knowledge_api` runs as REST on port `9018`.
@@ -30,35 +28,16 @@ and `knowledge_api` runs as REST on port `9018`.
   queries like "show all tasks" via `facts_by_type()`. The `tags` column
   supports sub-categorization within a domain (e.g., a yard task in the
   `home` domain has tags `["yard"]`).
-- **Sources** track uploaded or text-ingested material: domain, filename,
-  content hash, stored path, media type, size, chunk count, and ingest time.
-- **Chunks** live in Qdrant with payload fields such as `source_id`,
-  `source_name`, `domain`, `chunk_index`, `content`, `fact_type`, and `tags`.
+- **Wiki pages** are LLM-synthesized summaries derived from facts. They are
+  rebuilt by the wiki pipeline and embedded into Qdrant for semantic search.
+- **Fact vectors** are derived Qdrant records with enriched text so semantic
+  search can find facts by meaning instead of only exact keys.
 - **Curation items** are pending approved changes. Applying destructive actions
   requires confirmation equal to the curation item id.
 
-## Ingestion
-
-All file upload paths converge on `_ingest_file_at_path()`:
-
-1. Hash the file with SHA-256.
-2. Check SQLite for an existing source with the same hash.
-3. Backfill missing stored-file metadata for older rows, or skip exact
-   duplicates.
-4. Extract text:
-   - PDFs: native text first, then vision OCR when needed.
-   - Images: vision description.
-   - Text files: UTF-8 decode.
-   - Unsupported binaries: store bytes only, with zero chunks.
-5. Chunk extracted text with `KNOWLEDGE_CHUNK_MAX_CHARS` and
-   `KNOWLEDGE_CHUNK_OVERLAP`.
-6. Generate dense embeddings through OpenRouter.
-7. Generate sparse BM25 vectors locally.
-8. Upsert chunks to Qdrant and write the source row to SQLite.
-
-Text-only MCP ingest uses `knowledge_ingest_text`; binary-looking names and
-source types are rejected so agents do not create fake `.pdf` rows without
-stored bytes.
+Note: source file storage was removed in 2026-05-26. The server no longer
+stores PDFs, images, or documents. Source files live on the laptop and will
+be bridged via a future local MCP tool.
 
 ## Search
 
@@ -77,8 +56,7 @@ stored bytes.
    retrieval.
 4. Embed the expanded query and encode a sparse BM25 query.
 5. Query Qdrant with hybrid dense + sparse search using RRF fusion.
-6. Return chunk results with `source_id`, `chunk_id`, `source_name`,
-   `source_type`, `chunk_index`, and similarity.
+6. Return fact and wiki results with similarity scores.
 7. Optionally search facts by regex-extracted keywords against both fact keys
    and values. Fact results include `valid_from`, `valid_until`, `as_of`,
    `review_after`, and `temporal_status`.
@@ -86,39 +64,14 @@ stored bytes.
 Responses expose `temporal_intent`, `include_archived`, `expanded_queries`, and
 fact temporal counts. Use `temporal_intent=historical` or
 `temporal_intent=current_upcoming` to override inference; use `max_chars` to cap
-returned chunk content without changing stored data.
-
-## Source Management
-
-- Downloads resolve raw bytes from `stored_path`; if the file is missing and
-  vectors are available, the system can export stored chunks as Markdown.
-- Download URLs use short-lived SQLite tokens.
-- Deleting a source removes its Qdrant chunks, SQLite row, and raw file unless
-  another source still references the same file.
-- Renaming updates SQLite, Qdrant payload `source_name`, and the raw file when
-  it is safe to move.
-- Upload conflicts are handled as delete-then-upload in the UI. Direct API
-  callers can use `overwrite` or `force`.
-
-## Fact Extraction
-
-`POST /api/sources/{source_id}/extract` and the MCP extraction path call
-`extract_source_facts_single_shot()`.
-
-- Images are sent to the extraction model as base64 image content.
-- Indexed text sources load their Qdrant chunks and send one combined text
-  prompt.
-- Unsupported zero-chunk binaries are rejected.
-- The OpenRouter chat call forces the `store_extracted_facts` tool so the model
-  returns structured facts plus an optional caption.
-- Extracted facts are upserted into SQLite. Captions are embedded as searchable
-  chunks linked to the original source.
+returned content without changing stored data.
 
 ## Curation
 
 The curation queue stores proposed actions in SQLite. Supported actions include
-fact set/update/delete, ingest text, delete source, archive domain, flag for
-review, and no-op.
+fact set/update/delete, archive domain, flag for review, and no-op. Source-file
+actions (ingest_text, delete_source, reingest_source) are accepted but return
+`skipped` since source infrastructure was removed.
 
 Tools:
 
@@ -136,12 +89,31 @@ These MCP tools live on `knowledge_admin`. The chat-facing `knowledge` MCP only
 returns a pending curation count from `knowledge_context_pack`. Destructive
 actions are blocked unless `confirmation` equals the item id.
 
+## REST API
+
+```text
+GET    /api/health                    Liveness + dependency status
+GET    /api/search?q=...             Semantic search
+GET    /api/domains                  List all domains with counts
+GET    /api/facts/{domain}           List facts in a domain
+POST   /api/facts/{domain}/{key}     Upsert a fact
+DELETE /api/facts/{domain}/{key}     Delete a fact
+GET    /api/curation                 List curation queue items
+POST   /api/curation                 Create/update a curation queue item
+GET    /api/curation/item/{item_id}  Get one curation queue item
+POST   /api/curation/apply/{item_id} Apply a reviewed curation item
+POST   /api/curation/reject/{item_id} Reject a curation item
+POST   /api/curation/snooze/{item_id} Snooze a curation item
+```
+
+Mutating routes require `Authorization: Bearer $KNOWLEDGE_API_TOKEN`.
+
 ## Operations
 
 - Logging uses `shared/logging_config.py` and `LOG_LEVEL`.
 - Knowledge MCP tools use `@logged_tool(log)`, emitting tool name, status,
   duration, and a short result summary.
-- `GET /api/health` reports Qdrant reachability, source count, chunk count,
+- `GET /api/health` reports Qdrant reachability, fact count, vector count,
   BM25 document count, and embedding model.
 - SQLite uses WAL, foreign keys, and `busy_timeout`.
 - Qdrant indexes payload fields for domain, source id, source type, chunk
@@ -149,12 +121,11 @@ actions are blocked unless `confirmation` equals the item id.
 
 ## Known Gaps
 
-- No reconciliation tool for Qdrant chunks versus SQLite source rows.
-- No transaction boundary across file writes, SQLite writes, embedding calls,
-  and Qdrant upserts.
 - Hybrid search lacks reranking, query expansion, MMR diversity, and relevance
   feedback.
 - REST auth is expected to be enforced by Cloudflare Access, not app-level user
-  accounts.
+  accounts. Bearer token is an additional layer for mutating routes.
 - The test suite covers internals and shared paths, but not a full Qdrant-backed
-  ingest/search integration fixture.
+  search integration fixture.
+- `mcp-server@knowledge-admin` has a naming bug (systemd template uses hyphen
+  in Python module name).
