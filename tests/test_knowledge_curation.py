@@ -57,6 +57,46 @@ async def test_curation_queue_round_trip(knowledge_db: KnowledgeDB):
     assert not curation_item_has_destructive_actions(listed[0])
 
 
+async def test_curation_mcp_tools_are_admin_only(
+    knowledge_db: KnowledgeDB,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import servers.knowledge_admin_server as knowledge_admin
+    import servers.knowledge_server as knowledge
+
+    assert not hasattr(knowledge, "knowledge_curation_list")
+    assert not hasattr(knowledge, "knowledge_curation_resolve")
+
+    for name in ("_settings", "_embeddings", "_sparse_encoder", "_vectors"):
+        monkeypatch.setattr(knowledge_admin, name, SimpleNamespace())
+    monkeypatch.setattr(knowledge_admin, "_ready", True)
+    monkeypatch.setattr(knowledge_admin, "_db", knowledge_db)
+
+    await knowledge_db.curation_upsert(
+        kind="maintenance_action",
+        title="Review test item",
+        proposed_actions=[{"action": "flag_for_review"}],
+        item_id="admin-tool-test",
+    )
+
+    list_tool = (
+        knowledge_admin.knowledge_curation_list.fn
+        if hasattr(knowledge_admin.knowledge_curation_list, "fn")
+        else knowledge_admin.knowledge_curation_list
+    )
+    resolve_tool = (
+        knowledge_admin.knowledge_curation_resolve.fn
+        if hasattr(knowledge_admin.knowledge_curation_resolve, "fn")
+        else knowledge_admin.knowledge_curation_resolve
+    )
+
+    listed = await list_tool()
+    assert listed["items"][0]["id"] == "admin-tool-test"
+
+    rejected = await resolve_tool("admin-tool-test", action="reject")
+    assert rejected == {"success": True, "item_id": "admin-tool-test", "status": "rejected"}
+
+
 async def test_curation_api_action_routes_accept_slash_ids(
     knowledge_db: KnowledgeDB,
     monkeypatch: pytest.MonkeyPatch,

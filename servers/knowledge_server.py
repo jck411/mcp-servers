@@ -54,7 +54,6 @@ def _auth_provider() -> StaticTokenVerifier | None:
 mcp = FastMCP("knowledge", auth=_auth_provider())
 
 from servers.knowledge.cross_domain import enrich_context  # noqa: E402
-from servers.knowledge.curation import apply_curation_item  # noqa: E402
 from servers.knowledge.db import KnowledgeDB  # noqa: E402
 from servers.knowledge.extraction import chunk_text, compute_text_hash  # noqa: E402
 from servers.knowledge.ingestion import (  # noqa: E402
@@ -839,75 +838,6 @@ async def knowledge_wiki_rebuild(
     return await rebuild_wiki(
         settings, embeddings, sparse_encoder, vectors, db,
         domain=domain, entity_slug=entity_slug, force_full=force_full,
-    )
-
-
-# ---------------------------------------------------------------------------
-# MCP Tools — Curation Queue
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool("knowledge_curation_list")
-@logged_tool(log)
-async def knowledge_curation_list(
-    status: str | None = "pending",
-    kind: str | None = None,
-    limit: int = 50,
-) -> dict[str, Any]:
-    """List Knowledge curation queue items for review.
-
-    The queue contains proposed conversation distillations, source consolidation
-    candidates, temporal fact cleanups, and maintenance actions. Queue items are
-    drafts until explicitly applied.
-
-    Args:
-        status: Filter by status. Default is "pending". Use null to list all.
-        kind: Optional kind filter, e.g. "conversation_distill".
-        limit: Maximum items to return (1-200).
-    """
-    _, _, _, _, db = _require_ready()
-    items = await db.curation_list(status=status, kind=kind, limit=limit)
-    total_count = await db.curation_count(status=status, kind=kind)
-    return {"success": True, "count": len(items), "total_count": total_count, "items": items}
-
-
-@mcp.tool("knowledge_curation_resolve")
-@logged_tool(log)
-async def knowledge_curation_resolve(
-    item_id: str,
-    action: str = "apply",
-    confirmation: str | None = None,
-) -> dict[str, Any]:
-    """Resolve a curation queue item by applying or rejecting it.
-
-    Use action="apply" to execute the proposed changes, or action="reject" to
-    dismiss the item without changes. Destructive actions (source deletion,
-    fact deletion, domain archive) require confirmation equal to the item id.
-
-    Args:
-        item_id: Curation queue item to resolve.
-        action: "apply" to execute proposed changes, "reject" to dismiss.
-        confirmation: Required for destructive apply — set to item_id.
-    """
-    if action not in ("apply", "reject"):
-        return {"success": False, "error": "action must be 'apply' or 'reject'"}
-
-    if action == "reject":
-        _, _, _, _, db = _require_ready()
-        updated = await db.curation_mark_status(item_id, "rejected")
-        if not updated:
-            return {"success": False, "error": f"Curation item '{item_id}' not found"}
-        return {"success": True, "item_id": item_id, "status": "rejected"}
-
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-    return await apply_curation_item(
-        item_id,
-        confirmation=confirmation,
-        settings=settings,
-        embeddings=embeddings,
-        sparse_encoder=sparse_encoder,
-        vectors=vectors,
-        db=db,
     )
 
 

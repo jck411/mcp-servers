@@ -250,6 +250,20 @@ async def knowledge_curation_create(
     )
 
 
+@mcp.tool("knowledge_curation_list")
+@logged_tool(log)
+async def knowledge_curation_list(
+    status: str | None = "pending",
+    kind: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List Knowledge curation queue items for operator review."""
+    _, _, _, _, db = _require_ready()
+    items = await db.curation_list(status=status, kind=kind, limit=limit)
+    total_count = await db.curation_count(status=status, kind=kind)
+    return {"success": True, "count": len(items), "total_count": total_count, "items": items}
+
+
 @mcp.tool("knowledge_curation_get")
 @logged_tool(log)
 async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
@@ -268,11 +282,7 @@ async def knowledge_curation_question_packs(
     kind: str | None = None,
     domain: str | None = None,
 ) -> dict[str, Any]:
-    """Group pending curation rows into chat-friendly question packs.
-
-    Use this when Jack wants to clean up curation from normal chat. Packs turn
-    many raw rows into a few questions that can be answered and resolved in bulk.
-    """
+    """Group pending curation rows into operator-friendly question packs."""
     _, _, _, _, db = _require_ready()
     packs = await build_curation_question_packs(db, limit=limit, kind=kind, domain=domain)
     return {"success": True, "count": len(packs), "packs": packs}
@@ -296,7 +306,7 @@ async def knowledge_curation_pack_preview(
     answer: str,
     resolution_status: str = "applied",
 ) -> dict[str, Any]:
-    """Preview resolving a curation question pack from Jack's chat answer.
+    """Preview resolving a curation question pack from Jack's answer.
 
     This does not write data. It returns affected rows, the proposed status
     change, and a durable resolution note that would be recorded on apply.
@@ -342,6 +352,36 @@ async def knowledge_curation_snooze(item_id: str) -> dict[str, Any]:
     if not updated:
         return {"success": False, "error": f"Curation item '{item_id}' not found"}
     return {"success": True, "item_id": item_id, "status": "snoozed"}
+
+
+@mcp.tool("knowledge_curation_resolve")
+@logged_tool(log)
+async def knowledge_curation_resolve(
+    item_id: str,
+    action: str = "apply",
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one curation item by applying or rejecting it."""
+    if action not in ("apply", "reject"):
+        return {"success": False, "error": "action must be 'apply' or 'reject'"}
+
+    if action == "reject":
+        _, _, _, _, db = _require_ready()
+        updated = await db.curation_mark_status(item_id, "rejected")
+        if not updated:
+            return {"success": False, "error": f"Curation item '{item_id}' not found"}
+        return {"success": True, "item_id": item_id, "status": "rejected"}
+
+    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    return await apply_curation_item(
+        item_id,
+        confirmation=confirmation,
+        settings=settings,
+        embeddings=embeddings,
+        sparse_encoder=sparse_encoder,
+        vectors=vectors,
+        db=db,
+    )
 
 
 # ---------------------------------------------------------------------------

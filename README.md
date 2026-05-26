@@ -38,20 +38,21 @@ Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`,
 
 ### Knowledge Curation Queue
 
-The `knowledge` server owns an approval-gated curation queue in SQLite for durable memory extraction, source consolidation, and temporal fact cleanup. Conversational review tools:
-
-- `knowledge_curation_list`
-- `knowledge_curation_resolve`
-
-Admin workflow tools live on `knowledge_admin`:
+The Knowledge system stores an approval-gated curation queue in SQLite for
+diagnostic cleanup: durable memory extraction, source consolidation, temporal
+fact cleanup, and maintenance findings that need human judgment. The chat-facing
+`knowledge` MCP only reports the pending count in `knowledge_context_pack`;
+review and cleanup tools live on `knowledge_admin`:
 
 - `knowledge_curation_create`
+- `knowledge_curation_list`
 - `knowledge_curation_get`
 - `knowledge_curation_question_packs`
 - `knowledge_curation_question_pack_get`
 - `knowledge_curation_pack_preview`
 - `knowledge_curation_pack_apply`
 - `knowledge_curation_snooze`
+- `knowledge_curation_resolve`
 
 Destructive actions require `confirmation` equal to the queue item id.
 

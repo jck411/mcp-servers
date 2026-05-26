@@ -1,21 +1,23 @@
 # Knowledge System
 
-Current-state reference for `servers/knowledge.py`, `servers/knowledge_api.py`,
-and the upload UI.
+Current-state reference for `servers/knowledge_server.py`,
+`servers/knowledge_admin_server.py`, `servers/knowledge_api.py`, and the upload
+UI.
 
 ## Components
 
 | Component | File | Purpose |
 |---|---|---|
-| MCP server | `servers/knowledge.py` | Domains, facts, source ingest, search, curation tools |
+| Chat MCP server | `servers/knowledge_server.py` | Domains, facts, source ingest, search, wiki reads |
+| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, source/domain/wiki admin |
 | REST API | `servers/knowledge_api.py` | Upload UI backend, source CRUD, search, health |
 | Upload UI | `web/upload.html` | Browser workflow for upload, delete, and extraction |
 | SQLite | `data/knowledge.db` | Domains, facts, source metadata, curation queue, download tokens |
 | Qdrant | `knowledge` collection | Dense and sparse chunk vectors |
 | Raw files | `knowledge/<domain>/<filename>` | Uploaded source bytes |
 
-`knowledge` runs as MCP on port `9017`. `knowledge_api` runs as REST on port
-`9018`.
+`knowledge` runs as MCP on port `9017`, `knowledge_admin` runs on port `9019`,
+and `knowledge_api` runs as REST on port `9018`.
 
 ## Data Model
 
@@ -118,11 +120,16 @@ Tools:
 - `knowledge_curation_create`
 - `knowledge_curation_list`
 - `knowledge_curation_get`
-- `knowledge_curation_apply`
-- `knowledge_curation_reject`
+- `knowledge_curation_question_packs`
+- `knowledge_curation_question_pack_get`
+- `knowledge_curation_pack_preview`
+- `knowledge_curation_pack_apply`
 - `knowledge_curation_snooze`
+- `knowledge_curation_resolve`
 
-Destructive actions are blocked unless `confirmation` equals the item id.
+These MCP tools live on `knowledge_admin`. The chat-facing `knowledge` MCP only
+returns a pending curation count from `knowledge_context_pack`. Destructive
+actions are blocked unless `confirmation` equals the item id.
 
 ## Operations
 
