@@ -1,15 +1,14 @@
 """SQLite data layer for the Knowledge service.
 
 Extracted from knowledge_server.py during Phase 2 modularization.
-Contains KnowledgeDB (domains, facts, sources, wiki, curation)
-and search_fact_keywords (used by wiki_search).
+Contains KnowledgeDB (domains, facts, wiki, curation) and
+search_fact_keywords (used by wiki_search).
 """
 
 from __future__ import annotations
 
 import json
 import re
-import secrets
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,25 +37,13 @@ def search_fact_keywords(query: str) -> list[str]:
 
 
 class KnowledgeDB:
-    """SQLite store for domains, facts, and source tracking."""
+    """SQLite store for domains, facts, wiki pages, and curation."""
 
     _DOMAIN_COLUMNS = "name, description, related_domains, created_at, archived"
     _FACT_COLUMNS_QUALIFIED = (
         "f.domain, f.key, f.value, f.source, f.confidence, f.valid_from, "
         "f.valid_until, f.as_of, f.review_after, f.origin_type, f.origin_ref, "
         "f.last_confirmed_at, f.updated_at, f.type, f.tags"
-    )
-    _SOURCE_COLUMNS = (
-        "id, domain, source_type, filename, content_hash, chunk_count, "
-        "ingested_at, stored_path, media_type, size_bytes"
-    )
-    _SOURCE_COLUMNS_QUALIFIED = (
-        "s.id, s.domain, s.source_type, s.filename, s.content_hash, "
-        "s.chunk_count, s.ingested_at, s.stored_path, s.media_type, s.size_bytes"
-    )
-    _SOURCE_COLUMNS_LIST = (
-        "s.id, s.source_type, s.filename, s.content_hash, s.chunk_count, "
-        "s.ingested_at, s.stored_path, s.media_type, s.size_bytes"
     )
     _WIKI_PAGE_COLUMNS = (
         "slug, domain, title, kind, status, body_md, frontmatter_json, "
@@ -143,20 +130,6 @@ class KnowledgeDB:
             CREATE INDEX IF NOT EXISTS idx_facts_domain
                 ON facts(domain);
 
-            CREATE TABLE IF NOT EXISTS sources (
-                id TEXT PRIMARY KEY,
-                domain TEXT NOT NULL REFERENCES domains(name),
-                source_type TEXT NOT NULL,
-                filename TEXT,
-                content_hash TEXT,
-                chunk_count INTEGER NOT NULL DEFAULT 0,
-                ingested_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_sources_domain
-                ON sources(domain);
-            CREATE INDEX IF NOT EXISTS idx_sources_hash
-                ON sources(content_hash);
-
             CREATE TABLE IF NOT EXISTS curation_items (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -174,17 +147,6 @@ class KnowledgeDB:
                 ON curation_items(status);
             CREATE INDEX IF NOT EXISTS idx_curation_kind
                 ON curation_items(kind);
-
-            CREATE TABLE IF NOT EXISTS download_tokens (
-                token TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_download_tokens_source
-                ON download_tokens(source_id);
-            CREATE INDEX IF NOT EXISTS idx_download_tokens_expires
-                ON download_tokens(expires_at);
 
             CREATE TABLE IF NOT EXISTS wiki_pages (
                 slug TEXT PRIMARY KEY,
@@ -246,7 +208,6 @@ class KnowledgeDB:
             ),
         )
         await self._ensure_fact_metadata_columns()
-        await self._ensure_source_metadata_columns()
         await self._ensure_wiki_metadata_columns()
         await self._conn.commit()
 
@@ -273,22 +234,6 @@ class KnowledgeDB:
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(type)"
         )
-
-    async def _ensure_source_metadata_columns(self) -> None:
-        """Add raw-file metadata columns to older Knowledge databases."""
-        assert self._conn is not None
-        cursor = await self._conn.execute("PRAGMA table_info(sources)")
-        existing = {str(row["name"]) for row in await cursor.fetchall()}
-        additions = {
-            "stored_path": "TEXT",
-            "media_type": "TEXT",
-            "size_bytes": "INTEGER",
-        }
-        for column, declaration in additions.items():
-            if column not in existing:
-                await self._conn.execute(
-                    f"ALTER TABLE sources ADD COLUMN {column} {declaration}"  # noqa: S608
-                )
 
     async def _ensure_wiki_metadata_columns(self) -> None:
         """Add wiki lifecycle columns to older Knowledge databases."""
@@ -531,299 +476,6 @@ class KnowledgeDB:
         )
         rows = await cursor.fetchall()
         return [self._decode_fact_row(row) for row in rows]
-
-    # -- Sources --
-
-    async def source_exists(self, content_hash: str, domain: str | None = None) -> bool:
-        assert self._conn is not None
-        if domain is not None:
-            cursor = await self._conn.execute(
-                "SELECT 1 FROM sources WHERE content_hash = ? AND domain = ?",
-                (content_hash, domain),
-            )
-            return await cursor.fetchone() is not None
-        cursor = await self._conn.execute(
-            "SELECT 1 FROM sources WHERE content_hash = ?", (content_hash,)
-        )
-        return await cursor.fetchone() is not None
-
-    async def source_get_by_hash(
-        self,
-        content_hash: str,
-        domain: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Return the first existing source row matching this content hash, if any."""
-        assert self._conn is not None
-        where = "content_hash = ?"
-        params: list[Any] = [content_hash]
-        if domain is not None:
-            where += " AND domain = ?"
-            params.append(domain)
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS}
-            FROM sources WHERE {where}
-            ORDER BY ingested_at ASC LIMIT 1
-            """,
-            params,
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def source_get_by_filename(self, domain: str, filename: str) -> dict[str, Any] | None:
-        """Return the most-recent source row matching domain + filename, if any."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS}
-            FROM sources WHERE domain = ? AND filename = ?
-            ORDER BY ingested_at DESC LIMIT 1
-            """,
-            (domain, filename),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def source_update_chunk_count(self, source_id: str, chunk_count: int) -> bool:
-        """Update chunk_count for an existing source row."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            "UPDATE sources SET chunk_count = ? WHERE id = ?",
-            (chunk_count, source_id),
-        )
-        await self._conn.commit()
-        return cursor.rowcount > 0
-
-    async def source_update_storage(
-        self,
-        source_id: str,
-        *,
-        stored_path: str,
-        media_type: str | None,
-        size_bytes: int | None,
-        domain: str | None = None,
-    ) -> bool:
-        """Backfill stored_path / media_type / size_bytes for an existing row."""
-        assert self._conn is not None
-        if domain is not None:
-            cursor = await self._conn.execute(
-                """
-                UPDATE sources
-                SET stored_path = ?, media_type = ?, size_bytes = ?, domain = ?
-                WHERE id = ?
-                """,
-                (stored_path, media_type, size_bytes, domain, source_id),
-            )
-        else:
-            cursor = await self._conn.execute(
-                """
-                UPDATE sources
-                SET stored_path = ?, media_type = ?, size_bytes = ?
-                WHERE id = ?
-                """,
-                (stored_path, media_type, size_bytes, source_id),
-            )
-        await self._conn.commit()
-        return cursor.rowcount > 0
-
-    async def source_add(
-        self,
-        source_id: str,
-        domain: str,
-        source_type: str,
-        filename: str | None,
-        content_hash: str,
-        chunk_count: int,
-        stored_path: str | None = None,
-        media_type: str | None = None,
-        size_bytes: int | None = None,
-    ) -> None:
-        assert self._conn is not None
-        await self._conn.execute(
-            """
-            INSERT OR REPLACE INTO sources
-            (id, domain, source_type, filename, content_hash, chunk_count,
-             ingested_at, stored_path, media_type, size_bytes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (source_id, domain, source_type, filename, content_hash,
-             chunk_count, datetime.now(UTC).isoformat(), stored_path, media_type, size_bytes),
-        )
-        await self._conn.commit()
-
-    async def source_remove(self, source_id: str) -> bool:
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            "DELETE FROM sources WHERE id = ?", (source_id,)
-        )
-        await self._conn.commit()
-        return cursor.rowcount > 0
-
-    async def source_get(self, source_id: str) -> dict[str, Any] | None:
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
-            FROM sources s
-            WHERE s.id = ?
-            """,
-            (source_id,),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def source_get_by_domain_filename(
-        self, domain: str, filename: str
-    ) -> dict[str, Any] | None:
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
-            FROM sources s
-            WHERE s.domain = ? AND s.filename = ?
-            ORDER BY s.ingested_at DESC
-            LIMIT 1
-            """,
-            (domain, filename),
-        )
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-    async def sources_list_by_domain_filename(
-        self, domain: str, filename: str
-    ) -> list[dict[str, Any]]:
-        """Return all source rows matching domain + filename, newest first."""
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
-            FROM sources s
-            WHERE s.domain = ? AND s.filename = ?
-            ORDER BY s.ingested_at DESC
-            """,
-            (domain, filename),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def source_rename(
-        self,
-        source_id: str,
-        filename: str,
-        stored_path: str | None = None,
-    ) -> bool:
-        assert self._conn is not None
-        if stored_path is None:
-            cursor = await self._conn.execute(
-                "UPDATE sources SET filename = ? WHERE id = ?",
-                (filename, source_id),
-            )
-        else:
-            cursor = await self._conn.execute(
-                "UPDATE sources SET filename = ?, stored_path = ? WHERE id = ?",
-                (filename, stored_path, source_id),
-            )
-        await self._conn.commit()
-        return cursor.rowcount > 0
-
-    async def sources_list(self, domain: str) -> list[dict[str, Any]]:
-        assert self._conn is not None
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS_LIST}
-            FROM sources s
-            WHERE s.domain = ?
-            ORDER BY s.ingested_at DESC
-            """,
-            (domain,),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def sources_referencing_file(
-        self,
-        *,
-        stored_paths: list[str],
-        domain: str | None,
-        filename: str | None,
-        exclude_source_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return source rows that would resolve to the same raw file."""
-        assert self._conn is not None
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        unique_paths = [path for path in dict.fromkeys(stored_paths) if path]
-        if unique_paths:
-            placeholders = ",".join("?" for _ in unique_paths)
-            conditions.append(f"s.stored_path IN ({placeholders})")
-            params.extend(unique_paths)
-
-        if domain and filename:
-            conditions.append("(s.stored_path IS NULL AND s.domain = ? AND s.filename = ?)")
-            params.extend([domain, filename])
-
-        if not conditions:
-            return []
-
-        where = f"({' OR '.join(conditions)})"
-        if exclude_source_id:
-            where += " AND s.id != ?"
-            params.append(exclude_source_id)
-
-        cursor = await self._conn.execute(
-            f"""
-            SELECT {self._SOURCE_COLUMNS_QUALIFIED}
-            FROM sources s
-            WHERE {where}
-            ORDER BY s.ingested_at DESC
-            """,  # noqa: S608
-            params,
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def download_token_create(self, source_id: str, ttl_seconds: int = 900) -> dict[str, Any]:
-        assert self._conn is not None
-        ttl = max(60, min(int(ttl_seconds or 900), 86400))
-        now = datetime.now(UTC)
-        expires_at = now.timestamp() + ttl
-        token = secrets.token_urlsafe(32)
-        await self._conn.execute(
-            """
-            INSERT INTO download_tokens (token, source_id, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                token,
-                source_id,
-                datetime.fromtimestamp(expires_at, UTC).isoformat(),
-                now.isoformat(),
-            ),
-        )
-        await self._conn.commit()
-        return {
-            "token": token,
-            "source_id": source_id,
-            "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
-            "ttl_seconds": ttl,
-        }
-
-    async def download_token_get(self, token: str) -> dict[str, Any] | None:
-        assert self._conn is not None
-        now = datetime.now(UTC).isoformat()
-        await self._conn.execute("DELETE FROM download_tokens WHERE expires_at < ?", (now,))
-        cursor = await self._conn.execute(
-            """
-            SELECT token, source_id, expires_at, created_at
-            FROM download_tokens
-            WHERE token = ? AND expires_at >= ?
-            """,
-            (token, now),
-        )
-        row = await cursor.fetchone()
-        await self._conn.commit()
-        return dict(row) if row else None
 
     # -- Wiki Pages --
 
@@ -1079,19 +731,13 @@ class KnowledgeDB:
     ) -> dict[str, list[dict[str, Any]]]:
         assert self._conn is not None
         fact_conditions: list[str] = []
-        source_conditions: list[str] = []
         fact_params: list[Any] = []
-        source_params: list[Any] = []
         if domain:
             fact_conditions.append("domain = ?")
-            source_conditions.append("domain = ?")
             fact_params.append(domain)
-            source_params.append(domain)
         if not force_full:
             fact_conditions.append("updated_at > ?")
-            source_conditions.append("ingested_at > ?")
             fact_params.append(since)
-            source_params.append(since)
         if quiet_after:
             fact_conditions.append(
                 "NOT (origin_type = 'chat' AND created_at > ? AND last_confirmed_at IS NULL)"
@@ -1099,7 +745,6 @@ class KnowledgeDB:
             fact_params.append(quiet_after)
 
         fact_where = f"WHERE {' AND '.join(fact_conditions)}" if fact_conditions else ""
-        source_where = f"WHERE {' AND '.join(source_conditions)}" if source_conditions else ""
         cursor = await self._conn.execute(
             f"""
             SELECT domain, key, origin_type, origin_ref, last_confirmed_at, created_at, updated_at
@@ -1110,17 +755,7 @@ class KnowledgeDB:
             fact_params,
         )
         facts = [dict(row) for row in await cursor.fetchall()]
-
-        cursor = await self._conn.execute(
-            f"""
-            SELECT id, domain, source_type, filename, chunk_count, ingested_at
-            FROM sources
-            {source_where}
-            ORDER BY domain, filename, id
-            """,  # noqa: S608
-            source_params,
-        )
-        return {"facts": facts, "sources": [dict(row) for row in await cursor.fetchall()]}
+        return {"facts": facts, "sources": []}
 
     # -- Curation Queue --
 
@@ -1259,4 +894,3 @@ class KnowledgeDB:
     async def close(self) -> None:
         if self._conn:
             await self._conn.close()
-

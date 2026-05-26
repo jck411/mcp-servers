@@ -2,8 +2,6 @@
 
 from datetime import datetime
 
-import pytest
-
 from servers.knowledge.cross_domain import (
     detect_signals,
     extract_dates,

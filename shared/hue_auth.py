@@ -75,7 +75,10 @@ async def resolve_light(name_or_id: str) -> tuple[dict, str | None]:
 
     # Case-insensitive substring match on metadata.name
     needle = name_or_id.lower()
-    matches = [l for l in lights if needle in l.get("metadata", {}).get("name", "").lower()]
+    matches = [
+        light for light in lights
+        if needle in light.get("metadata", {}).get("name", "").lower()
+    ]
     if len(matches) == 1:
         return matches[0], None
     if len(matches) > 1:

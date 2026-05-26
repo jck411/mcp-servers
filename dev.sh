@@ -15,7 +15,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Server → port mapping (must match deploy/setup-systemd.sh)
+# Server → port mapping for local development.
 declare -A PORTS=(
     [calendar]=9004
     [gmail]=9005
@@ -24,8 +24,10 @@ declare -A PORTS=(
     [spotify]=9010
     [tv]=9013
     [hue]=9015
+    [web_search]=9016
     [knowledge]=9017
     [knowledge_api]=9018
+    [knowledge_admin]=9019
 )
 
 RED='\033[0;31m'
@@ -38,10 +40,19 @@ NC='\033[0m'
 # Sorted server names (reused everywhere)
 SORTED_NAMES=($(echo "${!PORTS[@]}" | tr ' ' '\n' | sort))
 
+endpoint_for() {
+    local name="$1" port="${PORTS[$1]}"
+    if [[ "$name" == "knowledge_api" ]]; then
+        echo "http://127.0.0.1:${port}/api/health"
+    else
+        echo "http://127.0.0.1:${port}/mcp"
+    fi
+}
+
 list_servers() {
     echo -e "${BOLD}Available servers:${NC}"
     for name in "${SORTED_NAMES[@]}"; do
-        echo -e "  ${CYAN}${name}${NC}  →  port ${PORTS[$name]}  →  http://127.0.0.1:${PORTS[$name]}/mcp"
+        echo -e "  ${CYAN}${name}${NC}  →  port ${PORTS[$name]}  →  $(endpoint_for "$name")"
     done
 }
 
@@ -153,11 +164,15 @@ trap cleanup SIGINT SIGTERM
 
 for name in "${SERVERS[@]}"; do
     port="${PORTS[$name]}"
+    run_cmd=""
 
-    echo -e "${GREEN}Starting ${name} on http://127.0.0.1:${port}/mcp  ${YELLOW}(auto-reload)${NC}"
-    .venv/bin/watchfiles \
-        ".venv/bin/python -m servers.${name} --transport streamable-http --host 127.0.0.1 --port ${port}" \
-        servers/ shared/ &
+    echo -e "${GREEN}Starting ${name} on $(endpoint_for "$name")  ${YELLOW}(auto-reload)${NC}"
+    if [[ "$name" == "knowledge_api" ]]; then
+        run_cmd=".venv/bin/python -m servers.${name} --host 127.0.0.1 --port ${port}"
+    else
+        run_cmd=".venv/bin/python -m servers.${name} --transport streamable-http --host 127.0.0.1 --port ${port}"
+    fi
+    .venv/bin/watchfiles "$run_cmd" servers/ shared/ &
     PIDS+=($!)
 done
 

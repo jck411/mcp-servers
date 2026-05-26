@@ -125,8 +125,8 @@ class KnowledgeVectorStore:
         """Embed a wiki page body into Qdrant as a single chunk.
 
         Replaces any previous vectors for this slug. The page participates
-        in the same hybrid search as source chunks so wiki and document
-        results compete on semantic similarity rather than keyword heuristics.
+        in the same hybrid search as facts so wiki and structured memory
+        compete on semantic similarity rather than keyword heuristics.
         """
         if not body_md.strip():
             return
@@ -264,40 +264,6 @@ class KnowledgeVectorStore:
             ),
         )
 
-    async def update_source_name(self, source_id: str, source_name: str) -> None:
-        await self._client.set_payload(
-            collection_name=self._collection,
-            payload={"source_name": source_name},
-            points=Filter(
-                must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
-            ),
-        )
-
-    async def chunks_by_source(self, source_id: str, limit: int = 1000) -> list[dict[str, Any]]:
-        """Return stored chunk payloads for one source, ordered by chunk index."""
-        limit = max(1, limit)
-        points = []
-        offset = None
-        while True:
-            remaining = limit - len(points)
-            batch, offset = await self._client.scroll(
-                collection_name=self._collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="source_id", match=MatchValue(value=source_id))]
-                ),
-                limit=min(remaining, 256),
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
-            points.extend(batch)
-            if offset is None or len(points) >= limit:
-                break
-
-        payloads = [dict(point.payload or {}) for point in points]
-        payloads.sort(key=lambda p: int(p.get("chunk_index") or 0))
-        return payloads
-
     async def chunks_all(self, limit: int = 50_000) -> list[dict[str, Any]]:
         """Scroll all chunk payloads — used for BM25 warm-up on startup."""
         limit = max(1, limit)
@@ -388,4 +354,3 @@ class KnowledgeVectorStore:
 
     async def close(self) -> None:
         await self._client.close()
-

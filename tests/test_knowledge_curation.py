@@ -403,27 +403,16 @@ async def test_apply_legacy_review_curation_item_marks_reviewed(knowledge_db: Kn
     assert (await knowledge_db.curation_get("legacy-review-test"))["status"] == "applied"
 
 
-async def test_apply_reingest_source_curation_item_skips(knowledge_db: KnowledgeDB):
-    """Since source operations are removed, reingest_source actions should skip."""
-    await knowledge_db.curation_upsert(
-        kind="maintenance_action",
-        title="Reingest note",
-        proposed_actions=[{"action": "reingest_source", "target_id": "old-source"}],
-        item_id="reingest-test",
-    )
-
-    result = await apply_curation_item(
-        "reingest-test",
-        confirmation=None,
-        settings=None,  # type: ignore[arg-type]
-        embeddings=None,  # type: ignore[arg-type]
-        sparse_encoder=None,  # type: ignore[arg-type]
-        vectors=None,  # type: ignore[arg-type]
+async def test_source_curation_actions_are_rejected(knowledge_db: KnowledgeDB):
+    result = await create_curation_queue_item(
         db=knowledge_db,
+        actions=[{"action": "reingest_source", "target_id": "old-source"}],
+        kind="maintenance_action",
+        notes="Reingest removed source",
     )
 
-    assert result["success"] is True
-    assert result["results"][0]["status"] == "skipped"
+    assert result["success"] is False
+    assert "Unsupported curation action 'reingest_source'" in result["error"]
 
 
 async def test_destructive_curation_requires_exact_confirmation(knowledge_db: KnowledgeDB):
@@ -452,5 +441,4 @@ async def test_destructive_curation_requires_exact_confirmation(knowledge_db: Kn
     assert result["success"] is False
     assert result["requires_confirmation"] == "destructive-test"
     assert (await knowledge_db.domain_get("core"))["archived"] is False
-
 

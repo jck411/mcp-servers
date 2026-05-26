@@ -219,7 +219,7 @@ def filter_facts_for_temporal_intent(
 
 
 def classify_search_route(query: str, facts: list[dict[str, Any]]) -> str:
-    """Pick the result ordering for facts, wiki pages, and source chunks."""
+    """Pick the result ordering for facts and wiki pages."""
     terms = set(search_fact_keywords(query))
     lowered = query.lower()
     if terms & EVIDENCE_QUERY_HINTS or re.search(r"\b(where did|show .*source)", lowered):
@@ -290,9 +290,8 @@ async def search_knowledge(
         min_score=min_similarity,
     )
 
-    # Split Qdrant results into wiki pages (source_type=wiki_page) and
-    # regular source chunks.  Wiki pages are enriched with SQLite metadata.
-    chunk_results = []
+    # Split Qdrant results into wiki pages and derived fact vectors.
+    # Legacy source chunks are ignored; source storage no longer exists here.
     wiki_results = []
     vector_fact_results = []
     wiki_slugs_seen: set[str] = set()
@@ -356,18 +355,6 @@ async def search_knowledge(
                     "status": page["status"],
                     "frontmatter": page.get("frontmatter") or {},
                 })
-        else:
-            chunk_results.append({
-                "result_type": "chunk",
-                "content": content,
-                "domain": p.get("domain", ""),
-                "source_id": p.get("source_id", ""),
-                "source_name": p.get("source_name", ""),
-                "source_type": p.get("source_type", ""),
-                "chunk_id": str(r.id),
-                "chunk_index": p.get("chunk_index", 0),
-                "similarity": round(r.score, 4),
-            })
 
     fact_results = [{
         "result_type": "fact",
@@ -398,14 +385,13 @@ async def search_knowledge(
         ordered_results = [
             *all_fact_results,
             *(wiki_results if not all_fact_results else []),
-            *chunk_results,
         ]
     elif route == "evidence":
-        ordered_results = [*chunk_results, *wiki_results, *vector_fact_results]
+        ordered_results = [*wiki_results, *vector_fact_results]
     else:
-        # Wiki and chunk results are already on the same similarity scale
+        # Wiki and vector fact results are already on the same similarity scale
         # (cosine similarity from Qdrant), so merge and sort by score.
-        merged = [*wiki_results, *vector_fact_results, *chunk_results]
+        merged = [*wiki_results, *vector_fact_results]
         merged.sort(key=lambda r: -float(r.get("similarity") or 0))
         ordered_results = merged
     formatted = ordered_results[:max(1, limit)]
@@ -421,7 +407,7 @@ async def search_knowledge(
         "count": len(formatted),
         "results": formatted,
         "wiki_count": len(wiki_results),
-        "chunk_count": len(chunk_results),
+        "chunk_count": 0,
     }
 
     if include_facts:

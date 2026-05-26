@@ -370,7 +370,6 @@ async def _fetch_wiki_synthesis(
     }
 
     wiki_pages: list[dict[str, Any]] = []
-    related_slugs_to_check: set[str] = set()
 
     # For each domain seen in results, fetch its active wiki pages
     for domain in all_domains[:6]:  # cap at 6 domains to limit DB calls
@@ -403,8 +402,6 @@ async def _fetch_wiki_synthesis(
                         "kind": page.get("kind", ""),
                         "fact_count": page.get("fact_count", 0),
                     })
-                    # Track related_slugs for secondary lookups
-                    # (frontmatter not in list results, skip for now)
         except Exception:
             log.warning("wiki_synthesis_domain_failed domain=%s", domain, exc_info=True)
 

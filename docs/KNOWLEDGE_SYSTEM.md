@@ -35,8 +35,8 @@ and `knowledge_api` runs as REST on port `9018`.
   requires confirmation equal to the curation item id.
 
 Note: source file storage was removed in 2026-05-26. The server no longer
-stores PDFs, images, or documents. Source files live on the laptop and will
-be bridged via a future local MCP tool.
+creates source records, download tokens, upload endpoints, or document chunks.
+Source files live on the laptop and will be bridged via a future local MCP tool.
 
 ## Search
 
@@ -69,8 +69,7 @@ returned content without changing stored data.
 
 The curation queue stores proposed actions in SQLite. Supported actions include
 fact set/update/delete, archive domain, flag for review, and no-op. Source-file
-actions (ingest_text, delete_source, reingest_source) are accepted but return
-`skipped` since source infrastructure was removed.
+actions are not supported since source infrastructure was removed.
 
 Tools:
 
@@ -130,5 +129,3 @@ Mutating routes require `Authorization: Bearer $KNOWLEDGE_API_TOKEN`.
   accounts. Bearer token is an additional layer for mutating routes.
 - The test suite covers internals and shared paths, but not a full Qdrant-backed
   search integration fixture.
-- `mcp-server@knowledge-admin` has a naming bug (systemd template uses hyphen
-  in Python module name).

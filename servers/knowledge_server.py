@@ -131,8 +131,6 @@ async def knowledge_domain_list() -> dict[str, Any]:
     domains = await db.domain_list()
     for d in domains:
         d["chunk_count"] = await vectors.count_by_domain(d["name"])
-        sources = await db.sources_list(d["name"])
-        d["source_count"] = len(sources)
         facts = await db.facts_list(d["name"])
         d["fact_count"] = len(facts)
 

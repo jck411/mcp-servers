@@ -3,7 +3,7 @@
 **Target:** LXC container on Proxmox (192.168.1.11)  
 **Container:** CT 110, IP `192.168.1.110`  
 **OS:** Debian 13 (matches all other containers)  
-**Services:** `knowledge` on 9017 and `knowledge_api` on 9018. Private/account/home-control MCPs run on CT 117 (`mcp-accounts`) through the NETWORK deploy registry.
+**Services:** `web_search` on 9016, `knowledge` on 9017, `knowledge_api` on 9018, and `knowledge_admin` on 9019. Private/account/home-control MCPs run on CT 117 (`mcp-accounts`) through the NETWORK deploy registry.
 
 > **Remote access prerequisites.** Commands below that use `ssh proxmox-tunnel` require the Cloudflare Access service token wrapper described in [`../docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md#deploying-from-remote-away-from-home). `ssh.jackshome.com` is fronted by Cloudflare Access (service token `mcp-servers-ssh`) and PVE has password auth disabled — key + token is mandatory.
 
@@ -128,14 +128,15 @@ sudo /opt/mcp-servers/deploy/setup-systemd.sh
 
 # Output will show:
 #   /opt/mcp-servers/.env.knowledge → port 9017
-#   /opt/mcp-servers/.env.knowledge_api → port 9018
+#   /opt/mcp-servers/.env.web_search → port 9016
+# knowledge_api uses mcp-knowledge-api.service, not an mcp-server@ template instance
 
 # Or install specific servers only:
 # sudo /opt/mcp-servers/deploy/setup-systemd.sh knowledge
 
 # Verify they are running
 systemctl status mcp-server@knowledge --no-pager
-systemctl status mcp-server@knowledge_api --no-pager
+systemctl status mcp-knowledge-api.service --no-pager
 ```
 
 ### Checking Logs

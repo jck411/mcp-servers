@@ -54,13 +54,13 @@ WIKI_PHOTO_DETAIL_PREFIXES = frozenset({
 })
 WIKI_PAGE_SYSTEM_PROMPT = (
     "You maintain concise personal knowledge wiki pages. Return only the forced "
-    "tool call. Write traceable markdown from the supplied facts and chunks only. "
+    "tool call. Write traceable markdown from the supplied facts and context only. "
     "Do not invent missing details. Use Open Questions for gaps or conflicts. "
-    "Every concrete claim should be covered by a source_id or chat_date citation. "
+    "Every concrete claim should be covered by a fact, source note, or chat_date citation. "
     "Flag duplicate or split concerns instead of resolving identity silently. "
     "Do not create standalone wiki pages for ordinary photo details such as clothing, "
     "hair, seating, sky, background objects, or other visible incidental objects; keep "
-    "those details in source captions or a person/event page."
+    "those details in facts for the person/event page."
 )
 
 
@@ -136,9 +136,7 @@ async def preview_wiki_rebuild(
             "domain": item_domain,
             "title": _wiki_title_from_slug(slug),
             "fact_count": 0,
-            "source_count": 0,
             "fact_keys": [],
-            "source_ids": [],
         })
 
     for fact in inputs["facts"]:
@@ -153,16 +151,6 @@ async def preview_wiki_rebuild(
         entity["fact_count"] += 1
         entity["fact_keys"].append(text)
 
-    for source in inputs["sources"]:
-        item_domain = str(source["domain"])
-        text = str(source.get("filename") or source["id"])
-        if clean_entity and not _wiki_row_matches_slug(clean_entity, item_domain, text):
-            continue
-        slug = clean_entity or _wiki_slug_for_change(item_domain, text)
-        entity = ensure_entity(slug, item_domain)
-        entity["source_count"] += 1
-        entity["source_ids"].append(source["id"])
-
     if clean_entity:
         page = await db.wiki_get(clean_entity)
         entity = ensure_entity(clean_entity, clean_domain or clean_entity.split("/", 1)[0])
@@ -176,10 +164,8 @@ async def preview_wiki_rebuild(
     changed_entities = sorted(entities.values(), key=lambda item: item["slug"])
     entity_pages = len(changed_entities)
     index_pages = len({item["domain"] for item in changed_entities}) if entity_pages else 0
-    token_estimate = sum(
-        1_200 + item["fact_count"] * 180 + item["source_count"] * 650
-        for item in changed_entities
-    ) + index_pages * 500
+    token_estimate = sum(1_200 + item["fact_count"] * 180 for item in changed_entities)
+    token_estimate += index_pages * 500
     estimated_pages = entity_pages + index_pages
     return {
         "success": True,
@@ -221,18 +207,9 @@ def _wiki_iso_date(value: Any) -> str | None:
     return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
 
 
-def _wiki_fact_source_id(fact: dict[str, Any]) -> str | None:
-    origin_ref = str(fact.get("origin_ref") or "").strip()
-    if origin_ref and not _wiki_iso_date(origin_ref):
-        return origin_ref
-    source = str(fact.get("source") or "")
-    return source.split(":", 1)[1].strip() if source.startswith("extracted:") else None
-
-
 def _wiki_source_rows(
     facts: list[dict[str, Any]],
     sources: dict[str, dict[str, Any]],
-    chunks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -256,22 +233,12 @@ def _wiki_source_rows(
             chat_date := _wiki_iso_date(fact.get("origin_ref"))
         ):
             add(chat_date=chat_date, contribution=contribution)
-        elif (source_id := _wiki_fact_source_id(fact)) and source_id in sources:
-            add(source_id=source_id, contribution=contribution)
 
     for source_id, source in sources.items():
         add(
             source_id=source_id,
             contribution=str(source.get("filename") or source.get("source_type") or "source"),
         )
-
-    for chunk in chunks:
-        source_id = str(chunk.get("source_id") or "").strip()
-        if source_id:
-            add(
-                source_id=source_id,
-                contribution=str(chunk.get("source_name") or "matched source chunk"),
-            )
     return list(rows.values())
 
 
@@ -338,13 +305,11 @@ def _wiki_generated_page(
     ).lower()
     confidence = confidence if confidence in {"high", "medium", "low"} else "medium"
 
-    default_rows = _wiki_source_rows(context["facts"], context["sources"], context["chunks"])
+    default_rows = _wiki_source_rows(context["facts"], context["sources"])
     llm_rows = raw_page.get("sources") if isinstance(raw_page.get("sources"), list) else []
     source_rows = _wiki_merge_source_rows(
         [*llm_rows, *default_rows],
-        allowed_source_ids=set(context["sources"]) | {
-            str(c.get("source_id")) for c in context["chunks"] if c.get("source_id")
-        },
+        allowed_source_ids=set(context["sources"]),
         allowed_chat_dates={
             date for f in context["facts"] if (date := _wiki_iso_date(f.get("origin_ref")))
         },
@@ -421,11 +386,7 @@ async def _wiki_context(
         or any(term in f"{fact.get('key', '')} {fact.get('value', '')}".lower() for term in terms)
     ]
 
-    chunks: list[dict[str, Any]] = []
-    for source_id in entity.get("source_ids") or []:
-        with contextlib.suppress(Exception):
-            chunks.extend(await vectors.chunks_by_source(str(source_id), limit=4))
-
+    context_points: list[dict[str, Any]] = []
     with contextlib.suppress(Exception):
         query = " ".join([title, *terms])
         query_embedding = await embeddings.embed(query)
@@ -437,36 +398,28 @@ async def _wiki_context(
             limit=8,
             min_score=0.15,
         ):
-            chunks.append(dict(point.payload or {}))
+            payload = dict(point.payload or {})
+            if payload.get("type") == "fact" or payload.get("source_type") in {"fact", "wiki_page"}:
+                context_points.append(payload)
 
-    unique_chunks: dict[tuple[str, int, str], dict[str, Any]] = {}
-    for chunk in chunks:
+    unique_context: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in context_points:
         key = (
-            str(chunk.get("source_id") or ""),
-            int(chunk.get("chunk_index") or 0),
-            str(chunk.get("id") or ""),
+            str(item.get("source_type") or item.get("type") or ""),
+            str(item.get("source_id") or item.get("fact_id") or item.get("id") or ""),
         )
-        if key not in unique_chunks:
-            copy = dict(chunk)
+        if key not in unique_context:
+            copy = dict(item)
             copy["content"] = str(copy.get("content") or "")[:1400]
-            unique_chunks[key] = copy
-
-    source_ids = set(entity.get("source_ids") or [])
-    source_ids.update(str(c.get("source_id")) for c in unique_chunks.values() if c.get("source_id"))
-    source_ids.update(sid for f in facts if (sid := _wiki_fact_source_id(f)))
-    sources = {}
-    for source_id in sorted(str(s) for s in source_ids if s):
-        source = await db.source_get(source_id)
-        if source:
-            sources[source_id] = source
+            unique_context[key] = copy
 
     return {
         "slug": slug,
         "domain": domain,
         "title": title,
         "facts": facts,
-        "chunks": list(unique_chunks.values())[:12],
-        "sources": sources,
+        "chunks": list(unique_context.values())[:12],
+        "sources": {},
         "existing_page": await db.wiki_get(slug),
     }
 

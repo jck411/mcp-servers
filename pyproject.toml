@@ -74,8 +74,8 @@ dev = [
     "watchfiles>=1.0.0",
 ]
 
-[tool.setuptools]
-packages = ["servers", "shared"]
+[tool.setuptools.packages.find]
+include = ["servers*", "shared*"]
 
 [tool.ruff]
 line-length = 100

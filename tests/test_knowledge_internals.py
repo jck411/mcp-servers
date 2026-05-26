@@ -501,7 +501,6 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
             ),
         )
         await db._conn.commit()
-        await db.source_add("source-dad", "family", "note", "Dad notes.md", "hash-dad", 2)
 
         monkeypatch.setattr(knowledge, "_ready", True)
         monkeypatch.setattr(knowledge, "_settings", SimpleNamespace(extraction_model="test-model"))
@@ -523,7 +522,6 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
         assert result["estimated_pages"] == 2
         assert result["changed_entities"][0]["slug"] == "family/dad"
         assert result["changed_entities"][0]["fact_keys"] == ["dad_heart_history"]
-        assert result["changed_entities"][0]["source_ids"] == ["source-dad"]
         assert "family/shirt" not in {item["slug"] for item in result["changed_entities"]}
         assert result["latency_class"] == "quick"
 
@@ -595,8 +593,6 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
             origin_type="chat",
             origin_ref="2026-05-16",
         )
-        await db.source_add("source-dad", "family", "note", "Dad notes.md", "hash-dad", 1)
-
         class FakeEmbeddings:
             async def embed(self, query: str) -> list[float]:
                 return [0.1]
@@ -606,27 +602,16 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
                 return [1], [1.0]
 
         class FakeVectors:
-            async def chunks_by_source(self, source_id: str, limit: int = 4) -> list[dict]:
-                return [{
-                    "id": "chunk-source",
-                    "domain": "family",
-                    "source_id": source_id,
-                    "source_name": "Dad notes.md",
-                    "chunk_index": 0,
-                    "content": "Dad heart history notes.",
-                }]
-
             async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
                 return [SimpleNamespace(
-                    id="chunk-search",
+                    id="wiki-context",
                     score=0.9,
                     payload={
-                        "id": "chunk-search",
+                        "id": "wiki-context",
                         "domain": "family",
-                        "source_id": "source-dad",
-                        "source_name": "Dad notes.md",
-                        "chunk_index": 1,
-                        "content": "Dad has stable heart history.",
+                        "source_id": "family/context",
+                        "source_type": "wiki_page",
+                        "content": "Related family context.",
                     },
                 )]
 
@@ -649,11 +634,6 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
                     "related_slugs": [],
                 },
                 "sources": [
-                    {
-                        "source_id": "source-dad",
-                        "chat_date": None,
-                        "contribution": "heart history note",
-                    },
                     {
                         "source_id": None,
                         "chat_date": "2026-05-16",
@@ -690,12 +670,12 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
 
         page = await db.wiki_get("family/dad")
         assert page["status"] == "active"
-        assert page["frontmatter"]["source_ids"] == ["source-dad"]
+        assert page["frontmatter"]["source_ids"] == []
         assert page["frontmatter"]["chat_dates"] == ["2026-05-16"]
         assert "## Sources" in page["body_md"]
         assert {
             (source["source_id"], source["chat_date"]) for source in page["sources"]
-        } == {("source-dad", None), (None, "2026-05-16")}
+        } == {(None, "2026-05-16")}
 
         index = await db.wiki_get("family/index")
         assert index["status"] == "active"
@@ -735,9 +715,6 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
                 return [], []
 
         class FakeVectors:
-            async def chunks_by_source(self, source_id: str, limit: int = 4) -> list[dict]:
-                return []
-
             async def search(self, *args, **kwargs) -> list[SimpleNamespace]:
                 return []
 
@@ -1063,20 +1040,10 @@ async def test_search_knowledge_returns_ids_truncates_and_searches_facts(tmp_pat
 
     assert vectors.call["domains"] == ["health", "finance", "core"]
     assert response["searched_domains"] == ["health", "finance", "core"]
-    assert response["results"] == [{
-        "result_type": "chunk",
-        "content": "abcd\u2026",
-        "domain": "health",
-        "source_id": "source-1",
-        "source_name": "labs.pdf",
-        "source_type": "pdf",
-        "chunk_id": "chunk-1",
-        "chunk_index": 2,
-        "similarity": 0.8765,
-    }]
+    assert response["results"] == []
     assert response["route"] == "synthesis"
     assert response["wiki_count"] == 0
-    assert response["chunk_count"] == 1
+    assert response["chunk_count"] == 0
     assert response["fact_count"] == 1
     assert response["facts"][0]["key"] == "ldl_2024_12"
 
@@ -1166,9 +1133,10 @@ async def test_search_knowledge_routes_synthesis_to_active_wiki(tmp_path: Path):
         await db.close()
 
     assert response["route"] == "synthesis"
-    assert [result["result_type"] for result in response["results"]] == ["wiki", "chunk"]
+    assert [result["result_type"] for result in response["results"]] == ["wiki"]
     assert response["results"][0]["slug"] == "family/dad"
     assert response["wiki_count"] == 1
+    assert response["chunk_count"] == 0
 
 
 async def test_search_knowledge_routes_exact_fact_before_chunks(tmp_path: Path):
@@ -1215,7 +1183,8 @@ async def test_search_knowledge_routes_exact_fact_before_chunks(tmp_path: Path):
     assert response["route"] == "fact"
     assert response["results"][0]["result_type"] == "fact"
     assert response["results"][0]["key"] == "dentist"
-    assert response["results"][1]["result_type"] == "chunk"
+    assert len(response["results"]) == 1
+    assert response["chunk_count"] == 0
 
 
 async def test_search_knowledge_defaults_pto_to_current_upcoming_facts(tmp_path: Path):

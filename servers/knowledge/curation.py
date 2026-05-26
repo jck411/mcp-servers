@@ -10,7 +10,6 @@ import json
 import re
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
 from typing import Any
 
 from servers.knowledge.db import KnowledgeDB
@@ -182,10 +181,6 @@ def _curation_group_key(item: dict[str, Any]) -> tuple[str, str, str]:
     if kind == "maintenance_action":
         if action in {"archive_domain", "domain_archive"}:
             return ("maintenance_action", "domains", "archive_empty_domain")
-        if action == "delete_source":
-            return ("maintenance_action", "sources", "verified_duplicate_delete")
-        if "missing-vector" in text or "missing vector" in text:
-            return ("maintenance_action", "sources", "missing_vectors")
         return ("maintenance_action", domain, action)
     if kind in {"merge_candidate", "split_candidate"}:
         return ("wiki_identity", domain, _curation_title_topic(item))
@@ -221,21 +216,6 @@ def _curation_pack_prompt(group_key: tuple[str, str, str], count: int) -> tuple[
             "Current policy says empty domains are allowed. Should I reject these "
             "empty-domain archive suggestions?",
             "Reject empty-domain archive suggestions unless Jack explicitly asks to archive them.",
-        )
-    if topic == "verified_duplicate_delete":
-        return (
-            "Verified duplicate source cleanup",
-            "Should I verify these duplicate source records and only delete rows/files "
-            "that are proven redundant?",
-            "Keep this pack pending until duplicate verification succeeds.",
-        )
-    if topic == "missing_vectors":
-        return (
-            "Missing-vector source repair",
-            "Should I keep these source/vector mismatches as repair work instead of "
-            "deleting source history?",
-            "Snooze or keep pending until a repair pass can reindex or explain the "
-            "missing vectors.",
         )
     if pack_kind == "wiki_identity":
         topic_label = topic.replace("-", " ")
@@ -524,13 +504,6 @@ async def execute_curation_action(
         if not archived:
             raise ValueError(f"Domain '{domain}' not found or already archived")
         return {"action": action_type, "status": "applied", "domain": domain}
-
-    if action_type in {"ingest_text", "delete_source", "reingest_source"}:
-        return {
-            "action": action_type,
-            "status": "skipped",
-            "reason": "Source file operations are no longer supported",
-        }
 
     if action_type in REVIEW_ONLY_CURATION_ACTIONS:
         return {"action": action_type, "status": "reviewed"}

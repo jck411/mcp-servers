@@ -27,13 +27,14 @@ Each server:
 | spotify | 9010 | 117 |
 | tv | 9013 | 117 |
 | hue | 9015 | 117 |
+| web_search | 9016 | 110 |
 | knowledge | 9017 | 110 |
 | knowledge_api (REST, not MCP) | 9018 | 110 |
 | knowledge_admin | 9019 | 110 |
 
-Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`, `9007`, `9012`, `9016`. `9018` is the knowledge_api FastAPI REST service — it's managed by the same systemd template but does not expose `/mcp`.
+Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`, `9007`, `9012`. `9018` is the knowledge_api FastAPI REST service — it uses the dedicated `mcp-knowledge-api.service` unit and does not expose `/mcp`.
 
-- **LXC 110** (knowledge): knowledge, knowledge_api, knowledge_admin
+- **LXC 110** (knowledge): web_search, knowledge, knowledge_api, knowledge_admin
 - **LXC 117** (private/home): calendar, gmail, gdrive, monarch, spotify, tv, hue — account credentials and home-control keys only exist here
 
 ### Knowledge Curation Queue
@@ -171,7 +172,7 @@ so each call logs `tool=<name> status=ok|error duration_ms=N` plus a short
 result summary. Apply the same decorator to other servers as needed.
 
 The Knowledge REST API exposes `GET /api/health` returning Qdrant
-reachability, source/chunk counts, BM25 doc count, and embedding model:
+reachability, fact/vector counts, BM25 doc count, and embedding model:
 
 ```bash
 curl https://api-knowledge.jackshome.com/api/health

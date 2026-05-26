@@ -795,7 +795,7 @@ async def all_power_on() -> str:
 
     results = []
 
-    for room, device in LG_DEVICES.items():
+    for device in LG_DEVICES.values():
         send_magic_packet(device["mac"])
         results.append(f"{device['name']}: WoL sent")
 
@@ -821,7 +821,7 @@ async def all_power_off() -> str:
     """
     results = []
 
-    for room, device in LG_DEVICES.items():
+    for device in LG_DEVICES.values():
         try:
             client = await _get_lg_client(device)
             await client.power_off()
