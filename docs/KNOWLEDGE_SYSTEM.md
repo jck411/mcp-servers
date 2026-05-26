@@ -21,14 +21,19 @@ and `knowledge_api` runs as REST on port `9018`.
 
 ## Data Model
 
-- **Domains** group knowledge by subject. A domain can list related domains.
+- **Domains** group knowledge by life area. A domain can list related domains.
 - **Core** is special: searches include `core` automatically when it exists.
 - **Facts** are structured key/value records stored in SQLite and keyed by
-  `(domain, key)`.
+  `(domain, key)`. Each fact has a `type` classification (task, event, plan,
+  preference, identity, state, reference, or note) and optional `tags` (JSON
+  array) for cross-cutting labels. The `type` column enables cross-domain
+  queries like "show all tasks" via `facts_by_type()`. The `tags` column
+  supports sub-categorization within a domain (e.g., a yard task in the
+  `home` domain has tags `["yard"]`).
 - **Sources** track uploaded or text-ingested material: domain, filename,
   content hash, stored path, media type, size, chunk count, and ingest time.
 - **Chunks** live in Qdrant with payload fields such as `source_id`,
-  `source_name`, `domain`, `chunk_index`, and `content`.
+  `source_name`, `domain`, `chunk_index`, `content`, `fact_type`, and `tags`.
 - **Curation items** are pending approved changes. Applying destructive actions
   requires confirmation equal to the curation item id.
 
@@ -139,8 +144,8 @@ actions are blocked unless `confirmation` equals the item id.
 - `GET /api/health` reports Qdrant reachability, source count, chunk count,
   BM25 document count, and embedding model.
 - SQLite uses WAL, foreign keys, and `busy_timeout`.
-- Qdrant indexes payload fields for domain, source id, source type, and chunk
-  index.
+- Qdrant indexes payload fields for domain, source id, source type, chunk
+  index, and fact_type.
 
 ## Known Gaps
 
