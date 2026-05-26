@@ -30,13 +30,14 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import uvicorn
-from fastapi import Body, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from servers.knowledge.settings import KnowledgeSettings
@@ -128,6 +129,36 @@ OPTIONAL_BODY = Body(None)
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
+# ---------------------------------------------------------------------------
+# Bearer token authentication
+# ---------------------------------------------------------------------------
+
+
+def _get_api_token() -> str | None:
+    """Read the API bearer token from environment.
+
+    Checks KNOWLEDGE_API_TOKEN first (canonical for REST clients),
+    then MCP_KNOWLEDGE_BEARER_TOKEN (shared with MCP servers on LXC 110).
+    """
+    return os.environ.get("KNOWLEDGE_API_TOKEN") or os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN")
+
+
+async def require_bearer(authorization: str | None = Header(None)) -> None:
+    """Verify Bearer token on mutating routes.
+
+    If no token is configured (KNOWLEDGE_API_TOKEN / MCP_KNOWLEDGE_BEARER_TOKEN
+    are both unset), all requests pass through — local dev mode.
+    """
+    expected = _get_api_token()
+    if not expected:
+        return
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or token != expected:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+
+
 def _content_disposition(filename: str) -> str:
     fallback = "".join(
         ch for ch in filename
@@ -191,6 +222,7 @@ async def upload_file(
     ingest: bool = True,
     overwrite: bool = False,
     force: bool = False,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Upload a file to a domain folder and optionally ingest it immediately.
 
@@ -351,6 +383,7 @@ async def set_fact(
     domain: str,
     key: str,
     body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Upsert a structured fact in a domain."""
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
@@ -395,7 +428,7 @@ async def set_fact(
 
 
 @app.delete("/api/facts/{domain}/{key}")
-async def delete_fact(domain: str, key: str) -> dict[str, Any]:
+async def delete_fact(domain: str, key: str, _auth: None = Depends(require_bearer)) -> dict[str, Any]:
     """Delete a structured fact from a domain."""
     _, _, _, vectors, db = _require_ready()
 
@@ -453,13 +486,13 @@ async def _download_source_response(source_id: str) -> Response:
 
 
 @app.get("/api/sources/{source_id}/download")
-async def download_source_get(source_id: str) -> Response:
+async def download_source_get(source_id: str, _auth: None = Depends(require_bearer)) -> Response:
     """Download original source bytes."""
     return await _download_source_response(source_id)
 
 
 @app.post("/api/sources/{source_id}/download")
-async def download_source_post(source_id: str) -> Response:
+async def download_source_post(source_id: str, _auth: None = Depends(require_bearer)) -> Response:
     """Download original source bytes."""
     return await _download_source_response(source_id)
 
@@ -468,6 +501,7 @@ async def download_source_post(source_id: str) -> Response:
 async def create_source_download_link(
     source_id: str,
     body: dict[str, Any] | None = OPTIONAL_BODY,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Create a temporary URL that can download a source without auth headers."""
     settings, _, _, _, db = _require_ready()
@@ -502,6 +536,7 @@ async def download_source_token(token: str) -> Response:
 async def extract_source(
     source_id: str,
     body: dict[str, Any] | None = OPTIONAL_BODY,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Single-shot fact extraction: one LLM call extracts structured facts and/or a caption.
 
@@ -523,6 +558,7 @@ async def extract_source(
 async def delete_source(
     source_id: str,
     delete_file: bool = True,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Delete one source, including vector chunks and optionally the stored file."""
     settings, _, _, vectors, db = _require_ready()
@@ -536,6 +572,7 @@ async def delete_source(
 async def rename_source(
     source_id: str,
     body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Rename one source by source_id."""
     filename = body.get("filename") or body.get("source_name")
@@ -570,6 +607,7 @@ async def list_curation(
 @app.post("/api/curation")
 async def create_curation_item(
     body: dict[str, Any] = REQUIRED_BODY,
+    _auth: None = Depends(require_bearer),
 ) -> dict[str, Any]:
     """Create or replace a curation queue item."""
     _, _, _, _, db = _require_ready()
@@ -611,6 +649,7 @@ async def get_curation_item(item_id: str) -> dict[str, Any]:
 async def apply_curation(
     item_id: str,
     body: dict[str, Any] | None = OPTIONAL_BODY,
+    _auth: None = Depends(require_bearer),
 ):
     """Apply a reviewed curation item."""
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
@@ -630,7 +669,7 @@ async def apply_curation(
 
 @app.post("/api/curation/reject/{item_id:path}")
 @app.post("/api/curation/{item_id}/reject")
-async def reject_curation(item_id: str) -> dict[str, Any]:
+async def reject_curation(item_id: str, _auth: None = Depends(require_bearer)) -> dict[str, Any]:
     """Reject a curation queue item without applying it."""
     _, _, _, _, db = _require_ready()
     updated = await db.curation_mark_status(item_id, "rejected")
@@ -641,7 +680,7 @@ async def reject_curation(item_id: str) -> dict[str, Any]:
 
 @app.post("/api/curation/snooze/{item_id:path}")
 @app.post("/api/curation/{item_id}/snooze")
-async def snooze_curation(item_id: str) -> dict[str, Any]:
+async def snooze_curation(item_id: str, _auth: None = Depends(require_bearer)) -> dict[str, Any]:
     """Snooze a curation queue item."""
     _, _, _, _, db = _require_ready()
     updated = await db.curation_mark_status(item_id, "snoozed")
