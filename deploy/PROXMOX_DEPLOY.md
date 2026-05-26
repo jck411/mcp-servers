@@ -40,7 +40,7 @@ pct status 110
 ### Resource Notes
 
 - **2 cores / 2 GB RAM** is enough for the current Knowledge MCP/API pair.
-- Increase CPU/RAM if OCR, extraction, or Qdrant load grows.
+- Increase CPU/RAM if Qdrant or wiki rebuild load grows.
 - `nesting=1` required for systemd inside the container
 - `onboot=1` ensures servers survive Proxmox reboots
 

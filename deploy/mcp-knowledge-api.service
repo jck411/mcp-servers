@@ -1,10 +1,9 @@
-# mcp-knowledge-api.service — Knowledge REST API (file upload + search + facts CRUD)
+# mcp-knowledge-api.service — Knowledge REST API (search + facts CRUD)
 #
 # A standalone FastAPI service that wraps the knowledge MCP server's internals
 # over plain HTTP (no MCP client required).
 #
 # Endpoints:
-#   POST /api/upload/{domain}          Upload + ingest a file
 #   GET  /api/search?q=...             Semantic search
 #   GET  /api/domains                  List all domains
 #   GET  /api/facts/{domain}           List facts in a domain
@@ -39,10 +38,9 @@ StandardError=journal
 SyslogIdentifier=mcp-knowledge-api
 
 # Security hardening
-# ReadWritePaths includes /knowledge so the upload endpoint can write files there
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data /opt/mcp-servers/knowledge
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data
 PrivateTmp=true
 
 [Install]

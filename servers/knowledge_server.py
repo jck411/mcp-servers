@@ -102,7 +102,7 @@ async def knowledge_domain_create(
         description: What this domain covers.
         related_domains: Other domains to include when searching this one.
     """
-    settings, _, _, _, db = _require_ready()
+    _, _, _, _, db = _require_ready()
 
     # Sanitize name
     clean_name = re.sub(r"[^a-z0-9_]", "_", name.lower().strip())
@@ -113,17 +113,12 @@ async def knowledge_domain_create(
     if not created:
         return {"success": False, "error": f"Domain '{clean_name}' already exists"}
 
-    # Create knowledge subdirectory
-    domain_dir = settings.knowledge_path / clean_name
-    domain_dir.mkdir(parents=True, exist_ok=True)
-
     return {
         "success": True,
         "domain": clean_name,
         "description": description,
         "related_domains": related_domains or [],
-        "knowledge_path": str(domain_dir),
-        "message": f"Domain '{clean_name}' created. Place files in {domain_dir} for ingestion.",
+        "message": f"Domain '{clean_name}' created.",
     }
 
 
@@ -618,9 +613,6 @@ async def _startup() -> None:
     except Exception as exc:
         log.error("disabled config_error=%r", exc)
         return
-
-    _settings.knowledge_path.mkdir(parents=True, exist_ok=True)
-    log.info("knowledge_path=%s", _settings.knowledge_path)
 
     _embeddings = EmbeddingClient(_settings)
     _sparse_encoder = BM25SparseEncoder()

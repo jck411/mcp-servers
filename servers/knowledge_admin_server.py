@@ -371,9 +371,6 @@ async def _startup() -> None:
         log.error("disabled config_error=%r", exc)
         return
 
-    _settings.knowledge_path.mkdir(parents=True, exist_ok=True)
-    log.info("knowledge_path=%s", _settings.knowledge_path)
-
     _embeddings = EmbeddingClient(_settings)
     _sparse_encoder = BM25SparseEncoder()
     _vectors = KnowledgeVectorStore(_settings)

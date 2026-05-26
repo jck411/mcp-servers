@@ -98,14 +98,6 @@ cleanup_qdrant_snapshot() {
         log "Warning: could not delete Qdrant server snapshot ${QDRANT_SNAPSHOT}"
 }
 
-copy_sources() {
-    local stage="$1"
-    local source_dir="${KNOWLEDGE_PATH:-${REPO_DIR}/knowledge}"
-    mkdir -p "${stage}/knowledge"
-    [[ -d "$source_dir" ]] || return 0
-    cp -a "${source_dir}/." "${stage}/knowledge/"
-}
-
 copy_metadata() {
     local stage="$1"
     mkdir -p "${stage}/metadata"
@@ -221,7 +213,7 @@ main() {
     local db_path="${KNOWLEDGE_DB_PATH:-${REPO_DIR}/data/knowledge.db}"
     local stage="${BACKUP_ROOT}/staging/${STAMP}"
     local archive="${BACKUP_ROOT}/daily/knowledge.${STAMP}.tar.gz"
-    mkdir -p "$stage"/{data,qdrant,knowledge,metadata}
+    mkdir -p "$stage"/{data,qdrant,metadata}
 
     log "Starting Knowledge backup pipeline stamp=${STAMP}"
     [[ "$RUN_HEALTHCHECK" -eq 0 ]] || "${REPO_DIR}/deploy/healthcheck.sh"
@@ -237,11 +229,10 @@ main() {
         sqlite_backup "$db" "${stage}/data/$(basename "$db")"
     done
     [[ "$RUN_QDRANT" -eq 0 ]] || snapshot_qdrant "$stage"
-    copy_sources "$stage"
     copy_metadata "$stage"
     write_manifest "$stage" "$archive"
 
-    (cd "$stage" && tar -czf "$archive" data qdrant knowledge metadata manifest.json SHA256SUMS)
+    (cd "$stage" && tar -czf "$archive" data qdrant metadata manifest.json SHA256SUMS)
     verify_archive "$archive"
     [[ "$(date -u +%u)" == 7 ]] && promote_archive "$archive" weekly
     [[ "$(date -u +%d)" == 01 ]] && promote_archive "$archive" monthly

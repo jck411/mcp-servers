@@ -39,8 +39,8 @@ Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`,
 ### Knowledge Curation Queue
 
 The Knowledge system stores an approval-gated curation queue in SQLite for
-diagnostic cleanup: durable memory extraction, source consolidation, temporal
-fact cleanup, and maintenance findings that need human judgment. The chat-facing
+diagnostic cleanup: temporal fact cleanup, vector drift, and maintenance
+findings that need human judgment. The chat-facing
 `knowledge` MCP only reports the pending count in `knowledge_context_pack`;
 review and cleanup tools live on `knowledge_admin`:
 
@@ -68,8 +68,7 @@ include historical facts and archived domains.
 
 ## Docs
 
-- [Knowledge system](docs/KNOWLEDGE_SYSTEM.md) — how domains, sources, search, extraction, and curation work
-- [Upload system](docs/UPLOAD_SYSTEM.md) — browser/API upload flow and troubleshooting
+- [Knowledge system](docs/KNOWLEDGE_SYSTEM.md) — how domains, facts, wiki, search, and curation work
 - [Deployment](docs/DEPLOYMENT.md) — deploy script, systemd, ports, and debugging
 
 ## Local Docs MCP (stdio)
