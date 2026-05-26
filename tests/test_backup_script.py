@@ -24,3 +24,11 @@ def test_promote_archive_works_with_nounset(tmp_path: Path):
         f"test -s {shlex.quote(str(tmp_path / 'weekly' / archive.name))}",
     ])
     subprocess.run(["bash", "-c", harness], check=True)
+
+
+def test_backup_runs_repo_owned_maintenance_module():
+    script = Path("deploy/backup.sh").read_text()
+
+    assert "-m servers.knowledge.maintenance" in script
+    assert "deploy/maintain.py" not in script
+    assert "deploy-maintain" not in script

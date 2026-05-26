@@ -8,6 +8,8 @@ scripts. Shared workflow rules live in `/home/jack/REPOS/AGENTS.md`.
 - Work on `main`; `deploy/deploy.sh` resets live tracked code to `origin/main`.
 - Use `uv` for Python dependency/test commands.
 - Keep MCP tools explicit and unsurprising; avoid hidden side effects.
+- Keep Knowledge maintenance source in this repo; `deploy/backup.sh` must run
+  tracked code here, not external repo artifacts.
 - Do not edit live `/opt/mcp-servers` as source of truth except for emergency hotfixes.
 - Commit the matching repo change immediately after any live hotfix.
 - For normal verified changes to deployable Knowledge service code, commit and
