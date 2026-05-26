@@ -16,7 +16,9 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 REPOS = Path(os.environ.get("DOCS_REPOS_ROOT", Path.home() / "REPOS"))
-SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache", "uv.lock"}
+SKIP_DIRS = {
+    ".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache", "uv.lock",
+}
 # Filenames / paths that must never be returned by read_file / search, even though the
 # stdio MCP technically runs with the user's filesystem permissions. These hold real
 # secrets and should not leak into any LLM transcript.
@@ -78,7 +80,7 @@ def _is_secret_path(target: Path) -> bool:
 
 @mcp.tool("docs_overview")
 async def overview() -> str:
-    """High-level overview of the entire homelab: repos, LXC/VM services, DHCP devices, and env key counts."""
+    """High-level overview: repos, LXC/VM services, DHCP devices, and env key counts."""
     parts: list[str] = []
 
     # Repos
@@ -154,12 +156,14 @@ async def read_file(path: str) -> str:
             entries.append(f"  {p.name:40s}  {kind}")
         return f"Directory: {path}/\n" + "\n".join(entries)
     if _is_secret_path(target):
-        return f"Error: refusing to read secret file {path}. Use docs_env_manifest for non-secret env config."
+        return f"Error: refusing to read secret file {path}. Use docs_env_manifest instead."
     return target.read_text(errors="replace")[:50_000]
 
 
 @mcp.tool("docs_write_file")
-async def write_file(path: str, content: str, mode: str = "replace", create_dirs: bool = False) -> str:
+async def write_file(
+    path: str, content: str, mode: str = "replace", create_dirs: bool = False
+) -> str:
     """Write text docs/config files inside ~/REPOS.
     mode: replace (default) or append."""
     if mode not in {"replace", "append"}:
@@ -196,7 +200,7 @@ async def write_file(path: str, content: str, mode: str = "replace", create_dirs
 
 @mcp.tool("docs_search")
 async def search(query: str, file_pattern: str = "") -> str:
-    """Grep across all repos. Returns matching lines (max 50). Optional file_pattern like '*.py' or '*.md'."""
+    """Grep across all repos. Returns matching lines (max 50). Optional file_pattern like '*.py'."""
     cmd = ["grep", "-rnI", "--color=never", "-m", "50"]
     for skip in SKIP_DIRS:
         cmd += [f"--exclude-dir={skip}"]

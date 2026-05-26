@@ -302,7 +302,9 @@ async def set_fact(
 
 
 @app.delete("/api/facts/{domain}/{key}")
-async def delete_fact(domain: str, key: str, _auth: None = Depends(require_bearer)) -> dict[str, Any]:
+async def delete_fact(
+    domain: str, key: str, _auth: None = Depends(require_bearer)
+) -> dict[str, Any]:
     """Delete a structured fact from a domain."""
     _, _, _, vectors, db = _require_ready()
 

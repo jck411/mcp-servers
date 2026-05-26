@@ -108,7 +108,10 @@ DEFAULT_CALENDAR_DEFINITIONS: tuple[CalendarDefinition, ...] = (
         ),
     },
     {
-        "id": "4b779996b31f84a4dc520b2f0255e437863f0c826f3249c05f5f13f020fe3ba6@group.calendar.google.com",
+        "id": (  # noqa: E501
+            "4b779996b31f84a4dc520b2f0255e437863f0c826f3249c05f5f13f020fe3ba6"
+            "@group.calendar.google.com"
+        ),
         "label": "Mom Work Schedule",
         "access": "reader",
         "aliases": (
@@ -120,7 +123,10 @@ DEFAULT_CALENDAR_DEFINITIONS: tuple[CalendarDefinition, ...] = (
         ),
     },
     {
-        "id": "0d02885a194bb2bfab4573ac6188f079498c768aa22659656b248962d03af863@group.calendar.google.com",
+        "id": (  # noqa: E501
+            "0d02885a194bb2bfab4573ac6188f079498c768aa22659656b248962d03af863"
+            "@group.calendar.google.com"
+        ),
         "label": "Dad Work Schedule",
         "access": "owner",
         "aliases": (

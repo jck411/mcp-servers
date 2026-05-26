@@ -109,10 +109,15 @@ async def test_curation_api_action_routes_accept_slash_ids(
     monkeypatch.setattr(knowledge_api, "_vectors", SimpleNamespace())
     monkeypatch.setattr(knowledge_api, "_db", knowledge_db)
 
+    token = knowledge_api._get_api_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     transport = httpx.ASGITransport(app=knowledge_api.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         detail = await client.get("/api/curation/item/wiki%3Amerge_candidate%3Afamily%2Fsanja")
-        reject = await client.post("/api/curation/reject/wiki%3Amerge_candidate%3Afamily%2Fsanja")
+        reject = await client.post(
+            "/api/curation/reject/wiki%3Amerge_candidate%3Afamily%2Fsanja",
+            headers=headers,
+        )
 
     assert detail.status_code == 200
     assert detail.json()["item"]["id"] == item_id
@@ -244,7 +249,10 @@ async def test_temporal_question_pack_asks_about_status_not_generic_time_bound(
     await knowledge_db.curation_upsert(
         kind="temporal_fact_cleanup",
         title="Review temporal status for finances/msft_position_current_as_of_2026_05_19",
-        summary="This fact contains an explicit expiry/end cue but has no structured valid_until date.",
+        summary=(
+            "This fact contains an explicit expiry/end cue"
+            " but has no structured valid_until date."
+        ),
         source_refs=[{
             "type": "fact",
             "domain": "finances",
@@ -256,7 +264,10 @@ async def test_temporal_question_pack_asks_about_status_not_generic_time_bound(
 
     packs = await build_curation_question_packs(knowledge_db, limit=10)
 
-    pack = next(pack for pack in packs if pack["id"] == "pack-temporal-fact-cleanup-finances-validity-review")
+    pack = next(
+        pack for pack in packs
+        if pack["id"] == "pack-temporal-fact-cleanup-finances-validity-review"
+    )
     assert pack["title"] == "finances temporal status review"
     assert "real expiry/end date" in pack["question"]
     assert "Only add valid_until for explicit expiry/end boundaries" in pack["suggested_resolution"]

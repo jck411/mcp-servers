@@ -48,6 +48,25 @@ cp "${REPO_DIR}/deploy/mcp-knowledge-wiki-midday.timer" /etc/systemd/system/
 chmod +x "${REPO_DIR}/deploy/backup.sh" "${REPO_DIR}/deploy/healthcheck.sh"
 systemctl daemon-reload
 
+echo "=== Validating server names ==="
+for server in "${SERVERS[@]}"; do
+    if [[ "$server" == *-* ]]; then
+        echo "  ❌ ${server}: hyphenated names are invalid (Python modules use underscores, e.g. knowledge_admin)" >&2
+        echo "     Use the underscore form instead. Aborting." >&2
+        exit 1
+    fi
+done
+
+echo "=== Verifying server modules exist ==="
+for server in "${SERVERS[@]}"; do
+    if ! python -c "from importlib import import_module; import_module(f'servers.{server}')" 2>/dev/null; then
+        echo "  ❌ servers.${server}: module not found — cannot enable" >&2
+        echo "     Ensure servers/${server}/__init__.py or servers/${server}.py exists. Aborting." >&2
+        exit 1
+    fi
+    echo "  ✅ servers.${server}"
+done
+
 echo "=== Creating per-server environment files ==="
 for server in "${SERVERS[@]}"; do
     port="${PORT_MAP[$server]:-}"

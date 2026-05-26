@@ -240,7 +240,7 @@ async def _fallback_scrape(url: str, max_length: int = 0) -> str:
     except ImportError:
         raise RuntimeError(
             "Neither FIRECRAWL_API_KEY nor trafilatura available for page scraping"
-        )
+        ) from None
 
     client = await _get_client()
     resp = await client.get(url, timeout=FETCH_TIMEOUT)
@@ -536,7 +536,9 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Web Search MCP Server")
-    parser.add_argument("--transport", default="streamable-http", choices=["streamable-http", "stdio"])
+    parser.add_argument(
+        "--transport", default="streamable-http", choices=["streamable-http", "stdio"]
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT)
 

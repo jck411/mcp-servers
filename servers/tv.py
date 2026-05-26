@@ -163,9 +163,9 @@ async def _get_remote_client(room: str):
     try:
         await remote.async_connect()
     except InvalidAuth:
-        raise ValueError(f"Not paired with {device['name']}. Run pairing first.")
+        raise ValueError(f"Not paired with {device['name']}. Run pairing first.") from None
     except CannotConnect:
-        raise ValueError(f"Cannot reach {device['name']} at {device['ip']}")
+        raise ValueError(f"Cannot reach {device['name']} at {device['ip']}") from None
 
     return remote
 

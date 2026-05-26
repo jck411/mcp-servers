@@ -94,7 +94,7 @@ async def _get_client(force_refresh: bool = False) -> MonarchMoney:
             except RequireMFAException:
                 raise MonarchAuthError(
                     "MFA required but no secret provided. Please update credentials."
-                )
+                ) from None
 
             mm.save_session(str(session_file))
 
