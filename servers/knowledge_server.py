@@ -180,6 +180,8 @@ async def knowledge_fact_set(
     review_after: str | None = None,
     origin_type: str = "chat",
     origin_ref: str | None = None,
+    fact_type: str = "note",
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Store a structured fact in a domain. Upserts — same key overwrites.
 
@@ -187,8 +189,14 @@ async def knowledge_fact_set(
     would be unreliable for. Examples: "usda_zone" = "7b",
     "fasting_glucose_2026_03" = "95 mg/dL", "monthly_budget" = "5000".
 
+    IMPORTANT — Domain vs Type:
+    - **domain** = the life area this belongs to (home, career, health, etc.)
+    - **fact_type** = what kind of thing it is (task, event, preference, etc.)
+    - A yard task belongs in domain "home" with fact_type "task" and tags ["yard"].
+    - Never use "tasks" as a domain. Tasks are a TYPE, not a life area.
+
     Args:
-        domain: Domain this fact belongs to.
+        domain: Domain this fact belongs to (life area, not category).
         key: Fact identifier (e.g. "usda_zone", "blood_type").
         value: The fact value.
         source: Where this fact came from (e.g. "lab report 2026-03-15").
@@ -199,6 +207,11 @@ async def knowledge_fact_set(
         review_after: ISO date/time when this fact should be rechecked.
         origin_type: Provenance category. Defaults to "chat" for MCP writes.
         origin_ref: Provenance reference. Defaults to today's date for chat writes.
+        fact_type: What kind of fact: task, event, plan, preference, identity,
+            state, reference, or note (default). Use "task" for actionable items,
+            "event" for time-bound occurrences, "plan" for aspirational goals.
+        tags: Cross-cutting labels for sub-categorization (e.g. ["yard", "driveway"]).
+            Used for filtering within a domain.
     """
     settings, embeddings, sparse_encoder, vectors, db = _require_ready()
 
@@ -211,6 +224,7 @@ async def knowledge_fact_set(
     fact_id = await db.fact_set(
         domain, key, value, source, confidence, valid_from, valid_until,
         as_of, review_after, origin_type, origin_ref,
+        fact_type=fact_type, tags=tags,
     )
 
     # Embed fact as a derived vector for semantic search.
@@ -229,6 +243,8 @@ async def knowledge_fact_set(
         "domain": domain,
         "key": key,
         "value": value,
+        "fact_type": fact_type,
+        "tags": tags or [],
     }
 
 

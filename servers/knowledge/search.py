@@ -389,6 +389,8 @@ async def search_knowledge(
         "origin_type": fact.get("origin_type"),
         "origin_ref": fact.get("origin_ref"),
         "last_confirmed_at": fact.get("last_confirmed_at"),
+        "fact_type": fact.get("type") or "note",
+        "tags": fact.get("tags") or [],
     } for fact in facts]
     all_fact_results = [*fact_results, *vector_fact_results]
 

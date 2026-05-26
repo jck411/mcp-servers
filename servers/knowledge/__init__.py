@@ -14,6 +14,7 @@ from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
 from servers.knowledge.settings import (
     DEFAULT_HTTP_PORT,
     FACT_COLUMNS,
+    FACT_TYPES,
     PROJECT_ROOT,
     KnowledgeSettings,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "DEFAULT_HTTP_PORT",
     "EmbeddingClient",
     "FACT_COLUMNS",
+    "FACT_TYPES",
     "KnowledgeSettings",
     "PROJECT_ROOT",
     "add_fact_temporal_status",

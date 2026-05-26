@@ -11,8 +11,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 FACT_COLUMNS = (
     "domain, key, value, source, confidence, valid_from, valid_until, as_of, "
-    "review_after, origin_type, origin_ref, last_confirmed_at, updated_at"
+    "review_after, origin_type, origin_ref, last_confirmed_at, updated_at, "
+    "type, tags"
 )
+
+# Valid fact types — controls what the LLM can classify facts as.
+FACT_TYPES = frozenset({
+    "task",        # Actionable item with status tracking
+    "event",       # Time-bound occurrence (has valid_from/valid_until)
+    "plan",        # Aspirational / uncommitted intention
+    "preference",  # Durable personal preference
+    "identity",    # Permanent or semi-permanent personal facts
+    "state",       # Observable current condition (uses as_of)
+    "reference",   # Lookup data: contacts, account numbers, etc.
+    "note",        # Default — anything that doesn't fit above
+})
 
 # Default port for HTTP transport
 DEFAULT_HTTP_PORT = 9017

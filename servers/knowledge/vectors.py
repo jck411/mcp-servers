@@ -68,6 +68,7 @@ class KnowledgeVectorStore:
             ("source_id", PayloadSchemaType.KEYWORD),
             ("source_type", PayloadSchemaType.KEYWORD),
             ("chunk_index", PayloadSchemaType.INTEGER),
+            ("fact_type", PayloadSchemaType.KEYWORD),
         ]
         for field, schema in indexes:
             with contextlib.suppress(Exception):
@@ -157,10 +158,10 @@ class KnowledgeVectorStore:
     ) -> None:
         """Embed a structured fact into Qdrant as a single derived vector.
 
-        The fact is enriched with domain context, temporal metadata, and source
-        provenance to improve semantic retrieval. The Qdrant point uses
-        type=fact and fact_id, which the maintenance scanner recognises as a
-        separate identity scheme (not a source chunk).
+        The fact is enriched with domain context, temporal metadata, type,
+        tags, and source provenance to improve semantic retrieval. The Qdrant
+        point uses type=fact and fact_id, which the maintenance scanner
+        recognises as a separate identity scheme (not a source chunk).
         """
         domain = str(fact.get("domain", ""))
         key = str(fact.get("key", ""))
@@ -169,12 +170,28 @@ class KnowledgeVectorStore:
             return
 
         fact_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain}:{key}"))
+        fact_type = str(fact.get("type") or "note")
+
+        # Parse tags — may be a JSON string or already a list
+        raw_tags = fact.get("tags")
+        if isinstance(raw_tags, str):
+            import json
+            try:
+                tags = json.loads(raw_tags)
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+        elif isinstance(raw_tags, list):
+            tags = raw_tags
+        else:
+            tags = []
 
         # Build enriched text for embedding — mirrors the old vectorisation
         # payload but is generated deterministically from the fact row.
-        parts = [f"Structured fact in {domain} domain."]
+        parts = [f"Structured {fact_type} fact in {domain} domain."]
         readable_key = key.replace("_", " ")
         parts.append(f"{readable_key}: {value}.")
+        if tags:
+            parts.append(f"Tags: {', '.join(tags)}.")
         if fact.get("source"):
             parts.append(f"Source: {fact['source']}.")
         temporal_parts: list[str] = []
@@ -212,6 +229,7 @@ class KnowledgeVectorStore:
         chunk = {
             "id": fact_id,
             "type": "fact",
+            "fact_type": fact_type,
             "domain": domain,
             "fact_id": fact_id,
             "key": key,
@@ -228,6 +246,7 @@ class KnowledgeVectorStore:
             "valid_until": fact.get("valid_until"),
             "as_of": fact.get("as_of"),
             "review_after": fact.get("review_after"),
+            "tags": tags,
             "updated_at": fact.get("updated_at") or now,
             "created_at": fact.get("created_at") or now,
             "chunk_index": 0,

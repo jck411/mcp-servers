@@ -17,7 +17,7 @@ from typing import Any
 
 import aiosqlite
 
-from servers.knowledge.settings import FACT_COLUMNS
+from servers.knowledge.settings import FACT_COLUMNS, FACT_TYPES
 from servers.knowledge.temporal import add_fact_temporal_status
 
 
@@ -41,6 +41,11 @@ class KnowledgeDB:
     """SQLite store for domains, facts, and source tracking."""
 
     _DOMAIN_COLUMNS = "name, description, related_domains, created_at, archived"
+    _FACT_COLUMNS_QUALIFIED = (
+        "f.domain, f.key, f.value, f.source, f.confidence, f.valid_from, "
+        "f.valid_until, f.as_of, f.review_after, f.origin_type, f.origin_ref, "
+        "f.last_confirmed_at, f.updated_at, f.type, f.tags"
+    )
     _SOURCE_COLUMNS = (
         "id, domain, source_type, filename, content_hash, chunk_count, "
         "ingested_at, stored_path, media_type, size_bytes"
@@ -74,6 +79,20 @@ class KnowledgeDB:
             "created_at": row["created_at"],
             "archived": bool(row["archived"]),
         }
+
+    @staticmethod
+    def _decode_fact_row(row: aiosqlite.Row) -> dict[str, Any]:
+        """Decode a fact row, parsing tags JSON and adding temporal status."""
+        fact = add_fact_temporal_status(dict(row))
+        raw_tags = fact.get("tags")
+        if raw_tags and isinstance(raw_tags, str):
+            try:
+                fact["tags"] = json.loads(raw_tags)
+            except (json.JSONDecodeError, TypeError):
+                fact["tags"] = []
+        elif not raw_tags:
+            fact["tags"] = []
+        return fact
 
     @staticmethod
     def _decode_wiki_page_row(row: aiosqlite.Row) -> dict[str, Any]:
@@ -232,7 +251,7 @@ class KnowledgeDB:
         await self._conn.commit()
 
     async def _ensure_fact_metadata_columns(self) -> None:
-        """Add fact provenance columns to older Knowledge databases."""
+        """Add fact provenance and classification columns to older Knowledge databases."""
         assert self._conn is not None
         cursor = await self._conn.execute("PRAGMA table_info(facts)")
         existing = {str(row["name"]) for row in await cursor.fetchall()}
@@ -242,12 +261,18 @@ class KnowledgeDB:
             "origin_type": "TEXT NOT NULL DEFAULT 'unknown'",
             "origin_ref": "TEXT",
             "last_confirmed_at": "TEXT",
+            "type": "TEXT NOT NULL DEFAULT 'note'",
+            "tags": "TEXT",
         }
         for column, declaration in additions.items():
             if column not in existing:
                 await self._conn.execute(
                     f"ALTER TABLE facts ADD COLUMN {column} {declaration}"  # noqa: S608
                 )
+        # Index for cross-domain type queries (e.g. "show all tasks")
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(type)"
+        )
 
     async def _ensure_source_metadata_columns(self) -> None:
         """Add raw-file metadata columns to older Knowledge databases."""
@@ -355,19 +380,34 @@ class KnowledgeDB:
         review_after: str | None = None,
         origin_type: str = "unknown",
         origin_ref: str | None = None,
+        fact_type: str = "note",
+        tags: list[str] | None = None,
     ) -> str:
-        """Set a fact. Upserts by (domain, key). Returns fact ID."""
+        """Set a fact. Upserts by (domain, key). Returns fact ID.
+
+        Args:
+            fact_type: Classification of the fact — task, event, plan,
+                preference, identity, state, reference, or note (default).
+            tags: Optional cross-cutting labels (e.g. ["yard", "driveway"]).
+                Stored as a JSON array string.
+        """
         assert self._conn is not None
         now = datetime.now(UTC).isoformat()
         fact_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{domain}:{key}"))
+
+        # Validate and normalise type
+        clean_type = str(fact_type or "note").strip().lower()
+        if clean_type not in FACT_TYPES:
+            clean_type = "note"
+        tags_json = json.dumps(sorted(set(tags))) if tags else None
 
         await self._conn.execute(
             """
             INSERT INTO facts (id, domain, key, value, source, confidence,
                                valid_from, valid_until, as_of, review_after,
                                origin_type, origin_ref, last_confirmed_at,
-                               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                               created_at, updated_at, type, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
             ON CONFLICT(domain, key) DO UPDATE SET
                 last_confirmed_at = CASE
                     WHEN facts.value = excluded.value THEN excluded.updated_at
@@ -382,10 +422,13 @@ class KnowledgeDB:
                 review_after = excluded.review_after,
                 origin_type = excluded.origin_type,
                 origin_ref = excluded.origin_ref,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                type = excluded.type,
+                tags = excluded.tags
             """,
             (fact_id, domain, key, value, source, confidence,
-             valid_from, valid_until, as_of, review_after, origin_type, origin_ref, now, now),
+             valid_from, valid_until, as_of, review_after, origin_type, origin_ref,
+             now, now, clean_type, tags_json),
         )
         await self._conn.commit()
         return fact_id
@@ -408,14 +451,61 @@ class KnowledgeDB:
         await self._conn.commit()
         return cursor.rowcount > 0
 
-    async def facts_list(self, domain: str) -> list[dict[str, Any]]:
+    async def facts_list(
+        self,
+        domain: str,
+        *,
+        fact_type: str | None = None,
+    ) -> list[dict[str, Any]]:
         assert self._conn is not None
+        conditions = ["domain = ?"]
+        params: list[Any] = [domain]
+        if fact_type:
+            conditions.append("type = ?")
+            params.append(fact_type)
+        where = " AND ".join(conditions)
         cursor = await self._conn.execute(
-            f"SELECT {FACT_COLUMNS} FROM facts WHERE domain = ? ORDER BY key",
-            (domain,),
+            f"SELECT {FACT_COLUMNS} FROM facts WHERE {where} ORDER BY key",  # noqa: S608
+            params,
         )
         rows = await cursor.fetchall()
-        return [add_fact_temporal_status(dict(row)) for row in rows]
+        return [self._decode_fact_row(row) for row in rows]
+
+    async def facts_by_type(
+        self,
+        fact_type: str,
+        *,
+        domains: list[str] | None = None,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return all facts of a given type across all (or specified) domains.
+
+        Useful for cross-domain queries like "show all my tasks".
+        """
+        assert self._conn is not None
+        conditions = ["f.type = ?"]
+        params: list[Any] = [fact_type]
+        if domains:
+            placeholders = ",".join("?" for _ in domains)
+            conditions.append(f"f.domain IN ({placeholders})")
+            params.extend(domains)
+        if not include_archived:
+            conditions.append(
+                "(d.archived = 0 OR d.archived IS NULL)"
+            )
+        where = " AND ".join(conditions)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {self._FACT_COLUMNS_QUALIFIED}
+            FROM facts f
+            LEFT JOIN domains d ON f.domain = d.name
+            WHERE {where}
+            ORDER BY f.domain, f.key
+            """,  # noqa: S608
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [self._decode_fact_row(row) for row in rows]
 
     async def facts_search(self, domains: list[str], keys: list[str]) -> list[dict[str, Any]]:
         """Search facts across multiple domains by substring match on key OR value."""
@@ -440,7 +530,7 @@ class KnowledgeDB:
             params,
         )
         rows = await cursor.fetchall()
-        return [add_fact_temporal_status(dict(row)) for row in rows]
+        return [self._decode_fact_row(row) for row in rows]
 
     # -- Sources --
 
