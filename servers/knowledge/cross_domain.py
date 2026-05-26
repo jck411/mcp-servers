@@ -223,8 +223,9 @@ _SIGNAL_DEFS: list[dict[str, Any]] = [
         "name": "tasks",
         "detect": lambda q, txt, now: bool(_TASK_RE.search(txt)),
         "meta": lambda q, txt, now: {},
-        "enrichment_query": "task todo deadline priority pending",
+        "enrichment_query": None,  # handled by _typed_task_enrichment
         "tool_hint": None,
+        "custom_handler": "_typed_task_enrichment",
     },
 ]
 
@@ -526,6 +527,78 @@ async def _broad_enrichment_search(
         return {"signal": signal_name, "error": "search failed"}
 
 
+async def _typed_task_enrichment(
+    primary_domains: list[str],
+    primary_facts: list[dict[str, Any]],
+    *,
+    db: KnowledgeDB,
+) -> dict[str, Any]:
+    """Pull all task-typed facts from the DB across all active domains.
+
+    This replaces the old broad search approach — instead of hoping
+    semantic search finds scattered tasks, we query the type index directly.
+    Results include the domain and tags so the model can group them by
+    life area.
+    """
+    try:
+        from servers.knowledge.temporal import fact_temporal_status
+
+        tasks = await db.facts_by_type("task")
+        events = await db.facts_by_type("event")
+        plans = await db.facts_by_type("plan")
+
+        # Deduplicate against primary facts
+        primary_keys = {(f.get("domain"), f.get("key")) for f in primary_facts}
+        tasks = [t for t in tasks if (t["domain"], t["key"]) not in primary_keys]
+        events = [e for e in events if (e["domain"], e["key"]) not in primary_keys]
+        plans = [p for p in plans if (p["domain"], p["key"]) not in primary_keys]
+
+        # Add temporal status for filtering
+        now_dt = __import__("datetime").datetime.now(
+            __import__("shared.time_context", fromlist=["EASTERN_TIMEZONE"]).EASTERN_TIMEZONE
+        )
+        for item_list in (tasks, events, plans):
+            for item in item_list:
+                if "temporal_status" not in item:
+                    item["temporal_status"] = fact_temporal_status(item, now_dt)
+
+        # Filter to current/upcoming by default (hide expired)
+        active_tasks = [
+            t for t in tasks
+            if t.get("temporal_status") not in ("expired", "historical")
+        ]
+        active_events = [
+            e for e in events
+            if e.get("temporal_status") not in ("expired", "historical")
+        ]
+        active_plans = plans  # Plans rarely expire
+
+        task_domains = sorted({t["domain"] for t in active_tasks})
+        return {
+            "signal": "tasks",
+            "tasks": active_tasks[:20],
+            "upcoming_events": active_events[:10],
+            "plans": active_plans[:10],
+            "task_count": len(active_tasks),
+            "event_count": len(active_events),
+            "plan_count": len(active_plans),
+            "domains_with_tasks": task_domains,
+            "note": (
+                "These are typed facts (type=task/event/plan) from across "
+                "all life-area domains. Use tags to group by sub-category."
+            ),
+        }
+    except Exception:
+        log.warning("typed_task_enrichment_failed", exc_info=True)
+        return {"signal": "tasks", "error": "typed task query failed"}
+
+
+# Custom handler registry — maps handler name to async function
+_CUSTOM_HANDLERS = {
+    "_typed_task_enrichment": _typed_task_enrichment,
+}
+
+
 # ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
@@ -566,9 +639,20 @@ async def enrich_context(
 
     # --- Layer 1: Signal-based cross-domain searches ---
     for signal in signals:
+        key = f"{signal['name']}_context"
+
+        # Check for custom handler first (e.g. typed task queries)
+        custom = signal.get("custom_handler")
+        if custom and custom in _CUSTOM_HANDLERS:
+            enrichment[key] = await _CUSTOM_HANDLERS[custom](
+                searched_domains, primary_facts, db=db,
+            )
+            if signal.get("meta"):
+                enrichment[key]["meta"] = signal["meta"]
+            continue
+
         eq = signal.get("enrichment_query")
         if eq:
-            key = f"{signal['name']}_context"
             enrichment[key] = await _broad_enrichment_search(
                 signal["name"],
                 eq,
