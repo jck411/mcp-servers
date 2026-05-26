@@ -15,10 +15,8 @@ from typing import Any
 
 from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
-from servers.knowledge.ingestion import _ingest_file_at_path
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
-from servers.knowledge_source_files import resolve_source_path
 from shared.logging_config import get_logger
 
 log = get_logger("knowledge")
@@ -26,23 +24,19 @@ log = get_logger("knowledge")
 
 SUPPORTED_CURATION_ACTIONS = {
     "archive_domain",
-    "delete_source",
     "domain_archive",
     "fact_delete",
     "fact_set",
     "fact_update_validity",
     "flag_for_review",
-    "ingest_text",
     "merge_candidate",
     "no_action",
-    "reingest_source",
     "review_and_promote_or_archive",
     "split_candidate",
 }
 
 DESTRUCTIVE_CURATION_ACTIONS = {
     "archive_domain",
-    "delete_source",
     "domain_archive",
     "fact_delete",
 }
@@ -457,105 +451,7 @@ async def apply_curation_pack_resolution(
     }
 
 
-async def _ingest_curation_text(
-    *,
-    settings: KnowledgeSettings,
-    embeddings: EmbeddingClient,
-    sparse_encoder: BM25SparseEncoder,
-    vectors: KnowledgeVectorStore,
-    db: KnowledgeDB,
-    domain: str,
-    content: str,
-    source_name: str,
-    source_type: str = "curated_note",
-) -> dict[str, Any]:
-    if not await db.domain_exists(domain):
-        raise ValueError(f"Domain '{domain}' not found")
 
-    chunks_text = chunk_text(content, settings.chunk_max_chars, settings.chunk_overlap)
-    if not chunks_text:
-        raise ValueError("No content to ingest")
-
-    content_hash = compute_text_hash(content)
-    if await db.source_exists(content_hash, domain=domain):
-        return {
-            "action": "ingest_text",
-            "status": "skipped",
-            "reason": "identical content already ingested",
-        }
-
-    sparse_encoder.fit_batch(chunks_text)
-    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
-    dense_vecs = await embeddings.embed_batch(chunks_text)
-
-    source_id = str(uuid.uuid4())
-    chunk_payloads = []
-    for i, text in enumerate(chunks_text):
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_{i}"))
-        chunk_payloads.append({
-            "id": chunk_id,
-            "domain": domain,
-            "source_id": source_id,
-            "source_type": source_type,
-            "source_name": source_name,
-            "chunk_index": i,
-            "content": text,
-            "ingested_at": datetime.now(UTC).isoformat(),
-        })
-
-    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
-    await db.source_add(source_id, domain, source_type, source_name, content_hash, len(chunks_text))
-    return {
-        "action": "ingest_text",
-        "status": "applied",
-        "domain": domain,
-        "source_id": source_id,
-        "source_name": source_name,
-        "chunks": len(chunks_text),
-    }
-
-
-async def _reingest_source_action(
-    *,
-    settings: KnowledgeSettings,
-    embeddings: EmbeddingClient,
-    sparse_encoder: BM25SparseEncoder,
-    vectors: KnowledgeVectorStore,
-    db: KnowledgeDB,
-    source_id: str,
-) -> dict[str, Any]:
-    source = await db.source_get(source_id)
-    if not source:
-        raise ValueError(f"Source '{source_id}' not found")
-
-    source_path = resolve_source_path(settings.knowledge_path, source)
-    if not source_path:
-        raise ValueError(f"Stored source file for '{source_id}' was not found")
-
-    result = await _ingest_file_at_path(
-        settings,
-        embeddings,
-        sparse_encoder,
-        vectors,
-        db,
-        dest=source_path,
-        domain=str(source["domain"]),
-        force=True,
-    )
-    if result.get("success") is not True:
-        raise ValueError(f"Reingest failed for '{source_id}': {result!r}")
-
-    await vectors.delete_by_source(source_id)
-    await db.source_remove(source_id)
-    return {
-        "action": "reingest_source",
-        "status": "applied",
-        "old_source_id": source_id,
-        "new_source_id": result.get("source_id"),
-        "file": result.get("file"),
-        "domain": result.get("domain"),
-        "chunks_stored": result.get("chunks_stored", 0),
-    }
 
 
 async def execute_curation_action(
@@ -620,33 +516,6 @@ async def execute_curation_action(
             raise ValueError(f"Fact '{domain}/{key}' not found")
         return {"action": action_type, "status": "applied", "domain": domain, "key": key}
 
-    if action_type == "ingest_text":
-        return await _ingest_curation_text(
-            settings=settings,
-            embeddings=embeddings,
-            sparse_encoder=sparse_encoder,
-            vectors=vectors,
-            db=db,
-            domain=str(action["domain"]),
-            content=str(action["content"]),
-            source_name=str(action.get("source_name") or "curated_conversation_note"),
-            source_type=str(action.get("source_type") or "curated_note"),
-        )
-
-    if action_type == "delete_source":
-        source_id = str(action.get("target_id") or action.get("source_id") or "")
-        if not source_id:
-            raise ValueError("delete_source action requires target_id or source_id")
-        result = await delete_source_record(settings, vectors, db, source_id)
-        if not result["success"]:
-            raise ValueError(result["error"])
-        return {
-            "action": action_type,
-            "status": "applied",
-            "source_id": source_id,
-            "source": result["source"],
-        }
-
     if action_type in {"archive_domain", "domain_archive"}:
         domain = str(action.get("target_id") or action.get("domain") or "")
         if not domain:
@@ -656,18 +525,12 @@ async def execute_curation_action(
             raise ValueError(f"Domain '{domain}' not found or already archived")
         return {"action": action_type, "status": "applied", "domain": domain}
 
-    if action_type == "reingest_source":
-        source_id = str(action.get("target_id") or action.get("source_id") or "")
-        if not source_id:
-            raise ValueError("reingest_source action requires target_id or source_id")
-        return await _reingest_source_action(
-            settings=settings,
-            embeddings=embeddings,
-            sparse_encoder=sparse_encoder,
-            vectors=vectors,
-            db=db,
-            source_id=source_id,
-        )
+    if action_type in {"ingest_text", "delete_source", "reingest_source"}:
+        return {
+            "action": action_type,
+            "status": "skipped",
+            "reason": "Source file operations are no longer supported",
+        }
 
     if action_type in REVIEW_ONLY_CURATION_ACTIONS:
         return {"action": action_type, "status": "reviewed"}

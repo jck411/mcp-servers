@@ -19,12 +19,7 @@ import pytest
 from servers.knowledge import (
     BM25SparseEncoder,
     KnowledgeDB,
-    _ingest_file_at_path,
-    _is_likely_binary,
-    _validate_text_ingest_inputs,
-    chunk_text,
     classify_search_temporal_intent,
-    compute_text_hash,
     fact_temporal_status,
     resolve_search_domains,
     search_fact_keywords,
@@ -33,149 +28,7 @@ from servers.knowledge import (
 import servers.knowledge.wiki  # noqa: E402 — for monkeypatching _call_wiki_llm
 from shared.time_context import EASTERN_TIMEZONE
 
-# ---------------------------------------------------------------------------
-# chunk_text
-# ---------------------------------------------------------------------------
 
-
-def test_chunk_text_empty_returns_empty():
-    assert chunk_text("") == []
-    assert chunk_text("   \n\n  ") == []
-
-
-def test_chunk_text_short_returns_single_chunk():
-    out = chunk_text("hello world", max_chars=1000, overlap=100)
-    assert out == ["hello world"]
-
-
-def test_chunk_text_respects_max_chars_with_long_paragraph():
-    text = "a" * 2500
-    out = chunk_text(text, max_chars=1000, overlap=200)
-    assert len(out) >= 3
-    for piece in out:
-        assert len(piece) <= 1000
-
-
-def test_chunk_text_overlap_creates_continuity():
-    # Long single paragraph forces sliding-window splitting.
-    text = "abcdefghij" * 200  # 2000 chars
-    out = chunk_text(text, max_chars=500, overlap=100)
-    # Consecutive chunks should share their overlap region.
-    assert len(out) >= 2
-    # Each chunk fits within the cap.
-    for piece in out:
-        assert len(piece) <= 500
-
-
-def test_chunk_text_paragraph_boundary_kept_when_fits():
-    # Two short paragraphs should join into one chunk under the cap.
-    text = "first paragraph here.\n\nsecond paragraph here."
-    out = chunk_text(text, max_chars=1000, overlap=100)
-    assert out == ["first paragraph here.\n\nsecond paragraph here."]
-
-
-def test_chunk_text_handles_zero_overlap():
-    text = "x" * 600
-    out = chunk_text(text, max_chars=200, overlap=0)
-    assert len(out) == 3
-    assert all(len(c) == 200 for c in out)
-
-
-async def test_ingest_file_treats_env_example_as_text(tmp_path: Path):
-    db = KnowledgeDB(tmp_path / "knowledge.db")
-    await db.initialize()
-    await db.domain_create("tech", "tech", [])
-    knowledge_root = tmp_path / "knowledge"
-    env_path = knowledge_root / "tech" / ".env.example"
-    env_path.parent.mkdir(parents=True)
-    env_path.write_text("OPENROUTER_API_KEY=\nMCP_KNOWLEDGE_API_TOKEN=\n", encoding="utf-8")
-
-    class FakeEmbeddings:
-        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return [[0.1] for _ in texts]
-
-    class FakeSparseEncoder:
-        def fit_batch(self, texts: list[str]) -> None:
-            self.texts = texts
-
-        def encode(self, text: str) -> dict[str, list[float] | list[int]]:
-            return {"indices": [0], "values": [1.0]}
-
-    class FakeVectors:
-        async def upsert_chunks(self, chunks, dense_vectors, sparse_vectors) -> None:
-            self.chunks = chunks
-
-    try:
-        vectors = FakeVectors()
-        result = await _ingest_file_at_path(
-            SimpleNamespace(
-                knowledge_path=knowledge_root,
-                chunk_max_chars=1000,
-                chunk_overlap=200,
-                ocr_enabled=False,
-            ),
-            FakeEmbeddings(),
-            FakeSparseEncoder(),
-            vectors,
-            db,
-            dest=env_path,
-            domain="tech",
-        )
-
-        assert result["success"] is True
-        assert result["chunks_stored"] == 1
-        assert result["pipeline_type"] == "text_read"
-        source = await db.source_get(result["source_id"])
-        assert source["media_type"] == "text/plain"
-        assert source["chunk_count"] == 1
-        assert vectors.chunks[0]["content"] == "OPENROUTER_API_KEY=\nMCP_KNOWLEDGE_API_TOKEN="
-    finally:
-        await db.close()
-
-
-# ---------------------------------------------------------------------------
-# compute_text_hash
-# ---------------------------------------------------------------------------
-
-
-def test_compute_text_hash_deterministic_and_distinct():
-    a = compute_text_hash("hello")
-    b = compute_text_hash("hello")
-    c = compute_text_hash("hello!")
-    assert a == b
-    assert a != c
-    assert isinstance(a, str) and len(a) >= 32
-
-
-# ---------------------------------------------------------------------------
-# _is_likely_binary
-# ---------------------------------------------------------------------------
-
-
-def test_is_likely_binary_detects_zip_magic():
-    # PK..ZIP container — also catches docx, xlsx, etc.
-    assert _is_likely_binary(b"PK\x03\x04rest...") is True
-
-
-def test_is_likely_binary_detects_png_magic():
-    assert _is_likely_binary(b"\x89PNG\r\n\x1a\n") is True
-
-
-def test_is_likely_binary_detects_mp4_ftyp():
-    # MP4/HEIC use ISO base media format with 'ftyp' at bytes 4-8.
-    assert _is_likely_binary(b"\x00\x00\x00\x18ftypmp42rest") is True
-
-
-def test_is_likely_binary_detects_null_byte():
-    assert _is_likely_binary(b"some text\x00more") is True
-
-
-def test_is_likely_binary_text_is_not_binary():
-    assert _is_likely_binary(b"hello world\nthis is plain text") is False
-
-
-def test_is_likely_binary_empty_is_not_binary():
-    assert _is_likely_binary(b"") is False
 
 
 # ---------------------------------------------------------------------------
@@ -229,42 +82,6 @@ def test_bm25_short_tokens_skipped():
     indices, _ = enc.encode("a b c")
     assert indices == []
 
-
-# ---------------------------------------------------------------------------
-# _validate_text_ingest_inputs
-# ---------------------------------------------------------------------------
-
-
-def test_validate_text_ingest_rejects_pdf_filename():
-    err = _validate_text_ingest_inputs("scan.pdf", "note")
-    assert err and "binary" in err.lower()
-
-
-def test_validate_text_ingest_rejects_image_filename():
-    err = _validate_text_ingest_inputs("photo.jpg", "note")
-    assert err and "binary" in err.lower()
-
-
-def test_validate_text_ingest_rejects_extension_as_source_type():
-    err = _validate_text_ingest_inputs("notes", "pdf")
-    assert err and "file extension" in err.lower()
-
-
-def test_validate_text_ingest_rejects_unknown_source_type():
-    err = _validate_text_ingest_inputs("notes", "identity_document")
-    assert err and "not allowed" in err.lower()
-
-
-@pytest.mark.parametrize("source_type", [
-    "note", "summary", "transcript", "research",
-    "caption", "markdown", "text", "manual", "chat", "memo",
-])
-def test_validate_text_ingest_accepts_allowed_types(source_type: str):
-    assert _validate_text_ingest_inputs("doctor visit 2026-03", source_type) is None
-
-
-def test_validate_text_ingest_accepts_plain_name_no_extension():
-    assert _validate_text_ingest_inputs("manual entry", "note") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1080,51 +897,7 @@ async def test_wiki_lint_pass_ignores_orphan_active_pages(tmp_path: Path):
         await db.close()
 
 
-async def test_ingest_file_uses_logged_extraction_pipeline(tmp_path: Path):
-    db = KnowledgeDB(tmp_path / "ingest_file.db")
-    await db.initialize()
-    try:
-        knowledge_root = tmp_path / "knowledge"
-        dest = knowledge_root / "tech" / "note.md"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("A short tech note for reingest.")
-        await db.domain_create("tech", "tech", [])
 
-        class FakeEmbeddings:
-            async def embed_batch(self, texts):
-                return [[0.1] for _ in texts]
-
-        class FakeSparseEncoder(BM25SparseEncoder):
-            pass
-
-        class FakeVectors:
-            def __init__(self):
-                self.payloads = []
-
-            async def upsert_chunks(self, payloads, dense_vecs, sparse_vecs):
-                self.payloads = payloads
-
-        vectors = FakeVectors()
-        result = await _ingest_file_at_path(
-            SimpleNamespace(
-                knowledge_path=knowledge_root,
-                chunk_max_chars=1000,
-                chunk_overlap=100,
-            ),
-            FakeEmbeddings(),
-            FakeSparseEncoder(),
-            vectors,
-            db,
-            dest=dest,
-            domain="tech",
-        )
-
-        assert result["success"] is True
-        assert result["chunks_stored"] == 1
-        assert result["pipeline_type"] == "text_read"
-        assert vectors.payloads[0]["content"] == "A short tech note for reingest."
-    finally:
-        await db.close()
 
 
 def test_context_pack_schema_accepts_missing_query_for_graceful_error():

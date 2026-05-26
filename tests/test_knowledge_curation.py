@@ -10,14 +10,9 @@ from servers.knowledge import (
     apply_curation_item,
     apply_curation_pack_resolution,
     build_curation_question_packs,
-    chunk_text,
     create_curation_queue_item,
     curation_item_has_destructive_actions,
-    delete_source_record,
-    delete_sources_for_overwrite,
-    rename_source_record,
 )
-from servers.knowledge_source_files import resolve_source_path, sanitize_source_filename
 
 
 @pytest.fixture
@@ -397,24 +392,8 @@ async def test_apply_legacy_review_curation_item_marks_reviewed(knowledge_db: Kn
     assert (await knowledge_db.curation_get("legacy-review-test"))["status"] == "applied"
 
 
-async def test_apply_reingest_source_curation_item(knowledge_db: KnowledgeDB, tmp_path: Path):
-    await knowledge_db.domain_create("tech", "Tech test domain", [])
-    knowledge_root = tmp_path / "knowledge"
-    source_path = knowledge_root / "tech" / "note.md"
-    source_path.parent.mkdir(parents=True)
-    source_path.write_text("Reindex this note for search.", encoding="utf-8")
-
-    await knowledge_db.source_add(
-        "old-source",
-        "tech",
-        "md",
-        "note.md",
-        "old-hash",
-        0,
-        "tech/note.md",
-        "text/markdown",
-        source_path.stat().st_size,
-    )
+async def test_apply_reingest_source_curation_item_skips(knowledge_db: KnowledgeDB):
+    """Since source operations are removed, reingest_source actions should skip."""
     await knowledge_db.curation_upsert(
         kind="maintenance_action",
         title="Reingest note",
@@ -422,57 +401,18 @@ async def test_apply_reingest_source_curation_item(knowledge_db: KnowledgeDB, tm
         item_id="reingest-test",
     )
 
-    class FakeEmbeddings:
-        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return [[0.1] for _ in texts]
-
-    class FakeSparseEncoder:
-        def fit_batch(self, texts: list[str]) -> None:
-            self.fitted = texts
-
-        def encode(self, text: str) -> dict[str, list[float] | list[int]]:
-            return {"indices": [0], "values": [1.0]}
-
-    class FakeVectors:
-        def __init__(self) -> None:
-            self.deleted: list[str] = []
-            self.chunks: list[dict] = []
-
-        async def upsert_chunks(self, chunks, dense_vectors, sparse_vectors) -> None:
-            self.chunks = chunks
-
-        async def delete_by_source(self, source_id: str) -> None:
-            self.deleted.append(source_id)
-
-    vectors = FakeVectors()
     result = await apply_curation_item(
         "reingest-test",
         confirmation=None,
-        settings=SimpleNamespace(
-            knowledge_path=knowledge_root,
-            chunk_max_chars=1000,
-            chunk_overlap=200,
-            ocr_enabled=False,
-        ),  # type: ignore[arg-type]
-        embeddings=FakeEmbeddings(),  # type: ignore[arg-type]
-        sparse_encoder=FakeSparseEncoder(),  # type: ignore[arg-type]
-        vectors=vectors,  # type: ignore[arg-type]
+        settings=None,  # type: ignore[arg-type]
+        embeddings=None,  # type: ignore[arg-type]
+        sparse_encoder=None,  # type: ignore[arg-type]
+        vectors=None,  # type: ignore[arg-type]
         db=knowledge_db,
     )
 
     assert result["success"] is True
-    applied = result["results"][0]
-    assert applied["action"] == "reingest_source"
-    assert applied["old_source_id"] == "old-source"
-    assert applied["new_source_id"] != "old-source"
-    assert applied["chunks_stored"] == 1
-    assert vectors.deleted == ["old-source"]
-    assert len(vectors.chunks) == 1
-    assert await knowledge_db.source_get("old-source") is None
-    new_source = await knowledge_db.source_get(applied["new_source_id"])
-    assert new_source["filename"] == "note.md"
-    assert new_source["chunk_count"] == 1
-    assert (await knowledge_db.curation_get("reingest-test"))["status"] == "applied"
+    assert result["results"][0]["status"] == "skipped"
 
 
 async def test_destructive_curation_requires_exact_confirmation(knowledge_db: KnowledgeDB):
@@ -503,210 +443,3 @@ async def test_destructive_curation_requires_exact_confirmation(knowledge_db: Kn
     assert (await knowledge_db.domain_get("core"))["archived"] is False
 
 
-async def test_delete_source_preserves_file_referenced_by_another_source(
-    knowledge_db: KnowledgeDB,
-    tmp_path: Path,
-):
-    await knowledge_db.domain_create("pets", "Pets test domain", [])
-    image_path = tmp_path / "pets" / "benji.jpg"
-    image_path.parent.mkdir()
-    image_path.write_bytes(b"new benji bytes")
-
-    await knowledge_db.source_add(
-        "old-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "old-hash",
-        0,
-        "pets/benji.jpg",
-        "image/jpeg",
-        18_883,
-    )
-    await knowledge_db.source_add(
-        "new-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "new-hash",
-        0,
-        "pets/benji.jpg",
-        "image/jpeg",
-        114_044,
-    )
-
-    class FakeVectors:
-        async def delete_by_source(self, source_id: str) -> None:
-            self.deleted_source_id = source_id
-
-    result = await delete_source_record(
-        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
-        FakeVectors(),  # type: ignore[arg-type]
-        knowledge_db,
-        "old-source",
-        delete_file=True,
-    )
-
-    assert result["success"] is True
-    assert result["deleted_files"] == []
-    assert result["preserved_files"] == ["pets/benji.jpg"]
-    assert image_path.exists()
-    assert await knowledge_db.source_get("old-source") is None
-    assert await knowledge_db.source_get("new-source") is not None
-
-
-async def test_overwrite_cleanup_removes_all_sources_for_filename(
-    knowledge_db: KnowledgeDB,
-    tmp_path: Path,
-):
-    await knowledge_db.domain_create("pets", "Pets test domain", [])
-    image_path = tmp_path / "pets" / "benji.jpg"
-    image_path.parent.mkdir()
-    image_path.write_bytes(b"old bytes")
-
-    for source_id, content_hash in (("older-source", "older-hash"), ("newer-source", "newer-hash")):
-        await knowledge_db.source_add(
-            source_id,
-            "pets",
-            "jpg",
-            "benji.jpg",
-            content_hash,
-            1,
-            "pets/benji.jpg",
-            "image/jpeg",
-            9,
-        )
-
-    class FakeVectors:
-        def __init__(self) -> None:
-            self.deleted_source_ids: list[str] = []
-
-        async def delete_by_source(self, source_id: str) -> None:
-            self.deleted_source_ids.append(source_id)
-
-    vectors = FakeVectors()
-    results = await delete_sources_for_overwrite(
-        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
-        vectors,  # type: ignore[arg-type]
-        knowledge_db,
-        "pets",
-        "benji.jpg",
-    )
-
-    assert [result["source"]["id"] for result in results] == ["newer-source", "older-source"]
-    assert vectors.deleted_source_ids == ["newer-source", "older-source"]
-    assert not image_path.exists()
-    assert await knowledge_db.source_get("older-source") is None
-    assert await knowledge_db.source_get("newer-source") is None
-
-
-async def test_rename_source_does_not_move_file_shared_by_another_source(
-    knowledge_db: KnowledgeDB,
-    tmp_path: Path,
-):
-    await knowledge_db.domain_create("pets", "Pets test domain", [])
-    image_path = tmp_path / "pets" / "benji.jpg"
-    image_path.parent.mkdir()
-    image_path.write_bytes(b"benji bytes")
-
-    await knowledge_db.source_add(
-        "old-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "old-hash",
-        0,
-        "pets/benji.jpg",
-        "image/jpeg",
-        11,
-    )
-    await knowledge_db.source_add(
-        "new-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "new-hash",
-        0,
-        "pets/benji.jpg",
-        "image/jpeg",
-        11,
-    )
-
-    class FakeVectors:
-        def __init__(self) -> None:
-            self.updated: list[tuple[str, str]] = []
-
-        async def update_source_name(self, source_id: str, source_name: str) -> None:
-            self.updated.append((source_id, source_name))
-
-    result = await rename_source_record(
-        SimpleNamespace(knowledge_path=tmp_path),  # type: ignore[arg-type]
-        FakeVectors(),  # type: ignore[arg-type]
-        knowledge_db,
-        "old-source",
-        "benji-old.jpg",
-    )
-
-    old_source = await knowledge_db.source_get("old-source")
-    new_source = await knowledge_db.source_get("new-source")
-    assert result["success"] is True
-    assert result["renamed_file"] is False
-    assert result["preserved_files"] == ["pets/benji.jpg"]
-    assert old_source["filename"] == "benji-old.jpg"
-    assert old_source["stored_path"] == "pets/benji.jpg"
-    assert new_source["filename"] == "benji.jpg"
-    assert image_path.exists()
-
-
-async def test_source_get_by_domain_filename_returns_newest_match(
-    knowledge_db: KnowledgeDB,
-):
-    await knowledge_db.domain_create("pets", "Pets test domain", [])
-    await knowledge_db.source_add(
-        "older-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "older-hash",
-        0,
-        "pets/benji.jpg",
-        "image/jpeg",
-        18_883,
-    )
-    await knowledge_db.source_add(
-        "newer-source",
-        "pets",
-        "jpg",
-        "benji.jpg",
-        "newer-hash",
-        0,
-        "pets/.sources/newer-source/benji.jpg",
-        "image/jpeg",
-        114_044,
-    )
-
-    source = await knowledge_db.source_get_by_domain_filename("pets", "benji.jpg")
-
-    assert source is not None
-    assert source["id"] == "newer-source"
-    assert source["stored_path"] == "pets/.sources/newer-source/benji.jpg"
-
-
-def test_chunk_text_splits_single_long_paragraph():
-    chunks = chunk_text("a" * 2500, max_chars=1000, overlap=100)
-
-    assert len(chunks) == 3
-    assert all(len(chunk) <= 1000 for chunk in chunks)
-    assert chunks[1].startswith("a" * 100)
-
-
-def test_source_filename_sanitizes_windows_paths_and_control_chars(tmp_path: Path):
-    assert sanitize_source_filename("C:\\fakepath\\scan\n.pdf") == "scan.pdf"
-
-    root = tmp_path / "knowledge"
-    root.mkdir()
-    outside = tmp_path / "secret.txt"
-    outside.write_text("secret")
-
-    source = {"stored_path": "../secret.txt", "domain": "core", "filename": "secret.txt"}
-    assert resolve_source_path(root, source) is None

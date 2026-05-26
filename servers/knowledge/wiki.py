@@ -16,12 +16,27 @@ import httpx
 
 from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
-from servers.knowledge.extraction import _decode_llm_json_object
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.vectors import KnowledgeVectorStore
 from shared.logging_config import get_logger
 
 log = get_logger("knowledge")
+
+
+def _decode_llm_json_object(raw_output: str) -> dict[str, Any]:
+    """Parse an LLM response that should contain a JSON object."""
+    clean = raw_output.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+        clean = re.sub(r"\n?```$", "", clean.rstrip())
+    if not clean.startswith("{"):
+        match = re.search(r"\{[\s\S]*\}", clean)
+        if match:
+            clean = match.group(0)
+    decoded, _ = json.JSONDecoder().raw_decode(clean)
+    if not isinstance(decoded, dict):
+        raise ValueError("JSON root must be an object")
+    return decoded
 
 
 WIKI_PAGE_STATUSES = frozenset({"candidate", "active", "archived"})

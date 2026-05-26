@@ -1,22 +1,11 @@
 """Standalone MCP server for personal knowledge management.
 
-Central knowledge base for life domains (health, finances, schedule, etc.)
-with semantic search, structured facts, cross-domain queries, and file ingestion.
-
-Domains are created on the fly. Each domain can declare related domains so
-cross-domain queries automatically fan out. A special "core" domain holds
-foundational personal profile facts that are implicitly included in queries.
+Central knowledge base for life domains with semantic search, structured facts,
+cross-domain queries, and wiki synthesis.
 
 Storage:
-  - Qdrant (vector search): one collection, filtered by domain
-  - SQLite (structured data): domains, facts, sources, ingest tracking
-
-Directory structure for file ingestion:
-    /opt/mcp-servers/knowledge/
-    ├── health/          → lab reports, doctor summaries
-    ├── finances/        → statements, budgets
-    ├── schedule/        → routines, commitments
-    └── gardening/       → research, plans
+  - Qdrant (vector search): fact embeddings, filtered by domain
+  - SQLite (structured data): domains, facts, wiki pages
 
 Run:
     python -m servers.knowledge --transport streamable-http --host 0.0.0.0 --port 9017
@@ -27,14 +16,13 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-from servers.knowledge_source_files import resolve_source_path, sanitize_source_filename
+
 from shared.logging_config import get_logger, logged_tool
 
 log = get_logger("knowledge")
@@ -55,11 +43,6 @@ mcp = FastMCP("knowledge", auth=_auth_provider())
 
 from servers.knowledge.cross_domain import enrich_context  # noqa: E402
 from servers.knowledge.db import KnowledgeDB  # noqa: E402
-from servers.knowledge.extraction import chunk_text, compute_text_hash  # noqa: E402
-from servers.knowledge.ingestion import (  # noqa: E402
-    _ingest_file_at_path,
-    _validate_text_ingest_inputs,
-)
 from servers.knowledge.search import search_knowledge  # noqa: E402
 from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
 from servers.knowledge.wiki import (  # noqa: E402
@@ -286,169 +269,6 @@ async def knowledge_facts_list(domain: str) -> dict[str, Any]:
     return {"success": True, "domain": domain, "count": len(facts), "facts": facts}
 
 
-# ---------------------------------------------------------------------------
-# MCP Tools — Ingestion
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool("knowledge_ingest_text")
-@logged_tool(log)
-async def knowledge_ingest_text(
-    domain: str,
-    content: str,
-    source_name: str = "manual",
-    source_type: str = "note",
-) -> dict[str, Any]:
-    """Ingest free-form text into a domain's knowledge base.
-
-    Text is chunked, embedded, and stored for semantic search.
-    Use this for notes, summaries, research, doctor's advice, etc.
-
-    Args:
-        domain: Domain to ingest into.
-        content: The text content to ingest.
-        source_name: Label for this source (e.g. "Dr. Smith visit notes 2026-03").
-        source_type: Type of source (note, summary, transcript, research, etc.).
-    """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-
-    if not await db.domain_exists(domain):
-        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
-
-    validation_error = _validate_text_ingest_inputs(source_name, source_type)
-    if validation_error:
-        return {"success": False, "error": validation_error}
-
-    content_hash = compute_text_hash(content)
-
-    if await db.source_exists(content_hash, domain=domain):
-        return {
-            "success": True,
-            "message": "Content already ingested (identical hash).",
-            "chunks": 0,
-        }
-
-    # Chunk and embed
-    chunks_text = chunk_text(content, settings.chunk_max_chars, settings.chunk_overlap)
-    if not chunks_text:
-        return {"success": False, "error": "No content to ingest"}
-
-    sparse_encoder.fit_batch(chunks_text)
-    sparse_vecs = [sparse_encoder.encode(t) for t in chunks_text]
-    dense_vecs = await embeddings.embed_batch(chunks_text)
-
-    source_id = str(uuid.uuid4())
-    chunk_payloads = []
-    for i, text in enumerate(chunks_text):
-        chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{source_id}_{i}"))
-        chunk_payloads.append({
-            "id": chunk_id,
-            "domain": domain,
-            "source_id": source_id,
-            "source_type": source_type,
-            "source_name": source_name,
-            "chunk_index": i,
-            "content": text,
-            "ingested_at": datetime.now(UTC).isoformat(),
-        })
-
-    await vectors.upsert_chunks(chunk_payloads, dense_vecs, sparse_vecs)
-    await db.source_add(source_id, domain, source_type, source_name, content_hash, len(chunks_text))
-
-    return {
-        "success": True,
-        "source_id": source_id,
-        "domain": domain,
-        "source_name": source_name,
-        "chunks": len(chunks_text),
-        "message": f"Ingested {len(chunks_text)} chunks into '{domain}'.",
-    }
-
-
-@mcp.tool("knowledge_ingest_file")
-@logged_tool(log)
-async def knowledge_ingest_file(
-    domain: str,
-    filename: str | None = None,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Ingest file(s) from a domain's knowledge directory.
-
-    Files are extracted (PDF, images via OCR, text, CSV), chunked, embedded,
-    and stored for semantic search.
-
-    The knowledge directory is: <knowledge_path>/<domain>/
-    Place files there before calling this tool.
-
-    Args:
-        domain: Domain to ingest into (must exist, directory must have files).
-        filename: Specific file to ingest. If omitted, ingests all new files.
-        force: Re-ingest even if file hasn't changed.
-    """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-
-    if not await db.domain_exists(domain):
-        return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
-
-    domain_dir = settings.knowledge_path / domain
-    if not domain_dir.exists():
-        domain_dir.mkdir(parents=True, exist_ok=True)
-        return {"success": False, "error": f"No files found. Place files in: {domain_dir}"}
-
-    # Collect files to process
-    if filename:
-        safe_name = sanitize_source_filename(filename)
-        target = domain_dir / safe_name
-        if not target.is_relative_to(domain_dir):
-            return {"success": False, "error": "Invalid filename"}
-        if not target.exists():
-            return {"success": False, "error": f"File not found: {target}"}
-        files = [target]
-    else:
-        files = sorted(
-            f for f in domain_dir.iterdir()
-            if f.is_file() and not f.name.startswith(".")
-        )
-
-    if not files:
-        return {"success": False, "error": f"No files found in {domain_dir}"}
-
-    total_chunks = 0
-    results = []
-    for file_path in files:
-        try:
-            outcome = await _ingest_file_at_path(
-                settings, embeddings, sparse_encoder, vectors, db,
-                dest=file_path, domain=domain, force=force,
-            )
-            if outcome.get("ingested"):
-                total_chunks += int(outcome.get("chunks_stored") or 0)
-                results.append({
-                    "file": file_path.name,
-                    "status": "indexed",
-                    "chunks": outcome.get("chunks_stored"),
-                })
-                log.info(
-                    "indexed file=%s chunks=%s",
-                    file_path.name, outcome.get("chunks_stored"),
-                )
-            else:
-                results.append({
-                    "file": file_path.name,
-                    "status": "skipped",
-                    "reason": outcome.get("reason", "unknown"),
-                })
-
-        except Exception as exc:
-            results.append({"file": file_path.name, "status": "error", "error": str(exc)})
-            log.exception("ingest_failed file=%s error=%r", file_path.name, exc)
-
-    return {
-        "success": True,
-        "domain": domain,
-        "total_chunks": total_chunks,
-        "files": results,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -682,79 +502,7 @@ async def knowledge_search(
     )
 
 
-@mcp.tool("knowledge_sources")
-@logged_tool(log)
-async def knowledge_sources(domain: str) -> dict[str, Any]:
-    """List all ingested sources in a domain.
 
-    Each source includes a pre-signed `download_url` and a ready-to-paste
-    `download_markdown` link. Display `download_markdown` verbatim when Jack
-    asks to download/view a file. Links expire in 15 minutes.
-
-    Args:
-        domain: Domain to list sources for.
-    """
-    settings, _, _, _, db = _require_ready()
-
-    sources = await db.sources_list(domain)
-    base = settings.api_base.rstrip("/")
-    for src in sources:
-        sid = src.get("id") or src.get("source_id")
-        if not sid:
-            continue
-        # Skip ingested-text/note rows that have no stored file to download.
-        if not src.get("stored_path"):
-            continue
-        if not resolve_source_path(settings.knowledge_path, src):
-            src["download_missing"] = True
-            src["download_error"] = "stored source file is missing on disk"
-            continue
-        filename = src.get("filename") or sid
-        try:
-            token = await db.download_token_create(sid, 900)
-        except Exception as exc:
-            src["download_missing"] = True
-            src["download_error"] = f"failed to mint download token: {exc}"
-            continue
-        url = f"{base}/api/download/{token['token']}"
-        safe_label = str(filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-        src["download_url"] = url
-        src["download_markdown"] = f"[{safe_label}]({url})"
-        src["download_expires_at"] = token["expires_at"]
-    return {"success": True, "domain": domain, "count": len(sources), "sources": sources}
-
-
-@mcp.tool("knowledge_source_download_url")
-@logged_tool(log)
-async def knowledge_source_download_url(
-    source_id: str,
-    ttl_seconds: int = 900,
-) -> dict[str, Any]:
-    """Create a temporary clickable download URL for one stored source.
-
-    Use knowledge_sources(domain) first to find the source_id. The URL can be
-    opened without an Authorization header until it expires. The returned
-    `markdown` field is a ready-to-paste link the agent should display verbatim.
-    """
-    settings, _, _, _, db = _require_ready()
-    source = await db.source_get(source_id)
-    if not source:
-        return {"success": False, "error": f"Source '{source_id}' not found"}
-    token = await db.download_token_create(source_id, ttl_seconds)
-    base = settings.api_base.rstrip("/")
-    url = f"{base}/api/download/{token['token']}"
-    filename = source.get("filename") or source_id
-    # Escape characters that would break a markdown link label.
-    safe_label = str(filename).replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    return {
-        "success": True,
-        "source_id": source_id,
-        "filename": filename,
-        "url": url,
-        "markdown": f"[{safe_label}]({url})",
-        "expires_at": token["expires_at"],
-        "ttl_seconds": token["ttl_seconds"],
-    }
 
 
 # ---------------------------------------------------------------------------

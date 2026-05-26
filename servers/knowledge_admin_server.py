@@ -30,7 +30,7 @@ from servers.knowledge.settings import KnowledgeSettings  # noqa: E402
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
 from servers.knowledge.db import KnowledgeDB  # noqa: E402
 from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
-from servers.knowledge.sources import delete_source_record, rename_source_record  # noqa: E402
+
 from servers.knowledge.wiki import WIKI_PAGE_STATUSES  # noqa: E402
 from servers.knowledge.curation import (  # noqa: E402
     apply_curation_item,
@@ -130,33 +130,6 @@ async def knowledge_domain_relate(
     return {"success": True, "domain": name, "related_domains": related_domains}
 
 
-# ---------------------------------------------------------------------------
-# MCP Tools — Source Admin
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool("knowledge_source_delete")
-@logged_tool(log)
-async def knowledge_source_delete(source_id: str, delete_file: bool = True) -> dict[str, Any]:
-    """Delete one ingested source by source_id, including its vector chunks.
-
-    Use knowledge_sources(domain) first to find the source_id. Set delete_file=false
-    only when you want to remove it from search but keep the stored file.
-    """
-    settings, _, _, vectors, db = _require_ready()
-    return await delete_source_record(settings, vectors, db, source_id, delete_file)
-
-
-@mcp.tool("knowledge_source_rename")
-@logged_tool(log)
-async def knowledge_source_rename(source_id: str, filename: str) -> dict[str, Any]:
-    """Rename one ingested source by source_id.
-
-    Updates SQLite metadata and Qdrant source_name. For standard file uploads,
-    also renames the stored raw file when it exists.
-    """
-    settings, _, _, vectors, db = _require_ready()
-    return await rename_source_record(settings, vectors, db, source_id, filename)
 
 
 # ---------------------------------------------------------------------------

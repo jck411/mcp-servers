@@ -1,21 +1,16 @@
 """REST API for the Knowledge system.
 
 Thin FastAPI wrapper around the knowledge MCP server's internal classes.
-Provides file upload, search, domain listing, and facts CRUD over plain HTTP
+Provides search, domain listing, facts CRUD, and curation over plain HTTP
 — no MCP client needed.
 
 Endpoints:
-    POST /api/upload/{domain}          Upload + ingest a file
+    GET  /api/health                    Liveness + dependency status
     GET  /api/search?q=...             Semantic search
     GET  /api/domains                  List all domains with counts
     GET  /api/facts/{domain}           List facts in a domain
     POST /api/facts/{domain}/{key}     Upsert a fact
     DELETE /api/facts/{domain}/{key}   Delete a fact
-    GET  /api/sources/{domain}         List uploaded/ingested sources
-    GET  /api/sources/{source_id}/download Download original source bytes
-    POST /api/sources/{source_id}/download Download original source bytes
-    POST /api/sources/{source_id}/download-link Create temporary direct URL
-    GET  /api/download/{token}         Download via temporary direct URL
     GET  /api/curation                 List curation queue items
     POST /api/curation                 Create/update a curation queue item
     GET  /api/curation/item/{item_id}  Get one curation queue item
@@ -32,30 +27,17 @@ from __future__ import annotations
 import argparse
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import uvicorn
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
-from fastapi.staticfiles import StaticFiles
+from fastapi import Body, Depends, FastAPI, Header, HTTPException
 
 from servers.knowledge.settings import KnowledgeSettings
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
 from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.vectors import KnowledgeVectorStore
-from servers.knowledge.ingestion import _ingest_file_at_path, extract_source_facts_single_shot
-from servers.knowledge.sources import (
-    delete_source_record,
-    delete_sources_for_overwrite,
-    rename_source_record,
-    source_download_bytes,
-)
 from servers.knowledge.search import search_knowledge
 from servers.knowledge.curation import apply_curation_item, create_curation_queue_item
-from servers.knowledge_source_files import (
-    sanitize_source_filename,
-)
 from shared.logging_config import get_logger
 
 log = get_logger("knowledge_api")
@@ -89,7 +71,6 @@ async def lifespan(app: FastAPI):
     global _settings, _embeddings, _sparse_encoder, _vectors, _db
 
     _settings = KnowledgeSettings()  # type: ignore[call-arg]
-    _settings.knowledge_path.mkdir(parents=True, exist_ok=True)
 
     _embeddings = EmbeddingClient(_settings)
     _sparse_encoder = BM25SparseEncoder()
@@ -115,18 +96,10 @@ async def lifespan(app: FastAPI):
     await _db.close()
 
 
-app = FastAPI(title="Knowledge REST API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Knowledge REST API", version="2.0.0", lifespan=lifespan)
 
-# Static upload UI (drag-drop browser page).
-# Served at /ui/.
-_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-if _WEB_DIR.is_dir():
-    app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")
-
-UPLOAD_FILE = File(...)
 REQUIRED_BODY = Body(...)
 OPTIONAL_BODY = Body(None)
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +132,6 @@ async def require_bearer(authorization: str | None = Header(None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 
-def _content_disposition(filename: str) -> str:
-    fallback = "".join(
-        ch for ch in filename
-        if 32 <= ord(ch) < 127 and ch not in {'"', "\\"}
-    ) or "download"
-    return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
-
-
 # ---------------------------------------------------------------------------
 # GET /api/health
 # ---------------------------------------------------------------------------
@@ -181,20 +146,20 @@ async def health() -> dict[str, Any]:
     settings, _, sparse_encoder, vectors, db = _require_ready()
 
     qdrant_ok = True
-    chunk_count: int | None = None
+    vector_count: int | None = None
     try:
         info = await vectors._client.get_collection(vectors._collection)
-        chunk_count = int(info.points_count or 0)
+        vector_count = int(info.points_count or 0)
     except Exception as exc:  # noqa: BLE001
         qdrant_ok = False
         log.warning("health qdrant_error=%r", exc)
 
-    source_count: int | None = None
+    fact_count: int | None = None
     try:
         assert db._conn is not None
-        cursor = await db._conn.execute("SELECT COUNT(*) FROM sources")
+        cursor = await db._conn.execute("SELECT COUNT(*) FROM facts")
         row = await cursor.fetchone()
-        source_count = int(row[0]) if row else 0
+        fact_count = int(row[0]) if row else 0
     except Exception as exc:  # noqa: BLE001
         log.warning("health sqlite_error=%r", exc)
 
@@ -202,101 +167,11 @@ async def health() -> dict[str, Any]:
         "status": "ok" if qdrant_ok else "degraded",
         "ready": True,
         "qdrant_reachable": qdrant_ok,
-        "knowledge_path": str(settings.knowledge_path),
-        "source_count": source_count,
-        "chunk_count": chunk_count,
+        "fact_count": fact_count,
+        "vector_count": vector_count,
         "bm25_doc_count": sparse_encoder._doc_count,
         "embedding_model": settings.embedding_model,
     }
-
-
-# ---------------------------------------------------------------------------
-# POST /api/upload/{domain}
-# ---------------------------------------------------------------------------
-
-
-@app.post("/api/upload/{domain}")
-async def upload_file(
-    domain: str,
-    file: UploadFile = UPLOAD_FILE,
-    ingest: bool = True,
-    overwrite: bool = False,
-    force: bool = False,
-    _auth: None = Depends(require_bearer),
-) -> dict[str, Any]:
-    """Upload a file to a domain folder and optionally ingest it immediately.
-
-    `overwrite`: allow replacing an existing file on disk with the same name.
-    `force`: re-extract / re-embed even if the content_hash already exists.
-    Default behavior on a hash hit is now to backfill stored_path onto the
-    existing source row (or skip cleanly if it already has bytes).
-    """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-
-    if not await db.domain_exists(domain):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Domain '{domain}' not found. Create it first via the MCP tools.",
-        )
-
-    filename = sanitize_source_filename(file.filename)
-    if not filename:
-        raise HTTPException(status_code=422, detail="Invalid filename")
-
-    if not Path(filename).suffix:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"File '{filename}' has no extension. "
-                "Rename it with the correct extension before uploading "
-                "(e.g. photo.jpg, scan.png, report.pdf)."
-            ),
-        )
-
-    root = settings.knowledge_path.resolve()
-    dest = (settings.knowledge_path / domain / filename).resolve()
-    if not dest.is_relative_to(root):
-        raise HTTPException(status_code=422, detail="Invalid upload path")
-
-    if dest.exists() and not overwrite:
-        existing_source = await db.source_get_by_domain_filename(domain, filename)
-        detail: dict[str, Any] = {
-            "message": (
-                f"File '{filename}' already exists in '{domain}'. "
-                "Remove the existing source first, then upload again."
-            ),
-            "file": filename,
-            "domain": domain,
-        }
-        if existing_source:
-            detail["source_id"] = existing_source["id"]
-            detail["source"] = existing_source
-        raise HTTPException(
-            status_code=409,
-            detail=detail,
-        )
-
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Upload exceeds 50 MB limit")
-
-    if overwrite:
-        await delete_sources_for_overwrite(settings, vectors, db, domain, filename)
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-
-    if not ingest:
-        return {
-            "file": filename,
-            "domain": domain,
-            "ingested": False,
-        }
-
-    return await _ingest_file_at_path(
-        settings, embeddings, sparse_encoder, vectors, db,
-        dest=dest, domain=domain, force=force,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -341,12 +216,11 @@ async def search(
 
 @app.get("/api/domains")
 async def list_domains() -> dict[str, Any]:
-    """List all knowledge domains with fact and chunk counts."""
+    """List all knowledge domains with fact counts."""
     _, _, _, vectors, db = _require_ready()
 
     domains = await db.domain_list()
     for d in domains:
-        d["chunk_count"] = await vectors.count_by_domain(d["name"])
         d["fact_count"] = len(await db.facts_list(d["name"]))
 
     return {"count": len(domains), "domains": domains}
@@ -446,144 +320,6 @@ async def delete_fact(domain: str, key: str, _auth: None = Depends(require_beare
         log.warning("fact_vector_delete_failed domain=%s key=%s", domain, key, exc_info=True)
 
     return {"deleted": True, "domain": domain, "key": key}
-
-
-
-# ---------------------------------------------------------------------------
-# Source management
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/sources/{domain}")
-async def list_sources(domain: str) -> dict[str, Any]:
-    """List ingested sources in a domain."""
-    _, _, _, _, db = _require_ready()
-
-    if not await db.domain_exists(domain):
-        raise HTTPException(status_code=404, detail=f"Domain '{domain}' not found")
-
-    sources = await db.sources_list(domain)
-    return {"domain": domain, "count": len(sources), "sources": sources}
-
-
-async def _download_source_response(source_id: str) -> Response:
-    """Build an inline file response for original source bytes."""
-    settings, _, _, vectors, db = _require_ready()
-    result = await source_download_bytes(settings, db, source_id, vectors)
-
-    if not result.get("success"):
-        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
-
-    data = result["data"]
-    filename = str(result.get("filename") or f"{source_id}.bin")
-    headers = {
-        "Content-Disposition": _content_disposition(filename),
-        "X-Knowledge-Source-Id": source_id,
-    }
-    if result.get("generated"):
-        headers["X-Knowledge-Generated-Export"] = "true"
-    return Response(content=data, media_type=result["media_type"], headers=headers)
-
-
-@app.get("/api/sources/{source_id}/download")
-async def download_source_get(source_id: str, _auth: None = Depends(require_bearer)) -> Response:
-    """Download original source bytes."""
-    return await _download_source_response(source_id)
-
-
-@app.post("/api/sources/{source_id}/download")
-async def download_source_post(source_id: str, _auth: None = Depends(require_bearer)) -> Response:
-    """Download original source bytes."""
-    return await _download_source_response(source_id)
-
-
-@app.post("/api/sources/{source_id}/download-link")
-async def create_source_download_link(
-    source_id: str,
-    body: dict[str, Any] | None = OPTIONAL_BODY,
-    _auth: None = Depends(require_bearer),
-) -> dict[str, Any]:
-    """Create a temporary URL that can download a source without auth headers."""
-    settings, _, _, _, db = _require_ready()
-    source = await db.source_get(source_id)
-    if not source:
-        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
-
-    ttl_seconds = int((body or {}).get("ttl_seconds") or 900)
-    token = await db.download_token_create(source_id, ttl_seconds)
-    base = str(settings.api_base).rstrip("/")
-    url = f"{base}/api/download/{token['token']}"
-    return {
-        "source_id": source_id,
-        "filename": source.get("filename"),
-        "url": url,
-        "expires_at": token["expires_at"],
-        "ttl_seconds": token["ttl_seconds"],
-    }
-
-
-@app.get("/api/download/{token}", name="download_source_token")
-async def download_source_token(token: str) -> Response:
-    """Download a source through a temporary token URL."""
-    _, _, _, _, db = _require_ready()
-    item = await db.download_token_get(token)
-    if not item:
-        raise HTTPException(status_code=404, detail="Download link not found or expired")
-    return await _download_source_response(str(item["source_id"]))
-
-
-@app.post("/api/sources/{source_id}/extract")
-async def extract_source(
-    source_id: str,
-    body: dict[str, Any] | None = OPTIONAL_BODY,
-    _auth: None = Depends(require_bearer),
-) -> dict[str, Any]:
-    """Single-shot fact extraction: one LLM call extracts structured facts and/or a caption.
-
-    For images and zero-chunk sources: sends raw bytes to the extraction model directly.
-    For text documents: uses existing indexed chunks (cheaper — no image token cost).
-    The extraction model and prompt caching are configured via KNOWLEDGE_EXTRACTION_MODEL.
-    """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
-    hint = str((body or {}).get("hint") or "") or None
-    result = await extract_source_facts_single_shot(
-        settings, embeddings, sparse_encoder, vectors, db, source_id, hint=hint
-    )
-    if not result.get("success"):
-        raise HTTPException(status_code=422, detail=result)
-    return result
-
-
-@app.delete("/api/sources/{source_id}")
-async def delete_source(
-    source_id: str,
-    delete_file: bool = True,
-    _auth: None = Depends(require_bearer),
-) -> dict[str, Any]:
-    """Delete one source, including vector chunks and optionally the stored file."""
-    settings, _, _, vectors, db = _require_ready()
-    result = await delete_source_record(settings, vectors, db, source_id, delete_file)
-    if not result.get("success"):
-        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
-    return result
-
-
-@app.patch("/api/sources/{source_id}")
-async def rename_source(
-    source_id: str,
-    body: dict[str, Any] = REQUIRED_BODY,
-    _auth: None = Depends(require_bearer),
-) -> dict[str, Any]:
-    """Rename one source by source_id."""
-    filename = body.get("filename") or body.get("source_name")
-    if not filename:
-        raise HTTPException(status_code=422, detail="'filename' is required")
-
-    settings, _, _, vectors, db = _require_ready()
-    result = await rename_source_record(settings, vectors, db, source_id, str(filename))
-    if not result.get("success"):
-        raise HTTPException(status_code=404, detail=result.get("error", "Source not found"))
-    return result
 
 
 # ---------------------------------------------------------------------------
