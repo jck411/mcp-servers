@@ -10,7 +10,6 @@ Current-state reference for `servers/knowledge_server.py`,
 | Chat MCP server | `servers/knowledge_server.py` | Domains, facts, search, wiki reads, context pack |
 | Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, wiki admin |
 | REST API | `servers/knowledge_api.py` | Facts CRUD, search, curation, health |
-| Curation UI | `web/curation.html` | Browser workflow for curation review |
 | SQLite | `data/knowledge.db` | Domains, facts, wiki pages, curation queue |
 | Qdrant | `knowledge` collection | Dense and sparse fact + wiki vectors |
 
@@ -88,6 +87,10 @@ Tools:
 These MCP tools live on `knowledge_admin`. The chat-facing `knowledge` MCP only
 returns a pending curation count from `knowledge_context_pack`. Destructive
 actions are blocked unless `confirmation` equals the item id.
+
+The old static browser curation page was removed with the upload UI. For local
+triage, use `Knowledge/knowledge-maintain.sh --check --curation-limit N`, then
+inspect/apply/reject through admin MCP tools or REST.
 
 ## REST API
 
