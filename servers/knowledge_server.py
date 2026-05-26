@@ -481,7 +481,7 @@ async def knowledge_context_pack(
     if not clean_query:
         return {
             "success": False,
-            "error": "query is required; call knowledge_context_pack(query=<user question>)",
+            "error": "query is required; pass query=<user question> to the context-pack tool",
         }
     query = clean_query
     if max_items is not None:

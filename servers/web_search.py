@@ -291,10 +291,10 @@ async def web_search(
 
     Do NOT use this for: Jack's schedule, todos, preferences, health,
     finances, relationships, work plans, or anything he has discussed
-    before. Use knowledge_context_pack for those — it searches Jack's
-    personal Knowledge base.
+    before. Use the Knowledge MCP context-pack tool for those — it searches
+    Jack's personal Knowledge base.
 
-    Call knowledge_context_pack FIRST. Only use web search when personal
+    Run the Knowledge context-pack first. Only use web search when personal
     context is insufficient or the question is clearly about public data.
 
     Args:
@@ -376,7 +376,8 @@ async def web_search_news(
     """Search for recent news articles using Google News via Serper.
 
     Use for public news and current events. Do NOT use for Jack's personal
-    schedule, plans, or life questions — use knowledge_context_pack instead.
+    schedule, plans, or life questions — use the Knowledge MCP context-pack
+    tool instead.
 
     Args:
         query: News search query string.
