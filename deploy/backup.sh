@@ -175,9 +175,34 @@ run_maintenance() {
     [[ "$RUN_MAINTAIN" -eq 1 ]] || { log "Skipping maintain.py"; return 0; }
     local py="${PYTHON:-${REPO_DIR}/.venv/bin/python}"
     [[ -x "$py" ]] || py="$(command -v python3)"
-    [[ -f "${REPO_DIR}/deploy/maintain.py" ]] || die "missing ${REPO_DIR}/deploy/maintain.py"
+    local maintain="${REPO_DIR}/deploy/maintain.py"
+    [[ -f "$maintain" ]] || die "missing ${maintain}"
+
+    # Drift detection: compare live hash against the sentinel written by
+    # `make deploy-maintain`. A mismatch means either the file was edited
+    # directly on the server, or a repo change was committed without
+    # running the deploy target.
+    local sentinel="${maintain}.sha256"
+    if [[ -f "$sentinel" ]]; then
+        local expected live_hash
+        expected="$(awk '{print $1}' "$sentinel")"
+        live_hash="$(sha256sum "$maintain" | awk '{print $1}')"
+        if [[ "$expected" != "$live_hash" ]]; then
+            log "WARNING: maintain.py drift detected — live hash ${live_hash:0:12}… ≠ deployed ${expected:0:12}…"
+            log "  Run 'make deploy-maintain' from the Knowledge repo to resync."
+            curl -fsS --max-time 8 \
+                -H "Title: maintain.py drift detected" \
+                -H "Priority: high" \
+                -H "Tags: warning" \
+                -d "Live maintain.py hash does not match deployed sentinel. Run 'make deploy-maintain' to resync." \
+                "https://ntfy.sh/${NTFY_TOPIC:-jack-knowledge-system-42x7}" 2>/dev/null || true
+        fi
+    else
+        log "NOTE: maintain.py sentinel hash missing — run 'make deploy-maintain' to create it"
+    fi
+
     log "Running maintain.py"
-    "$py" "${REPO_DIR}/deploy/maintain.py"
+    "$py" "$maintain"
 }
 
 run_wiki() {
