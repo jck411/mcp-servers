@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -355,6 +356,205 @@ async def knowledge_curation_resolve(
         vectors=vectors,
         db=db,
     )
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Source File Management
+# ---------------------------------------------------------------------------
+
+from servers.knowledge.sources import (  # noqa: E402
+    SourceManifest,
+    convert_pdf_to_images,
+    extract_text_from_sources,
+    get_source_summary,
+    scan_sources,
+)
+
+
+def _sources_root() -> Path:
+    """Resolve the source files directory on LXC 110."""
+    return Path(os.environ.get("KNOWLEDGE_SOURCES_ROOT", "/opt/mcp-servers/data/sources"))
+
+
+def _manifest_path() -> Path:
+    return _sources_root() / ".extracted" / "manifest.json"
+
+
+@mcp.tool("knowledge_source_scan")
+@logged_tool(log)
+async def knowledge_source_scan() -> dict[str, Any]:
+    """Scan the sources directory and catalog all files.
+
+    Detects file types, classifies PDFs as text or image-based, and builds
+    a processing manifest. Does NOT extract text — use knowledge_source_extract
+    for that.
+    """
+    root = _sources_root()
+    manifest = scan_sources(root)
+    manifest.save(_manifest_path())
+    return {
+        "success": True,
+        "summary": get_source_summary(manifest),
+        "files": [
+            {"path": f.path, "category": f.category.value, "status": f.status.value,
+             "size_bytes": f.size_bytes}
+            for f in manifest.files.values()
+        ],
+    }
+
+
+@mcp.tool("knowledge_source_list")
+@logged_tool(log)
+async def knowledge_source_list(
+    status: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """List source files from the last scan.
+
+    Args:
+        status: Filter by processing status (unprocessed, text_extracted,
+                needs_vision, processed, error).
+        category: Filter by file category (text, text_pdf, image_pdf, image,
+                  structured).
+    """
+    manifest = SourceManifest.load(_manifest_path())
+    if not manifest.files:
+        return {"success": True, "count": 0, "files": [],
+                "hint": "Run knowledge_source_scan first"}
+
+    files = list(manifest.files.values())
+    if status:
+        files = [f for f in files if f.status.value == status]
+    if category:
+        files = [f for f in files if f.category.value == category]
+
+    return {
+        "success": True,
+        "count": len(files),
+        "summary": get_source_summary(manifest),
+        "files": [
+            {"path": f.path, "category": f.category.value, "status": f.status.value,
+             "size_bytes": f.size_bytes, "page_count": f.page_count,
+             "text_length": len(f.text_content) if f.text_content else 0}
+            for f in files
+        ],
+    }
+
+
+@mcp.tool("knowledge_source_extract")
+@logged_tool(log)
+async def knowledge_source_extract(
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Extract text from source files.
+
+    For text files and text-PDFs: extracts text content.
+    For image-PDFs and images: marks them as needs_vision.
+
+    Args:
+        paths: Specific file paths to extract. If omitted, extracts all
+               unprocessed files.
+    """
+    root = _sources_root()
+    manifest = SourceManifest.load(_manifest_path())
+    if not manifest.files:
+        return {"success": False, "error": "No source files scanned. Run knowledge_source_scan first."}
+
+    manifest = extract_text_from_sources(root, manifest, paths=paths)
+    manifest.save(_manifest_path())
+
+    summary = get_source_summary(manifest)
+    return {
+        "success": True,
+        "summary": summary,
+        "files": [
+            {"path": f.path, "status": f.status.value, "category": f.category.value,
+             "text_length": len(f.text_content) if f.text_content else 0,
+             "error": f.error}
+            for f in manifest.files.values()
+            if paths is None or f.path in paths
+        ],
+    }
+
+
+@mcp.tool("knowledge_source_convert_pdf")
+@logged_tool(log)
+async def knowledge_source_convert_pdf(
+    path: str,
+    dpi: int = 200,
+) -> dict[str, Any]:
+    """Convert an image-based PDF to JPEG images for vision processing.
+
+    The images are saved in .extracted/images/ on LXC 110. Use these images
+    with a vision-capable model to extract structured facts.
+
+    Args:
+        path: Relative path of the PDF file.
+        dpi: Resolution for the conversion. Default 200.
+    """
+    root = _sources_root()
+    images = convert_pdf_to_images(root, path, dpi=dpi)
+
+    if not images:
+        return {"success": False, "error": f"Failed to convert {path} to images"}
+
+    return {
+        "success": True,
+        "path": path,
+        "page_count": len(images),
+        "images": [str(img) for img in images],
+        "hint": "Use these images with a vision-capable model to extract facts",
+    }
+
+
+@mcp.tool("knowledge_source_read")
+@logged_tool(log)
+async def knowledge_source_read(
+    path: str,
+    max_chars: int = 50000,
+) -> dict[str, Any]:
+    """Read the extracted text content of a source file.
+
+    Args:
+        path: Relative path of the source file.
+        max_chars: Maximum characters to return. Default 50000.
+    """
+    manifest = SourceManifest.load(_manifest_path())
+
+    if path not in manifest.files:
+        return {"success": False, "error": f"File '{path}' not in manifest. Run knowledge_source_scan first."}
+
+    source = manifest.files[path]
+
+    if source.text_content:
+        return {
+            "success": True,
+            "path": path,
+            "category": source.category.value,
+            "status": source.status.value,
+            "content": source.text_content[:max_chars],
+            "total_chars": len(source.text_content),
+            "truncated": len(source.text_content) > max_chars,
+        }
+
+    if source.status.value == "needs_vision":
+        return {
+            "success": True,
+            "path": path,
+            "category": source.category.value,
+            "status": "needs_vision",
+            "content": None,
+            "hint": "This file needs vision model processing. Use knowledge_source_convert_pdf to get images.",
+        }
+
+    return {
+        "success": True,
+        "path": path,
+        "category": source.category.value,
+        "status": source.status.value,
+        "content": None,
+        "hint": "Run knowledge_source_extract to extract text first.",
+    }
 
 
 # ---------------------------------------------------------------------------
