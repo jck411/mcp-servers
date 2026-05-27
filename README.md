@@ -43,35 +43,19 @@ Next available MCP port: **9020**. Retired ports (do not reuse): `9002`, `9003`,
 
 ### Knowledge Curation Queue
 
-The Knowledge system stores an approval-gated curation queue in SQLite for
-diagnostic cleanup: temporal fact cleanup, vector drift, and maintenance
-findings that need human judgment. The chat-facing
-`knowledge` MCP only reports the pending count in `knowledge_context_pack`;
-review and cleanup tools live on `knowledge_admin`:
-
-- `knowledge_curation_create`
-- `knowledge_curation_list`
-- `knowledge_curation_get`
-- `knowledge_curation_question_packs`
-- `knowledge_curation_question_pack_get`
-- `knowledge_curation_pack_preview`
-- `knowledge_curation_pack_apply`
-- `knowledge_curation_snooze`
-- `knowledge_curation_resolve`
-
-Destructive actions require `confirmation` equal to the queue item id.
-
-Knowledge search now infers temporal intent. Unqualified schedule/PTO-style
-questions prefer current/upcoming facts, while past-tense or "last year" queries
-include historical facts and archived domains.
+The curation queue is an approval-gated diagnostic surface in SQLite. The
+chat-facing `knowledge` MCP only reports the pending count; review and cleanup
+tools live on `knowledge_admin`. Destructive actions require `confirmation`
+equal to the item id. See [Knowledge system](docs/KNOWLEDGE_SYSTEM.md#curation)
+for the full tool list and REST routes.
 
 ### Knowledge Source Extraction
 
-Personal documents are synced separately into `/opt/mcp-servers/data/sources/`
-by `knowledge-push`. The `knowledge_admin` MCP can scan, list, extract text,
-convert image PDFs, and read extracted text with `knowledge_source_*` tools.
-Those tools create no source records or chunks; source-derived facts are stored
-through `knowledge_fact_set` with `origin_type=source` and `origin_ref=<path>`.
+Personal documents are synced into `/opt/mcp-servers/data/sources/` by
+`knowledge-push`. Admin-only `knowledge_source_*` tools handle scanning,
+extraction, and conversion; source-derived facts are stored through
+`knowledge_fact_set` with `origin_type=source`. See
+[Knowledge system](docs/KNOWLEDGE_SYSTEM.md#source-extraction) for details.
 
 ## Related Repos
 
