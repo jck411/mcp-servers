@@ -19,9 +19,8 @@ Each server:
 - Self-describes via the MCP protocol (`list_tools()`)
 
 Knowledge keeps shared implementation in `servers/knowledge/`. The systemd
-names stay clean: `servers/knowledge/__main__.py` starts the chat MCP server in
-`servers/knowledge_server.py`, and `servers/knowledge_admin/__main__.py` starts
-the admin MCP server in `servers/knowledge_admin_server.py`.
+names stay clean: `servers/knowledge/__main__.py` contains the chat MCP server,
+and `servers/knowledge_admin/__main__.py` contains the admin MCP server.
 
 | Server | Port | LXC |
 |--------|------|-----|

@@ -1,14 +1,14 @@
 # Knowledge System
 
-Current-state reference for `servers/knowledge_server.py`,
-`servers/knowledge_admin_server.py`, and `servers/knowledge_api.py`.
+Current-state reference for `servers/knowledge/__main__.py`,
+`servers/knowledge_admin/__main__.py`, and `servers/knowledge_api.py`.
 
 ## Components
 
 | Component | File | Purpose |
 |---|---|---|
-| Chat MCP server | `servers/knowledge_server.py` | Domains, facts, search, wiki reads, context pack |
-| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, wiki admin, source extraction |
+| Chat MCP server | `servers/knowledge/__main__.py` | Domains, facts, search, wiki reads, context pack |
+| Admin MCP server | `servers/knowledge_admin/__main__.py` | Operator cleanup, curation review, wiki admin, source extraction |
 | REST API | `servers/knowledge_api.py` | Facts CRUD, search, curation, health |
 | Maintenance runner | `servers/knowledge/maintenance.py` | Nightly SQLite/Qdrant audit, safe vector repair, curation mirroring |
 | Shared package | `servers/knowledge/` | DB, vectors, search, wiki, curation, maintenance, source helpers |
@@ -18,8 +18,7 @@ Current-state reference for `servers/knowledge_server.py`,
 `knowledge` runs as MCP on port `9017`, `knowledge_admin` runs on port `9019`,
 and `knowledge_api` runs as REST on port `9018`.
 The systemd template starts `python -m servers.knowledge` and
-`python -m servers.knowledge_admin`; those packages are entrypoints that call
-the chat/admin server modules above.
+`python -m servers.knowledge_admin`.
 
 ## Data Model
 

@@ -374,8 +374,8 @@ async def test_wiki_page_helpers_get_list_and_set_status(tmp_path: Path):
 
 
 async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import servers.knowledge_admin_server as knowledge_admin
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
+    import servers.knowledge_admin.__main__ as knowledge_admin
 
     db = KnowledgeDB(tmp_path / "wiki_tools.db")
     await db.initialize()
@@ -440,7 +440,7 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild.db")
     await db.initialize()
@@ -531,7 +531,7 @@ async def test_wiki_rebuild_manual_run_requires_confirmation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_confirmation.db")
     await db.initialize()
@@ -570,7 +570,7 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_real.db")
     await db.initialize()
@@ -694,7 +694,7 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_candidate.db")
     await db.initialize()
@@ -874,7 +874,7 @@ async def test_wiki_lint_pass_ignores_orphan_active_pages(tmp_path: Path):
 
 
 def test_context_pack_schema_accepts_missing_query_for_graceful_error():
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     params = knowledge.knowledge_context_pack.parameters
 
@@ -884,7 +884,7 @@ def test_context_pack_schema_accepts_missing_query_for_graceful_error():
 
 
 async def test_context_pack_missing_query_returns_tool_error():
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
 
     context_pack = (
         knowledge.knowledge_context_pack.fn

@@ -56,8 +56,8 @@ async def test_curation_mcp_tools_are_admin_only(
     knowledge_db: KnowledgeDB,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import servers.knowledge_admin_server as knowledge_admin
-    import servers.knowledge_server as knowledge
+    import servers.knowledge.__main__ as knowledge
+    import servers.knowledge_admin.__main__ as knowledge_admin
 
     assert not hasattr(knowledge, "knowledge_curation_list")
     assert not hasattr(knowledge, "knowledge_curation_resolve")
