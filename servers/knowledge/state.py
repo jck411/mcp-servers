@@ -9,16 +9,13 @@ the global state and helpers so they aren't copy-pasted across packages.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
 
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
+from servers.knowledge.db import KnowledgeDB
 from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
 from servers.knowledge.settings import KnowledgeSettings
-
-if TYPE_CHECKING:
-    from servers.knowledge.db import KnowledgeDB
-    from servers.knowledge.vectors import KnowledgeVectorStore
+from servers.knowledge.vectors import KnowledgeVectorStore
 
 _settings: KnowledgeSettings | None = None
 _embeddings: EmbeddingClient | None = None
