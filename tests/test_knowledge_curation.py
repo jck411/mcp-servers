@@ -58,14 +58,15 @@ async def test_curation_mcp_tools_are_admin_only(
 ):
     import servers.knowledge.__main__ as knowledge
     import servers.knowledge_admin.__main__ as knowledge_admin
+    import servers.knowledge.state as state
 
     assert not hasattr(knowledge, "knowledge_curation_list")
     assert not hasattr(knowledge, "knowledge_curation_resolve")
 
     for name in ("_settings", "_embeddings", "_sparse_encoder", "_vectors"):
-        monkeypatch.setattr(knowledge_admin, name, SimpleNamespace())
-    monkeypatch.setattr(knowledge_admin, "_ready", True)
-    monkeypatch.setattr(knowledge_admin, "_db", knowledge_db)
+        monkeypatch.setattr(state, name, SimpleNamespace())
+    monkeypatch.setattr(state, "_ready", True)
+    monkeypatch.setattr(state, "_db", knowledge_db)
 
     await knowledge_db.curation_upsert(
         kind="maintenance_action",

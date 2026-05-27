@@ -14,68 +14,29 @@ Run:
 from __future__ import annotations
 
 import contextlib
-import os
 import re
 from datetime import UTC, datetime
 from typing import Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 from shared.logging_config import get_logger, logged_tool
 
+from servers.knowledge.settings import DEFAULT_HTTP_PORT  # noqa: E402
+from servers.knowledge.state import auth_provider, init_subsystems, require_ready, shutdown  # noqa: E402
+
 log = get_logger("knowledge")
 
-# --- servers/knowledge/ package ---
-from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
-from servers.knowledge.settings import DEFAULT_HTTP_PORT, KnowledgeSettings  # noqa: E402
-
-
-def _auth_provider() -> StaticTokenVerifier | None:
-    token = os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN")
-    if not token:
-        return None
-    return StaticTokenVerifier({token: {"client_id": "knowledge", "scopes": []}})
-
-
-mcp = FastMCP("knowledge", auth=_auth_provider())
+mcp = FastMCP("knowledge", auth=auth_provider("knowledge"))
 
 from servers.knowledge.cross_domain import enrich_context  # noqa: E402
-from servers.knowledge.db import KnowledgeDB  # noqa: E402
 from servers.knowledge.search import search_knowledge  # noqa: E402
-from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
 from servers.knowledge.wiki import (  # noqa: E402
     WIKI_PAGE_KINDS,
     WIKI_PAGE_LIST_STATUSES,
     preview_wiki_rebuild,
     rebuild_wiki,
 )
-
-# ---------------------------------------------------------------------------
-# Global State
-# ---------------------------------------------------------------------------
-
-_settings: KnowledgeSettings | None = None
-_embeddings: EmbeddingClient | None = None
-_sparse_encoder: BM25SparseEncoder | None = None
-_vectors: KnowledgeVectorStore | None = None
-_db: KnowledgeDB | None = None
-_ready = False
-
-
-def _require_ready() -> (
-    tuple[KnowledgeSettings, EmbeddingClient, BM25SparseEncoder, KnowledgeVectorStore, KnowledgeDB]
-):
-    if (
-        not _ready
-        or not _settings
-        or not _embeddings
-        or not _sparse_encoder
-        or not _vectors
-        or not _db
-    ):
-        raise RuntimeError("Knowledge subsystem not initialized")
-    return _settings, _embeddings, _sparse_encoder, _vectors, _db
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +62,7 @@ async def knowledge_domain_create(
         description: What this domain covers.
         related_domains: Other domains to include when searching this one.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
 
     # Sanitize name
     clean_name = re.sub(r"[^a-z0-9_]", "_", name.lower().strip())
@@ -125,7 +86,7 @@ async def knowledge_domain_create(
 @logged_tool(log)
 async def knowledge_domain_list() -> dict[str, Any]:
     """List all knowledge domains with their descriptions and related domains."""
-    _, _, _, vectors, db = _require_ready()
+    _, _, _, vectors, db = require_ready()
 
     domains = await db.domain_list()
     for d in domains:
@@ -188,7 +149,7 @@ async def knowledge_fact_set(
         tags: Cross-cutting labels for sub-categorization (e.g. ["yard", "driveway"]).
             Used for filtering within a domain.
     """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    settings, embeddings, sparse_encoder, vectors, db = require_ready()
 
     if not await db.domain_exists(domain):
         return {"success": False, "error": f"Domain '{domain}' not found. Create it first."}
@@ -232,7 +193,7 @@ async def knowledge_fact_delete(domain: str, key: str) -> dict[str, Any]:
         domain: Domain the fact belongs to.
         key: The fact key to delete.
     """
-    _, _, _, vectors, db = _require_ready()
+    _, _, _, vectors, db = require_ready()
 
     deleted = await db.fact_delete(domain, key)
     if not deleted:
@@ -255,7 +216,7 @@ async def knowledge_facts_list(domain: str) -> dict[str, Any]:
     Args:
         domain: Domain to list facts for.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
 
     facts = await db.facts_list(domain)
     return {"success": True, "domain": domain, "count": len(facts), "facts": facts}
@@ -315,7 +276,7 @@ async def knowledge_context_pack(
     if max_items is not None:
         max_results = max_items
 
-    settings, embeddings_client, sparse_encoder, vectors, db = _require_ready()
+    settings, embeddings_client, sparse_encoder, vectors, db = require_ready()
 
     # 1. Run the full Knowledge search (facts + chunks + wiki)
     search_result = await search_knowledge(
@@ -477,7 +438,7 @@ async def knowledge_search(
         temporal_intent: Optional override: auto, all, current_upcoming, or
             historical. Auto infers from the query.
     """
-    _, embeddings_client, sparse_encoder, vectors, db = _require_ready()
+    _, embeddings_client, sparse_encoder, vectors, db = require_ready()
     return await search_knowledge(
         embeddings=embeddings_client,
         sparse_encoder=sparse_encoder,
@@ -506,7 +467,7 @@ async def knowledge_search(
 @logged_tool(log)
 async def knowledge_wiki_get(slug: str) -> dict[str, Any]:
     """Get one wiki page by slug, including frontmatter and sources."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     clean_slug = slug.strip()
     if not clean_slug:
         return {"success": False, "error": "slug is required"}
@@ -525,7 +486,7 @@ async def knowledge_wiki_list(
     limit: int = 50,
 ) -> dict[str, Any]:
     """List wiki pages. status is active, candidate, archived, or all."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     clean_status = str(status or "active").strip()
     if clean_status not in WIKI_PAGE_LIST_STATUSES:
         return {"success": False, "error": "status must be active, candidate, archived, or all"}
@@ -564,7 +525,7 @@ async def knowledge_wiki_rebuild(
             estimate without writing.
         confirmed: Required for writes unless dry_run is true.
     """
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    settings, embeddings, sparse_encoder, vectors, db = require_ready()
     preview = await preview_wiki_rebuild(
         settings, db, domain=domain, entity_slug=entity_slug, force_full=force_full,
     )
@@ -603,56 +564,7 @@ async def knowledge_wiki_rebuild(
 
 
 async def _startup() -> None:
-    global _settings, _embeddings, _sparse_encoder, _vectors, _db, _ready
-
-    try:
-        _settings = KnowledgeSettings()  # type: ignore[call-arg]
-    except Exception as exc:
-        log.error("disabled config_error=%r", exc)
-        return
-
-    _embeddings = EmbeddingClient(_settings)
-    _sparse_encoder = BM25SparseEncoder()
-    _vectors = KnowledgeVectorStore(_settings)
-    _db = KnowledgeDB(_settings.db_path)
-
-    try:
-        await _vectors.ensure_collection()
-    except Exception as exc:
-        log.error("disabled qdrant_unreachable=%r", exc)
-        return
-
-    await _db.initialize()
-
-    # Warm up BM25 sparse encoder from existing chunks so hybrid search
-    # has meaningful IDF scores on startup rather than a cold zero state.
-    try:
-        all_chunks = await _vectors.chunks_all()
-        texts = [p["content"] for p in all_chunks if p.get("content")]
-        if texts:
-            _sparse_encoder.fit_batch(texts)
-            log.info("bm25_warmup chunks=%d", len(texts))
-    except Exception as exc:
-        log.warning("bm25_warmup_skipped error=%r", exc)
-
-    # Ensure 'core' domain exists
-    await _db.domain_create(
-        "core",
-        "Foundational personal profile — always included in searches",
-        [],
-    )
-
-    _ready = True
-    log.info("initialization complete")
-
-
-async def _shutdown() -> None:
-    if _embeddings:
-        await _embeddings.close()
-    if _vectors:
-        await _vectors.close()
-    if _db:
-        await _db.close()
+    await init_subsystems(warm_bm25=True, ensure_core_domain=True, log_label="knowledge")
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +580,7 @@ def run(
     """Run the Knowledge MCP server."""
     import asyncio
 
-    mcp.auth = _auth_provider()
+    mcp.auth = auth_provider("knowledge")
     if transport == "streamable-http" and mcp.auth is None:
         raise RuntimeError("MCP_KNOWLEDGE_BEARER_TOKEN is required for streamable-http")
 
@@ -687,7 +599,7 @@ def run(
         else:
             mcp.run(transport="stdio")
     finally:
-        asyncio.get_event_loop().run_until_complete(_shutdown())
+        asyncio.get_event_loop().run_until_complete(shutdown())
 
 
 def main() -> None:

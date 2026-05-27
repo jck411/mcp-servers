@@ -14,19 +14,13 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
-import os
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 from shared.logging_config import get_logger, logged_tool
 
-log = get_logger("knowledge-admin")
-
-# --- servers/knowledge/ package ---
 from servers.knowledge.curation import (  # noqa: E402
     apply_curation_item,
     apply_curation_pack_resolution,
@@ -35,49 +29,14 @@ from servers.knowledge.curation import (  # noqa: E402
     get_curation_question_pack,
     preview_curation_pack_resolution,
 )
-from servers.knowledge.db import KnowledgeDB  # noqa: E402
-from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
-from servers.knowledge.settings import KnowledgeSettings  # noqa: E402
-from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
+from servers.knowledge.state import auth_provider, init_subsystems, require_ready, shutdown  # noqa: E402
 from servers.knowledge.wiki import WIKI_PAGE_STATUSES  # noqa: E402
 
 DEFAULT_ADMIN_PORT = 9019
 
+log = get_logger("knowledge-admin")
 
-def _auth_provider() -> StaticTokenVerifier | None:
-    token = os.environ.get("MCP_KNOWLEDGE_BEARER_TOKEN")
-    if not token:
-        return None
-    return StaticTokenVerifier({token: {"client_id": "knowledge-admin", "scopes": []}})
-
-
-mcp = FastMCP("knowledge-admin", auth=_auth_provider())
-
-# ---------------------------------------------------------------------------
-# Global State
-# ---------------------------------------------------------------------------
-
-_settings: KnowledgeSettings | None = None
-_embeddings: EmbeddingClient | None = None
-_sparse_encoder: BM25SparseEncoder | None = None
-_vectors: KnowledgeVectorStore | None = None
-_db: KnowledgeDB | None = None
-_ready = False
-
-
-def _require_ready() -> (
-    tuple[KnowledgeSettings, EmbeddingClient, BM25SparseEncoder, KnowledgeVectorStore, KnowledgeDB]
-):
-    if (
-        not _ready
-        or not _settings
-        or not _embeddings
-        or not _sparse_encoder
-        or not _vectors
-        or not _db
-    ):
-        raise RuntimeError("Knowledge admin subsystem not initialized")
-    return _settings, _embeddings, _sparse_encoder, _vectors, _db
+mcp = FastMCP("knowledge-admin", auth=auth_provider("knowledge-admin"))
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +54,7 @@ async def knowledge_domain_archive(name: str) -> dict[str, Any]:
     Args:
         name: Domain to archive.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
 
     archived = await db.domain_archive(name)
     if not archived:
@@ -121,7 +80,7 @@ async def knowledge_domain_relate(
         name: Domain to update.
         related_domains: Full list of related domain names (replaces existing).
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
 
     if not await db.domain_exists(name):
         return {"success": False, "error": f"Domain '{name}' not found"}
@@ -145,7 +104,7 @@ async def knowledge_wiki_set_status(
     notes: str | None = None,
 ) -> dict[str, Any]:
     """Promote a candidate page to active, or archive/reactivate a page."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     clean_slug = slug.strip()
     clean_status = str(status or "").strip()
     if not clean_slug:
@@ -209,7 +168,7 @@ async def knowledge_curation_create(
         confidence: Agent confidence from 0.0 to 1.0.
         item_id: Optional deterministic id for upsert/replace.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     return await create_curation_queue_item(
         db=db,
         actions=actions,
@@ -231,7 +190,7 @@ async def knowledge_curation_list(
     limit: int = 50,
 ) -> dict[str, Any]:
     """List Knowledge curation queue items for operator review."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     items = await db.curation_list(status=status, kind=kind, limit=limit)
     total_count = await db.curation_count(status=status, kind=kind)
     return {"success": True, "count": len(items), "total_count": total_count, "items": items}
@@ -241,7 +200,7 @@ async def knowledge_curation_list(
 @logged_tool(log)
 async def knowledge_curation_get(item_id: str) -> dict[str, Any]:
     """Get one curation queue item by id."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     item = await db.curation_get(item_id)
     if not item:
         return {"success": False, "error": f"Curation item '{item_id}' not found"}
@@ -256,7 +215,7 @@ async def knowledge_curation_question_packs(
     domain: str | None = None,
 ) -> dict[str, Any]:
     """Group pending curation rows into operator-friendly question packs."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     packs = await build_curation_question_packs(db, limit=limit, kind=kind, domain=domain)
     return {"success": True, "count": len(packs), "packs": packs}
 
@@ -265,7 +224,7 @@ async def knowledge_curation_question_packs(
 @logged_tool(log)
 async def knowledge_curation_question_pack_get(pack_id: str) -> dict[str, Any]:
     """Get one curation question pack by id."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     pack = await get_curation_question_pack(db, pack_id)
     if not pack:
         return {"success": False, "error": f"Curation question pack '{pack_id}' not found"}
@@ -284,7 +243,7 @@ async def knowledge_curation_pack_preview(
     This does not write data. It returns affected rows, the proposed status
     change, and a durable resolution note that would be recorded on apply.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     return await preview_curation_pack_resolution(
         db,
         pack_id=pack_id,
@@ -306,7 +265,7 @@ async def knowledge_curation_pack_apply(
     Destructive packs are blocked in this first version; verify and apply their
     individual queue items instead.
     """
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     return await apply_curation_pack_resolution(
         db,
         pack_id=pack_id,
@@ -320,7 +279,7 @@ async def knowledge_curation_pack_apply(
 @logged_tool(log)
 async def knowledge_curation_snooze(item_id: str) -> dict[str, Any]:
     """Snooze a curation queue item without applying or rejecting it."""
-    _, _, _, _, db = _require_ready()
+    _, _, _, _, db = require_ready()
     updated = await db.curation_mark_status(item_id, "snoozed")
     if not updated:
         return {"success": False, "error": f"Curation item '{item_id}' not found"}
@@ -339,13 +298,13 @@ async def knowledge_curation_resolve(
         return {"success": False, "error": "action must be 'apply' or 'reject'"}
 
     if action == "reject":
-        _, _, _, _, db = _require_ready()
+        _, _, _, _, db = require_ready()
         updated = await db.curation_mark_status(item_id, "rejected")
         if not updated:
             return {"success": False, "error": f"Curation item '{item_id}' not found"}
         return {"success": True, "item_id": item_id, "status": "rejected"}
 
-    settings, embeddings, sparse_encoder, vectors, db = _require_ready()
+    settings, embeddings, sparse_encoder, vectors, db = require_ready()
     return await apply_curation_item(
         item_id,
         confirmation=confirmation,
@@ -566,43 +525,12 @@ async def knowledge_source_read(
 
 
 # ---------------------------------------------------------------------------
-# Startup / Shutdown
+# Startup
 # ---------------------------------------------------------------------------
 
 
 async def _startup() -> None:
-    global _settings, _embeddings, _sparse_encoder, _vectors, _db, _ready
-
-    try:
-        _settings = KnowledgeSettings()  # type: ignore[call-arg]
-    except Exception as exc:
-        log.error("disabled config_error=%r", exc)
-        return
-
-    _embeddings = EmbeddingClient(_settings)
-    _sparse_encoder = BM25SparseEncoder()
-    _vectors = KnowledgeVectorStore(_settings)
-    _db = KnowledgeDB(_settings.db_path)
-
-    try:
-        await _vectors.ensure_collection()
-    except Exception as exc:
-        log.error("disabled qdrant_unreachable=%r", exc)
-        return
-
-    await _db.initialize()
-
-    _ready = True
-    log.info("admin initialization complete")
-
-
-async def _shutdown() -> None:
-    if _embeddings:
-        await _embeddings.close()
-    if _vectors:
-        await _vectors.close()
-    if _db:
-        await _db.close()
+    await init_subsystems(log_label="knowledge-admin")
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +544,9 @@ def run(
     port: int = DEFAULT_ADMIN_PORT,
 ) -> None:
     """Run the Knowledge Admin MCP server."""
-    mcp.auth = _auth_provider()
+    import asyncio
+
+    mcp.auth = auth_provider("knowledge-admin")
     if transport == "streamable-http" and mcp.auth is None:
         raise RuntimeError("MCP_KNOWLEDGE_BEARER_TOKEN is required for streamable-http")
 
@@ -635,7 +565,7 @@ def run(
         else:
             mcp.run(transport="stdio")
     finally:
-        asyncio.get_event_loop().run_until_complete(_shutdown())
+        asyncio.get_event_loop().run_until_complete(shutdown())
 
 
 def main() -> None:

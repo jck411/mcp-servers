@@ -375,6 +375,7 @@ async def test_wiki_page_helpers_get_list_and_set_status(tmp_path: Path):
 
 async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
     import servers.knowledge_admin.__main__ as knowledge_admin
 
     db = KnowledgeDB(tmp_path / "wiki_tools.db")
@@ -394,20 +395,12 @@ async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.Mon
         await db._conn.commit()
 
         # Patch main server
-        monkeypatch.setattr(knowledge, "_ready", True)
-        monkeypatch.setattr(knowledge, "_settings", object())
-        monkeypatch.setattr(knowledge, "_embeddings", object())
-        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
-        monkeypatch.setattr(knowledge, "_vectors", object())
-        monkeypatch.setattr(knowledge, "_db", db)
-
-        # Patch admin server
-        monkeypatch.setattr(knowledge_admin, "_ready", True)
-        monkeypatch.setattr(knowledge_admin, "_settings", object())
-        monkeypatch.setattr(knowledge_admin, "_embeddings", object())
-        monkeypatch.setattr(knowledge_admin, "_sparse_encoder", object())
-        monkeypatch.setattr(knowledge_admin, "_vectors", object())
-        monkeypatch.setattr(knowledge_admin, "_db", db)
+        monkeypatch.setattr(state, "_ready", True)
+        monkeypatch.setattr(state, "_settings", object())
+        monkeypatch.setattr(state, "_embeddings", object())
+        monkeypatch.setattr(state, "_sparse_encoder", object())
+        monkeypatch.setattr(state, "_vectors", object())
+        monkeypatch.setattr(state, "_db", db)
 
         get_tool = (
             knowledge.knowledge_wiki_get.fn
@@ -441,6 +434,7 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild.db")
     await db.initialize()
@@ -498,12 +492,12 @@ async def test_wiki_rebuild_dry_run_estimates_without_writes(
         )
         await db._conn.commit()
 
-        monkeypatch.setattr(knowledge, "_ready", True)
-        monkeypatch.setattr(knowledge, "_settings", SimpleNamespace(extraction_model="test-model"))
-        monkeypatch.setattr(knowledge, "_embeddings", object())
-        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
-        monkeypatch.setattr(knowledge, "_vectors", object())
-        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(state, "_ready", True)
+        monkeypatch.setattr(state, "_settings", SimpleNamespace(extraction_model="test-model"))
+        monkeypatch.setattr(state, "_embeddings", object())
+        monkeypatch.setattr(state, "_sparse_encoder", object())
+        monkeypatch.setattr(state, "_vectors", object())
+        monkeypatch.setattr(state, "_db", db)
 
         rebuild_tool = (
             knowledge.knowledge_wiki_rebuild.fn
@@ -532,6 +526,7 @@ async def test_wiki_rebuild_manual_run_requires_confirmation(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_confirmation.db")
     await db.initialize()
@@ -539,12 +534,12 @@ async def test_wiki_rebuild_manual_run_requires_confirmation(
         await db.domain_create("family", "family", [])
         await db.fact_set("family", "dad_heart_history", "stable", origin_type="manual")
 
-        monkeypatch.setattr(knowledge, "_ready", True)
-        monkeypatch.setattr(knowledge, "_settings", SimpleNamespace(extraction_model="test-model"))
-        monkeypatch.setattr(knowledge, "_embeddings", object())
-        monkeypatch.setattr(knowledge, "_sparse_encoder", object())
-        monkeypatch.setattr(knowledge, "_vectors", object())
-        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(state, "_ready", True)
+        monkeypatch.setattr(state, "_settings", SimpleNamespace(extraction_model="test-model"))
+        monkeypatch.setattr(state, "_embeddings", object())
+        monkeypatch.setattr(state, "_sparse_encoder", object())
+        monkeypatch.setattr(state, "_vectors", object())
+        monkeypatch.setattr(state, "_db", db)
 
         rebuild_tool = (
             knowledge.knowledge_wiki_rebuild.fn
@@ -571,6 +566,7 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_real.db")
     await db.initialize()
@@ -641,16 +637,16 @@ async def test_wiki_rebuild_generates_active_page_sources_and_run_row(
                 "split_concerns": [],
             }, 321
 
-        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(state, "_ready", True)
         monkeypatch.setattr(
-            knowledge,
+            state,
             "_settings",
             SimpleNamespace(extraction_model="test-model", openrouter_api_key="test"),
         )
-        monkeypatch.setattr(knowledge, "_embeddings", FakeEmbeddings())
-        monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
-        monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
-        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(state, "_embeddings", FakeEmbeddings())
+        monkeypatch.setattr(state, "_sparse_encoder", FakeSparseEncoder())
+        monkeypatch.setattr(state, "_vectors", FakeVectors())
+        monkeypatch.setattr(state, "_db", db)
         monkeypatch.setattr(servers.knowledge.wiki, "_call_wiki_llm", fake_call_wiki_llm)
 
         rebuild_tool = (
@@ -695,6 +691,7 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     db = KnowledgeDB(tmp_path / "wiki_rebuild_candidate.db")
     await db.initialize()
@@ -732,16 +729,16 @@ async def test_wiki_rebuild_new_low_confidence_page_stays_candidate(
                 "split_concerns": [],
             }, 100
 
-        monkeypatch.setattr(knowledge, "_ready", True)
+        monkeypatch.setattr(state, "_ready", True)
         monkeypatch.setattr(
-            knowledge,
+            state,
             "_settings",
             SimpleNamespace(extraction_model="test-model", openrouter_api_key="test"),
         )
-        monkeypatch.setattr(knowledge, "_embeddings", FakeEmbeddings())
-        monkeypatch.setattr(knowledge, "_sparse_encoder", FakeSparseEncoder())
-        monkeypatch.setattr(knowledge, "_vectors", FakeVectors())
-        monkeypatch.setattr(knowledge, "_db", db)
+        monkeypatch.setattr(state, "_embeddings", FakeEmbeddings())
+        monkeypatch.setattr(state, "_sparse_encoder", FakeSparseEncoder())
+        monkeypatch.setattr(state, "_vectors", FakeVectors())
+        monkeypatch.setattr(state, "_db", db)
         monkeypatch.setattr(servers.knowledge.wiki, "_call_wiki_llm", fake_call_wiki_llm)
 
         rebuild_tool = (
@@ -875,6 +872,7 @@ async def test_wiki_lint_pass_ignores_orphan_active_pages(tmp_path: Path):
 
 def test_context_pack_schema_accepts_missing_query_for_graceful_error():
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     params = knowledge.knowledge_context_pack.parameters
 
@@ -885,6 +883,7 @@ def test_context_pack_schema_accepts_missing_query_for_graceful_error():
 
 async def test_context_pack_missing_query_returns_tool_error():
     import servers.knowledge.__main__ as knowledge
+    import servers.knowledge.state as state
 
     context_pack = (
         knowledge.knowledge_context_pack.fn
