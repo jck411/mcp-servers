@@ -9,16 +9,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from servers.knowledge import (
-    BM25SparseEncoder,
-    EmbeddingClient,
-    KnowledgeDB,
-    KnowledgeSettings,
-    KnowledgeVectorStore,
-    preview_wiki_rebuild,
-    rebuild_wiki,
-    wiki_lint_pass,
-)
+from servers.knowledge.db import KnowledgeDB
+from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
+from servers.knowledge.settings import KnowledgeSettings
+from servers.knowledge.vectors import KnowledgeVectorStore
+from servers.knowledge.wiki import preview_wiki_rebuild, rebuild_wiki, wiki_lint_pass
 from shared.logging_config import get_logger
 
 log = get_logger("maintain_wiki")

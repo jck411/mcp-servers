@@ -6,7 +6,7 @@ Standalone MCP servers deployed to Proxmox LXCs via systemd. Knowledge services 
 
 ```
 mcp-servers (this repo — deployed to Proxmox)
-├── servers/          # One file per MCP server
+├── servers/          # MCP server modules and Knowledge packages
 ├── shared/           # Auth helpers, utilities
 ├── deploy/           # Systemd templates + deploy script
 ├── credentials/      # Symlink to shared credential store
@@ -17,6 +17,11 @@ Each server:
 - Is a standalone Python module using [FastMCP](https://github.com/jlowin/fastmcp)
 - Runs via: `python -m servers.<name> --transport streamable-http --host 0.0.0.0 --port <PORT>`
 - Self-describes via the MCP protocol (`list_tools()`)
+
+Knowledge keeps shared implementation in `servers/knowledge/`. The systemd
+names stay clean: `servers/knowledge/__main__.py` starts the chat MCP server in
+`servers/knowledge_server.py`, and `servers/knowledge_admin/__main__.py` starts
+the admin MCP server in `servers/knowledge_admin_server.py`.
 
 | Server | Port | LXC |
 |--------|------|-----|
@@ -60,6 +65,14 @@ Destructive actions require `confirmation` equal to the queue item id.
 Knowledge search now infers temporal intent. Unqualified schedule/PTO-style
 questions prefer current/upcoming facts, while past-tense or "last year" queries
 include historical facts and archived domains.
+
+### Knowledge Source Extraction
+
+Personal documents are synced separately into `/opt/mcp-servers/data/sources/`
+by `knowledge-push`. The `knowledge_admin` MCP can scan, list, extract text,
+convert image PDFs, and read extracted text with `knowledge_source_*` tools.
+Those tools create no source records or chunks; source-derived facts are stored
+through `knowledge_fact_set` with `origin_type=source` and `origin_ref=<path>`.
 
 ## Related Repos
 

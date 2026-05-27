@@ -1,9 +1,6 @@
-"""Entry point for `python -m servers.knowledge_admin`.
-
-Delegates to knowledge_admin_server.main() so the systemd unit
-`mcp-server@knowledge_admin` works via the template.
-"""
+"""Run the Knowledge admin MCP server."""
 
 from servers.knowledge_admin_server import main
 
-main()
+if __name__ == "__main__":
+    main()

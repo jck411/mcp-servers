@@ -16,20 +16,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from servers.knowledge import (
-    BM25SparseEncoder,
-    KnowledgeDB,
+import servers.knowledge.wiki  # noqa: E402 — for monkeypatching _call_wiki_llm
+from servers.knowledge.db import KnowledgeDB, search_fact_keywords
+from servers.knowledge.embeddings import BM25SparseEncoder
+from servers.knowledge.search import (
     classify_search_temporal_intent,
-    fact_temporal_status,
     resolve_search_domains,
-    search_fact_keywords,
     search_knowledge,
 )
-import servers.knowledge.wiki  # noqa: E402 — for monkeypatching _call_wiki_llm
+from servers.knowledge.temporal import fact_temporal_status
 from shared.time_context import EASTERN_TIMEZONE
-
-
-
 
 # ---------------------------------------------------------------------------
 # BM25SparseEncoder
@@ -378,8 +374,8 @@ async def test_wiki_page_helpers_get_list_and_set_status(tmp_path: Path):
 
 
 async def test_wiki_mcp_tools_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import servers.knowledge_server as knowledge
     import servers.knowledge_admin_server as knowledge_admin
+    import servers.knowledge_server as knowledge
 
     db = KnowledgeDB(tmp_path / "wiki_tools.db")
     await db.initialize()
@@ -799,7 +795,7 @@ async def test_call_wiki_llm_decodes_forced_tool_arguments(monkeypatch: pytest.M
         def __init__(self, timeout: float):
             self.timeout = timeout
 
-        async def __aenter__(self) -> "FakeClient":
+        async def __aenter__(self) -> FakeClient:
             return self
 
         async def __aexit__(self, *args) -> None:

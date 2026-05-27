@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""One-time script to embed all active wiki pages into Qdrant.
+"""Manual script to re-embed active wiki pages into Qdrant.
 
-Run from the mcp-servers repo root after deploying the embed_wiki_page code:
+Run from the mcp-servers repo root:
 
     uv run python scripts/embed_wiki_pages.py
 
@@ -18,13 +18,10 @@ from pathlib import Path
 # Allow imports from repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from servers.knowledge import (  # noqa: E402
-    BM25SparseEncoder,
-    EmbeddingClient,
-    KnowledgeDB,
-    KnowledgeSettings,
-    KnowledgeVectorStore,
-)
+from servers.knowledge.db import KnowledgeDB  # noqa: E402
+from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient  # noqa: E402
+from servers.knowledge.settings import KnowledgeSettings  # noqa: E402
+from servers.knowledge.vectors import KnowledgeVectorStore  # noqa: E402
 
 
 async def main() -> None:

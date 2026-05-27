@@ -1,9 +1,4 @@
-"""SQLite data layer for the Knowledge service.
-
-Extracted from knowledge_server.py during Phase 2 modularization.
-Contains KnowledgeDB (domains, facts, wiki, curation) and
-search_fact_keywords (used by wiki_search).
-"""
+"""SQLite data layer for domains, facts, wiki pages, and curation."""
 
 from __future__ import annotations
 
@@ -18,7 +13,6 @@ import aiosqlite
 
 from servers.knowledge.settings import FACT_COLUMNS, FACT_TYPES
 from servers.knowledge.temporal import add_fact_temporal_status
-
 
 SEARCH_STOPWORDS = frozenset({
     "about", "and", "are", "can", "current", "did", "do", "does", "for", "from", "give",

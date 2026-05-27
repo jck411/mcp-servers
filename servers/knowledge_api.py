@@ -32,12 +32,12 @@ from typing import Any
 import uvicorn
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 
-from servers.knowledge.settings import KnowledgeSettings
-from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
-from servers.knowledge.db import KnowledgeDB
-from servers.knowledge.vectors import KnowledgeVectorStore
-from servers.knowledge.search import search_knowledge
 from servers.knowledge.curation import apply_curation_item, create_curation_queue_item
+from servers.knowledge.db import KnowledgeDB
+from servers.knowledge.embeddings import BM25SparseEncoder, EmbeddingClient
+from servers.knowledge.search import search_knowledge
+from servers.knowledge.settings import KnowledgeSettings
+from servers.knowledge.vectors import KnowledgeVectorStore
 from shared.logging_config import get_logger
 
 log = get_logger("knowledge_api")
@@ -436,8 +436,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Knowledge REST API")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9018)
-    # --transport accepted for compat with the mcp-server@ systemd template (ignored here)
-    parser.add_argument("--transport", default="http")
     args = parser.parse_args()
     uvicorn.run(app, host=args.host, port=args.port, access_log=False)
 

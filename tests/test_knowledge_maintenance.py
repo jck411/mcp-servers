@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from servers.knowledge import maintenance
+import servers.knowledge.maintenance as maintenance
 
 
 def _make_db(path: Path) -> Path:

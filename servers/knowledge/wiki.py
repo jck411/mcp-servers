@@ -1,8 +1,4 @@
-"""Wiki rebuild pipeline for the Knowledge service.
-
-Extracted from knowledge_server.py during Phase 3 modularization.
-Contains wiki page generation, LLM calls, index pages, and rebuild logic.
-"""
+"""Wiki page generation, linting, and rebuild pipeline."""
 
 from __future__ import annotations
 

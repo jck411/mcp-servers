@@ -5,14 +5,14 @@ import httpx
 import pytest
 
 from servers import knowledge_api
-from servers.knowledge import (
-    KnowledgeDB,
+from servers.knowledge.curation import (
     apply_curation_item,
     apply_curation_pack_resolution,
     build_curation_question_packs,
     create_curation_queue_item,
     curation_item_has_destructive_actions,
 )
+from servers.knowledge.db import KnowledgeDB
 
 
 @pytest.fixture
@@ -441,4 +441,3 @@ async def test_destructive_curation_requires_exact_confirmation(knowledge_db: Kn
     assert result["success"] is False
     assert result["requires_confirmation"] == "destructive-test"
     assert (await knowledge_db.domain_get("core"))["archived"] is False
-

@@ -1,8 +1,4 @@
-"""Search logic for the Knowledge service.
-
-Extracted from knowledge_server.py during Phase 3 modularization.
-Contains resolve_search_domains, search_knowledge, and helpers.
-"""
+"""Hybrid fact and wiki search for the Knowledge service."""
 
 from __future__ import annotations
 

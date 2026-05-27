@@ -1,8 +1,4 @@
-"""Curation queue logic for the Knowledge service.
-
-Extracted from knowledge_server.py during Phase 3 modularization.
-Contains curation actions, question packs, apply/reject logic.
-"""
+"""Curation queue actions, question packs, and resolution logic."""
 
 from __future__ import annotations
 

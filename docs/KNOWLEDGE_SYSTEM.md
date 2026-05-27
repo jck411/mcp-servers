@@ -8,14 +8,18 @@ Current-state reference for `servers/knowledge_server.py`,
 | Component | File | Purpose |
 |---|---|---|
 | Chat MCP server | `servers/knowledge_server.py` | Domains, facts, search, wiki reads, context pack |
-| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, wiki admin |
+| Admin MCP server | `servers/knowledge_admin_server.py` | Operator cleanup, curation review, wiki admin, source extraction |
 | REST API | `servers/knowledge_api.py` | Facts CRUD, search, curation, health |
 | Maintenance runner | `servers/knowledge/maintenance.py` | Nightly SQLite/Qdrant audit, safe vector repair, curation mirroring |
+| Shared package | `servers/knowledge/` | DB, vectors, search, wiki, curation, maintenance, source helpers |
 | SQLite | `data/knowledge.db` | Domains, facts, wiki pages, curation queue |
 | Qdrant | `knowledge` collection | Dense and sparse fact + wiki vectors |
 
 `knowledge` runs as MCP on port `9017`, `knowledge_admin` runs on port `9019`,
 and `knowledge_api` runs as REST on port `9018`.
+The systemd template starts `python -m servers.knowledge` and
+`python -m servers.knowledge_admin`; those packages are entrypoints that call
+the chat/admin server modules above.
 
 ## Data Model
 
@@ -35,9 +39,12 @@ and `knowledge_api` runs as REST on port `9018`.
 - **Curation items** are pending approved changes. Applying destructive actions
   requires confirmation equal to the curation item id.
 
-Note: source file storage was removed in 2026-05-26. The server no longer
-creates source records, download tokens, upload endpoints, or document chunks.
-Source files live on the laptop and will be bridged via a future local MCP tool.
+Source upload/download storage was removed in 2026-05-26: the server no longer
+creates source DB records, download tokens, upload endpoints, or document
+chunks. The current local bridge syncs files into
+`/opt/mcp-servers/data/sources/`; admin-only `knowledge_source_*` tools scan and
+extract text from those files so source-derived facts can be written with
+`origin_type=source` and `origin_ref=<path>`.
 
 ## Search
 
@@ -70,7 +77,7 @@ returned content without changing stored data.
 
 The curation queue stores proposed actions in SQLite. Supported actions include
 fact set/update/delete, archive domain, flag for review, and no-op. Source-file
-actions are not supported since source infrastructure was removed.
+actions are not supported; source files are processed into facts explicitly.
 
 Tools:
 
@@ -91,6 +98,21 @@ actions are blocked unless `confirmation` equals the item id.
 The old static browser curation page was removed with the upload UI. For local
 maintenance triage, run `uv run python -m servers.knowledge.maintenance --dry-run`,
 then inspect/apply/reject curation rows through admin MCP tools or REST.
+
+## Source Extraction
+
+`servers/knowledge/sources.py` backs the admin-only source tools:
+
+- `knowledge_source_scan`
+- `knowledge_source_list`
+- `knowledge_source_extract`
+- `knowledge_source_convert_pdf`
+- `knowledge_source_read`
+
+These tools operate on synced files and a local manifest under
+`data/sources/.extracted/`. They do not insert facts automatically; the source
+extraction workflow reviews extracted text or images and then writes durable
+facts through `knowledge_fact_set`.
 
 ## REST API
 
@@ -120,7 +142,8 @@ Mutating routes require `Authorization: Bearer $KNOWLEDGE_API_TOKEN`.
   BM25 document count, and embedding model.
 - SQLite uses WAL, foreign keys, and `busy_timeout`.
 - Qdrant indexes payload fields for domain, source id, source type, chunk
-  index, and fact_type.
+  index, and fact_type. Source ids remain in vector payloads for fact/wiki
+  provenance and legacy cleanup, not as canonical source records.
 
 ## Known Gaps
 

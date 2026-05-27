@@ -1,8 +1,4 @@
-"""Qdrant vector store for the Knowledge service.
-
-Extracted from knowledge_server.py during Phase 2 modularization.
-Contains KnowledgeVectorStore with hybrid search, embedding, and CRUD.
-"""
+"""Qdrant vector store for fact and wiki retrieval."""
 
 from __future__ import annotations
 
