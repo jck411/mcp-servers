@@ -3,15 +3,15 @@
 # Installation:
 #   sudo cp mcp-server@.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now mcp-server@knowledge
+#   sudo systemctl enable --now mcp-server@web_search
 #
 # The %i instance name maps to the server module:
-#   mcp-server@knowledge → python -m servers.knowledge  (port from env file)
+#   mcp-server@web_search -> python -m servers.web_search (port from env file)
 #
 # Ports are set via per-instance overrides. After creating the unit:
-#   sudo systemctl edit mcp-server@knowledge
+#   sudo systemctl edit mcp-server@web_search
 #   [Service]
-#   Environment=MCP_PORT=9017
+#   Environment=MCP_PORT=9016
 #
 # Or use the setup script: deploy/setup-systemd.sh
 
@@ -41,7 +41,7 @@ SyslogIdentifier=mcp-%i
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data /opt/mcp-servers/knowledge
+ReadWritePaths=/opt/mcp-servers/credentials /opt/mcp-servers/logs /opt/mcp-servers/data
 PrivateTmp=true
 
 [Install]

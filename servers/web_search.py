@@ -289,13 +289,9 @@ async def web_search(
     product research, technical documentation, how-to guides, or topics
     NOT related to Jack's personal life.
 
-    Do NOT use this for: Jack's schedule, todos, preferences, health,
-    finances, relationships, work plans, or anything he has discussed
-    before. Use the Knowledge MCP context-pack tool for those — it searches
-    Jack's personal Knowledge base.
-
-    Run the Knowledge context-pack first. Only use web search when personal
-    context is insufficient or the question is clearly about public data.
+    Do NOT use this for Jack's private schedule, todos, preferences, health,
+    finances, relationships, work plans, or anything that depends on private
+    records. Use this only when the question is clearly about public data.
 
     Args:
         query: Search query string.
@@ -334,7 +330,7 @@ async def web_search(
                         parts.append(f"Source: {ab_title}")
                     parts.append("")
 
-            # Include knowledge graph if present
+            # Include the public search entity panel if present.
             kg = data.get("knowledgeGraph")
             if kg:
                 kg_title = kg.get("title", "")
@@ -375,9 +371,8 @@ async def web_search_news(
 ) -> str:
     """Search for recent news articles using Google News via Serper.
 
-    Use for public news and current events. Do NOT use for Jack's personal
-    schedule, plans, or life questions — use the Knowledge MCP context-pack
-    tool instead.
+    Use for public news and current events. Do NOT use for Jack's private
+    schedule, plans, or life questions.
 
     Args:
         query: News search query string.
@@ -484,7 +479,7 @@ async def web_fetch_page(url: str) -> str:
     unavailable.
 
     Use only after web_search has identified a relevant URL. Do not use this
-    as a substitute for searching Jack's Knowledge base.
+    as a substitute for private records.
 
     Args:
         url: URL of the webpage to fetch.
