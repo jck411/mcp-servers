@@ -120,20 +120,6 @@ async def overview() -> str:
         ]
         parts.append("## Devices (DHCP)\n" + "\n".join(rows))
 
-    # Env manifest summary
-    manifest = REPOS / "symlinked-env/env-manifest.tsv"
-    if manifest.exists():
-        rows = []
-        for line in manifest.read_text().splitlines():
-            if not line or line.startswith("#"):
-                continue
-            p = line.split("|")
-            if len(p) >= 5:
-                env_n = len(p[3].split()) if p[3].strip() else 0
-                cfg_n = len(p[4].split()) if p[4].strip() else 0
-                rows.append(f"  {p[0]:8s} {p[1]:24s}  secrets={env_n:2d}  config={cfg_n:2d}")
-        parts.append("## Env Manifest (per-target key counts)\n" + "\n".join(rows))
-
     return "\n\n".join(parts)
 
 
@@ -156,7 +142,7 @@ async def read_file(path: str) -> str:
             entries.append(f"  {p.name:40s}  {kind}")
         return f"Directory: {path}/\n" + "\n".join(entries)
     if _is_secret_path(target):
-        return f"Error: refusing to read secret file {path}. Use docs_env_manifest instead."
+        return f"Error: refusing to read secret file {path}."
     return target.read_text(errors="replace")[:50_000]
 
 
@@ -228,19 +214,6 @@ async def search(query: str, file_pattern: str = "") -> str:
         return "Search timed out."
 
 
-@mcp.tool("docs_env_manifest")
-async def env_manifest() -> str:
-    """Returns the env manifest (which repo/LXC gets which keys) plus the config.env contents."""
-    out = []
-    manifest = REPOS / "symlinked-env/env-manifest.tsv"
-    if manifest.exists():
-        out.append("## env-manifest.tsv\n" + manifest.read_text())
-    config = REPOS / "symlinked-env/config.env"
-    if config.exists():
-        out.append("## config.env\n" + config.read_text())
-    return "\n\n".join(out) if out else "Error: manifest files not found"
-
-
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 
 def run(transport: str = "stdio", host: str = "0.0.0.0", port: int = DEFAULT_HTTP_PORT) -> None:
@@ -264,4 +237,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-__all__ = ["mcp", "run", "overview", "read_file", "write_file", "search", "env_manifest"]
+__all__ = ["mcp", "run", "overview", "read_file", "write_file", "search"]
