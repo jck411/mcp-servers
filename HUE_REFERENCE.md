@@ -19,9 +19,62 @@
 | File | `servers/hue.py` |
 | Auth helper | `shared/hue_auth.py` |
 | Port | 9015 (LXC 117) |
-| Tools | 14 (`hue_` prefix) |
+| Tools | 18 (`hue_` prefix) |
 | API key env | `HUE_KEY` |
 | SSL | `verify=False` (self-signed cert) |
+
+The server is a thin MCP facade. Read-only bridge calls live in
+`shared/hue_queries.py`, state-changing calls in `shared/hue_commands.py`, and
+indexed history tools in `shared/hue_log_tools.py`.
+
+## Event History
+
+`hue-event-collector.service` runs separately from the MCP server on LXC 117.
+It consumes the Hue v2 SSE stream and stores normalized events in
+`/var/lib/hue-events/hue.sqlite3` using SQLite WAL mode. A separate process
+means MCP restarts do not create collection gaps.
+
+The database contains:
+
+| Table | Purpose |
+|---|---|
+| `events` | One normalized row per bridge event, including the raw event entry and light before/after state |
+| `current_state` | Latest resource state for restart/reconnect reconciliation; replaces periodic full snapshots |
+| `health` | Collector lifecycle, connection, reconciliation, and error records |
+| `commands` | Intent and outcome for state-changing calls made through this MCP server |
+
+The collector reconciles live light/group state on startup, after reconnects,
+and every five minutes. Only differences become history rows. Events, health,
+and command audits use 30-day retention; current state is retained. The Hue
+event stream does not identify changes made by the Hue app, Alexa, or other
+controllers, so only the `commands` table provides positive attribution to MCP
+requests.
+
+History tools:
+
+| Tool | Purpose |
+|---|---|
+| `hue_log_recent` | Query activity, changes, raw events, health, commands, or current state |
+| `hue_log_activity` | Query normalized activity, optionally by category |
+| `hue_log_search` | Indexed time-bounded text search |
+| `hue_log_status` | Database size, row counts, date bounds, and recent collector health |
+
+Operational checks:
+
+```bash
+systemctl status hue-event-collector.service mcp-server@hue.service
+journalctl -u hue-event-collector.service -n 100 --no-pager
+```
+
+The one-time migration command imports legacy `hue_activity_*`,
+`hue_changes_*`, and `hue_health_*` JSONL files idempotently. Legacy raw-event
+files duplicate the raw entry already stored with each activity row, while
+periodic snapshots are superseded by `current_state` and reconciliation.
+
+```bash
+HUE_DB_PATH=/var/lib/hue-events/hue.sqlite3 \
+  .venv/bin/python -m shared.hue_import /path/to/legacy-jsonl
+```
 
 ## CLIP v2 Endpoints
 

@@ -1,0 +1,41 @@
+[Unit]
+Description=Hue v2 Event Collector
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=mcp
+Group=mcp
+WorkingDirectory=/opt/mcp-accounts
+EnvironmentFile=/opt/mcp-accounts/.env
+EnvironmentFile=-/opt/mcp-accounts/.env.config
+Environment=HUE_DB_PATH=/var/lib/hue-events/hue.sqlite3
+ExecStart=/opt/mcp-accounts/.venv/bin/python -m shared.hue_collector
+Restart=always
+RestartSec=5
+
+StateDirectory=hue-events
+StateDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CPUQuota=20%
+MemoryMax=192M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hue-event-collector
+
+[Install]
+WantedBy=multi-user.target
