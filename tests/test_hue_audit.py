@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from shared.hue_audit import audited_hue_command
+from shared.hue_log_tools import log_recent
 from shared.hue_store import HueStore
 
 
@@ -20,6 +21,7 @@ async def test_audit_records_success(monkeypatch, tmp_path):
     assert row["tool"] == "hue_test"
     assert row["target"] == "Lamp"
     assert row["outcome"] == "completed"
+    assert "result=done" in await log_recent(kind="commands", query="Lamp")
 
 
 async def test_audit_records_error(monkeypatch, tmp_path):

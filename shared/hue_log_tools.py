@@ -47,6 +47,8 @@ def _format_record(kind: str, record: dict[str, Any]) -> str:
     if kind == "commands":
         target = f" {record['target']}" if record.get("target") else ""
         suffix = f" error={record['error']}" if record.get("error") else ""
+        if record.get("result"):
+            suffix += f" result={str(record['result'])[:300]}"
         return f"{ts}  {record.get('tool', '?')}{target}  {record.get('outcome', '?')}{suffix}"
     if kind == "state":
         return (
