@@ -33,7 +33,7 @@ def import_jsonl(log_dir: Path, store: HueStore) -> dict[str, int]:
                     continue
                 # During cutover both collectors run briefly. Prefer the live
                 # SSE row when the same Bridge event already reached SQLite.
-                if store.matching_event_id(record) is not None:
+                if store.matching_event_id(record, exclude_source="legacy_jsonl") is not None:
                     store.mark_import(legacy_key)
                     continue
                 inserted = store.insert_event(

@@ -210,18 +210,30 @@ class HueStore(AbstractContextManager["HueStore"]):
             ),
         )
 
-    def matching_event_id(self, record: dict[str, Any]) -> int | None:
+    def matching_event_id(
+        self, record: dict[str, Any], *, exclude_source: str | None = None
+    ) -> int | None:
+        raw = record.get("raw")
+        if raw is None:
+            raw = record.get("raw_update")
+        clauses = [
+            "bridge_creationtime IS ?",
+            "rid IS ?",
+            "resource_type IS ?",
+            "raw_json=?",
+        ]
+        params: list[Any] = [
+            record.get("bridge_creationtime"),
+            record.get("rid"),
+            record.get("resource_type"),
+            _encode(raw) or "{}",
+        ]
+        if exclude_source is not None:
+            clauses.append("source<>?")
+            params.append(exclude_source)
         row = self.connection.execute(
-            """
-            SELECT id FROM events
-            WHERE bridge_creationtime IS ? AND rid IS ? AND resource_type IS ?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (
-                record.get("bridge_creationtime"),
-                record.get("rid"),
-                record.get("resource_type"),
-            ),
+            f"SELECT id FROM events WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT 1",
+            params,
         ).fetchone()
         return int(row["id"]) if row else None
 

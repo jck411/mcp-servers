@@ -129,3 +129,22 @@ def test_jsonl_import_deduplicates_cutover_overlap(tmp_path):
         assert import_jsonl(log_dir, store)["activity"] == 0
         assert store.status()["counts"]["events"] == 1
         assert import_jsonl(log_dir, store)["activity"] == 0
+
+
+def test_jsonl_import_preserves_distinct_legacy_events_with_same_identity(tmp_path):
+    log_dir = tmp_path / "legacy"
+    log_dir.mkdir()
+    first = event_record("2026-08-05T23:00:00-04:00")
+    second = {
+        **first,
+        "summary": "Test light: brightness -> 25%",
+        "raw": {"id": "light-1", "type": "light", "dimming": {"brightness": 25.0}},
+    }
+    (log_dir / "hue_activity_2026-08-05.jsonl").write_text(
+        "\n".join((json.dumps(first), json.dumps(second))) + "\n",
+        encoding="utf-8",
+    )
+
+    with HueStore(tmp_path / "hue.sqlite3") as store:
+        assert import_jsonl(log_dir, store)["activity"] == 2
+        assert store.status()["counts"]["events"] == 2
