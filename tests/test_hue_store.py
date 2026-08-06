@@ -113,3 +113,19 @@ def test_jsonl_import_is_idempotent_and_enriches_changes(tmp_path):
         records = store.query("changes", date="2026-08-05")
         assert len(records) == 1
         assert records[0]["before"] == {"on": False}
+
+
+def test_jsonl_import_deduplicates_cutover_overlap(tmp_path):
+    log_dir = tmp_path / "legacy"
+    log_dir.mkdir()
+    record = event_record("2026-08-05T23:00:00-04:00")
+    (log_dir / "hue_activity_2026-08-05.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    with HueStore(tmp_path / "hue.sqlite3") as store:
+        with store.connection:
+            store.insert_event(record, batch_id="live-batch", entry_index=0)
+        assert import_jsonl(log_dir, store)["activity"] == 0
+        assert store.status()["counts"]["events"] == 1
+        assert import_jsonl(log_dir, store)["activity"] == 0

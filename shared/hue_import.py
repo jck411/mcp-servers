@@ -28,13 +28,22 @@ def import_jsonl(log_dir: Path, store: HueStore) -> dict[str, int]:
     for path in sorted(log_dir.glob("hue_activity_*.jsonl")):
         with store.connection:
             for line_number, record in iter_jsonl(path):
+                legacy_key = f"activity:{path.name}:{line_number}"
+                if store.has_import(legacy_key):
+                    continue
+                # During cutover both collectors run briefly. Prefer the live
+                # SSE row when the same Bridge event already reached SQLite.
+                if store.matching_event_id(record) is not None:
+                    store.mark_import(legacy_key)
+                    continue
                 inserted = store.insert_event(
                     record,
                     record_kind="activity",
                     source="legacy_jsonl",
-                    legacy_key=f"activity:{path.name}:{line_number}",
+                    legacy_key=legacy_key,
                 )
                 counts["activity"] += int(inserted)
+                store.mark_import(legacy_key)
 
     for path in sorted(log_dir.glob("hue_changes_*.jsonl")):
         with store.connection:
