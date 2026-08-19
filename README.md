@@ -1,26 +1,27 @@
 # mcp-servers
 
-Standalone MCP servers deployed to Proxmox LXCs with systemd.
-
-The former Knowledge MCP/API/database stack has been retired. This repository
-keeps only the active non-Knowledge MCP services.
+Standalone account and home-control MCP servers deployed to LXC 117 with
+systemd.
 
 ## Layout
 
 ```text
 servers/          MCP server modules
 shared/           Shared helpers
-deploy/           Systemd and deploy scripts
 tests/            Focused service tests
 ```
 
-## CT 110
+## Production services
 
 | Server | Port | Unit |
 |---|---:|---|
-| `web_search` | 9016 | `mcp-server@web_search` |
-
-Private/account/home-control services are managed separately on CT 117.
+| `calendar` | 9004 | `mcp-server@calendar` |
+| `gmail` | 9005 | `mcp-server@gmail` |
+| `gdrive` | 9006 | `mcp-server@gdrive` |
+| `monarch` | 9008 | `mcp-server@monarch` |
+| `spotify` | 9010 | `mcp-server@spotify` |
+| `tv` | 9013 | `mcp-server@tv` |
+| `hue` | 9015 | `mcp-server@hue` |
 
 ## Local Setup
 
@@ -29,27 +30,5 @@ uv sync --extra all --extra dev
 uv run pytest
 ```
 
-## Deploy
-
-Remote deploy through the Proxmox tunnel:
-
-```bash
-./deploy/deploy.sh --tunnel web_search
-```
-
-Check live status:
-
-```bash
-./deploy/deploy.sh --tunnel --status
-```
-
-The deploy script commits and pushes local changes unless `--no-push` is
-provided, resets `/opt/mcp-servers` to `origin/main`, restarts the requested
-systemd units, and refreshes backend MCP discovery.
-
-## Retired Knowledge Stack
-
-Do not restore the old `servers/knowledge`, `servers/knowledge_admin`,
-`servers/knowledge_api.py`, Knowledge systemd units, maintenance/wiki backup
-jobs, SQLite database, or Knowledge Qdrant collections unless Jack asks for a
-new replacement system.
+Production deployment and verification are defined by the `mcp-accounts`
+entry in `../NETWORK/deploy/registry.yml`.
