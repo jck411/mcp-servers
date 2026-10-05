@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 load_mcp_env() {
-    local repo_dir="${1:-/opt/mcp-servers}"
+    local repo_dir="${1:-/opt/mcp-accounts}"
     local env_file line key value
     for env_file in "${repo_dir}/.env" "${repo_dir}/.env.network" "${repo_dir}/.env.config"; do
         [[ -f "$env_file" ]] || continue

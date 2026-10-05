@@ -12,10 +12,11 @@ unless Jack explicitly asks for a new replacement system.
 - Use this repository as source of truth; see README.md for the verified live
   target and preserve its private state and uncommitted work.
 - Commit the matching repo change immediately after any live hotfix.
-- Commit and push verified changes before authorized deployment. The legacy
-  `deploy/deploy.sh` is not a deployment procedure for the current workload;
-  do not run it until its target and destructive behavior are reconciled through
-  a reviewed, scoped deployment plan. See README.md for the boundary.
+- Commit and push verified changes before authorized deployment.
+  `deploy/deploy.sh` supports only explicit read-only CT117 dry-run/preflight;
+  it has no apply mode. Follow README.md's scoped source-rollout gates before
+  a separately authorized live deployment. Existing dirty/private guest state
+  blocks rollout and must be preserved; bootstrap remains disabled.
 
 ## Decommissioned Knowledge Stack
 
