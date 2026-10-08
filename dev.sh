@@ -24,6 +24,7 @@ declare -A PORTS=(
     [spotify]=9010
     [tv]=9013
     [hue]=9015
+    [web_search]=9016
 )
 
 RED='\033[0;31m'
